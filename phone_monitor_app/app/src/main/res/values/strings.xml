@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Phone Monitor</string>
+    <string name="accessibility_description">Log phone actions and perform monitored taps/swipes by coordinate for Click Live workflows.</string>
+</resources>

@@ -1,0 +1,30 @@
+# Secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Runtime data
+server/telegram_bot/data/*.sqlite3*
+server/telegram_bot/data/message_queue.json
+server/telegram_bot/data/telegram_web_profile/
+phone_autoclicker/events.log
+phone_autoclicker/scrcpy.log
+phone_autoclicker/config.json
+
+# Android/Gradle
+.gradle/
+build/
+**/build/
+local.properties
+*.apk
+*.aab
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

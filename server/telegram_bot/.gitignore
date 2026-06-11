@@ -1,0 +1,12 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Runtime data
+data/
+*.db
+*.sqlite
+*.sqlite3
