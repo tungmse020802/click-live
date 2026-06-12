@@ -310,10 +310,15 @@ def _as_tuple(value: Any) -> Tuple[str, ...]:
     if value in (None, ""):
         return ()
     if isinstance(value, str):
-        return tuple(item.strip() for item in value.split(",") if item.strip())
+        return tuple(item for item in (_clean_keyword(item) for item in value.split(",")) if item)
     if isinstance(value, list):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    return (str(value).strip(),)
+        return tuple(item for item in (_clean_keyword(item) for item in value) if item)
+    cleaned = _clean_keyword(value)
+    return (cleaned,) if cleaned else ()
+
+
+def _clean_keyword(value: Any) -> str:
+    return str(value).strip().strip("'\"").strip()
 
 
 def _first_present(raw_rule: Dict[str, Any], *keys: str) -> Any:

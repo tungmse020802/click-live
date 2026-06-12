@@ -892,6 +892,8 @@ FILTERS_HTML = r"""<!doctype html>
     .country-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#3a414b; }
     .country-empty { padding:12px 10px; color:var(--muted); font-size:13px; }
     .status { min-height:34px; display:flex; align-items:center; padding:0 10px; border:1px solid var(--border); border-radius:6px; color:var(--muted); background:#fbfcfd; font-size:13px; }
+    .hint { color:var(--muted); font-size:12px; line-height:1.45; margin-top:6px; }
+    .sample { grid-column:1 / -1; border:1px solid var(--border); border-radius:6px; background:#111827; color:#d1d5db; padding:12px; white-space:pre-wrap; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; line-height:1.45; }
     @media (max-width:920px) { .topbar{align-items:flex-start; flex-direction:column; padding:12px;} .main{grid-template-columns:1fr;} .list-pane{max-height:40vh; border-right:0; border-bottom:1px solid var(--border);} .form-grid{grid-template-columns:repeat(2,minmax(0,1fr));} .field.wide{grid-column:1 / -1;} }
   </style>
 </head>
@@ -920,11 +922,7 @@ FILTERS_HTML = r"""<!doctype html>
           <div class="field wide"><label for="nameInput">Name</label><input id="nameInput" autocomplete="off"></div>
           <div class="field"><label for="priorityInput">Priority</label><input id="priorityInput" type="number" min="0" step="1"></div>
           <div class="field"><label class="checkline"><input id="enabledInput" type="checkbox"> Enabled</label></div>
-          <div class="field wide"><label for="boxesInput">BOX Exact</label><input id="boxesInput" autocomplete="off" placeholder="100/25,50/1"></div>
-          <div class="field"><label for="minBox1Input">Min BOX Value 1</label><input id="minBox1Input" type="number" min="0" step="1"></div>
-          <div class="field"><label for="maxBox1Input">Max BOX Value 1</label><input id="maxBox1Input" type="number" min="0" step="1"></div>
-          <div class="field"><label for="minBox2Input">Min BOX Value 2</label><input id="minBox2Input" type="number" min="0" step="1"></div>
-          <div class="field"><label for="maxBox2Input">Max BOX Value 2</label><input id="maxBox2Input" type="number" min="0" step="1"></div>
+          <div class="field wide"><label for="boxesInput">BOX Min</label><input id="boxesInput" autocomplete="off" placeholder="100/25"><div class="hint">Nhập 100/25 nghĩa là lấy BOX có giá trị 1 &gt;= 100 và giá trị 2 &gt;= 25.</div></div>
           <div class="field wide">
             <label for="countryComboButton">Countries</label>
             <div id="countryCombo" class="combo">
@@ -934,18 +932,22 @@ FILTERS_HTML = r"""<!doctype html>
               </button>
               <div id="countryMenu" class="combo-menu">
                 <input id="countrySearchInput" class="combo-search" autocomplete="off" placeholder="Search country or code">
+                <label class="country-row"><input id="allCountriesInput" type="checkbox"><span class="country-code">ALL</span><span class="country-name">Tất cả quốc gia</span></label>
                 <div id="countryList" class="country-list" role="listbox" aria-multiselectable="true"></div>
               </div>
             </div>
           </div>
           <div class="field wide"><label for="badgesInput">Badges</label><input id="badgesInput" autocomplete="off" placeholder="💎,🏅"></div>
-          <div class="field"><label for="minRateInput">Min Rate</label><input id="minRateInput" type="number" min="0" step="0.01"></div>
-          <div class="field"><label for="maxRateInput">Max Rate</label><input id="maxRateInput" type="number" min="0" step="0.01"></div>
-          <div class="field"><label for="minViewsInput">Min Views</label><input id="minViewsInput" type="number" min="0" step="1"></div>
-          <div class="field"><label for="maxViewsInput">Max Views</label><input id="maxViewsInput" type="number" min="0" step="1"></div>
-          <div class="field wide"><label for="noteInput">Note Contains</label><textarea id="noteInput"></textarea></div>
-          <div class="field wide"><label for="textInput">Text Contains</label><textarea id="textInput"></textarea></div>
-          <div class="field full"><label for="regexInput">Text Regex</label><input id="regexInput" autocomplete="off"></div>
+          <div class="field"><label for="minRateInput">Min Rate</label><input id="minRateInput" type="number" min="0" step="0.01"><div class="hint">Lấy Rate &gt;= giá trị nhập.</div></div>
+          <div class="field"><label for="minViewsInput">Min Views</label><input id="minViewsInput" type="number" min="0" step="1"><div class="hint">Lấy Views &gt;= giá trị nhập.</div></div>
+          <div class="field wide"><label for="noteInput">Note Contains</label><textarea id="noteInput" placeholder='"Rương treo", "ABC", "CDE"'></textarea><div class="hint">Có thể nhập nhiều từ khoá: "ABC", "CDE". So sánh không phân biệt hoa/thường.</div></div>
+          <div class="sample">Mẫu tin nhắn:
+🎁 BOX: 100/25 💎 🏅 🇰🇷
+📈 Rate : 5.5
+👀 12
+📝 Rương treo ít view
+
+Form trên sẽ hiểu: BOX value 1 = 100, BOX value 2 = 25, country = KR, badges = 💎 🏅, rate = 5.5, views = 12, note = Rương treo ít view.</div>
         </div>
       </section>
     </main>
@@ -953,14 +955,21 @@ FILTERS_HTML = r"""<!doctype html>
   <script>
     const state = { filters: [], selected: 0, path: '' };
     const $ = (id) => document.getElementById(id);
-    const els = { path:$('filterPath'), list:$('filterList'), status:$('status'), title:$('editorTitle'), name:$('nameInput'), priority:$('priorityInput'), enabled:$('enabledInput'), boxes:$('boxesInput'), minBox1:$('minBox1Input'), maxBox1:$('maxBox1Input'), minBox2:$('minBox2Input'), maxBox2:$('maxBox2Input'), countryCombo:$('countryCombo'), countryButton:$('countryComboButton'), countrySummary:$('countriesSummary'), countrySearch:$('countrySearchInput'), countryList:$('countryList'), badges:$('badgesInput'), minRate:$('minRateInput'), maxRate:$('maxRateInput'), minViews:$('minViewsInput'), maxViews:$('maxViewsInput'), note:$('noteInput'), text:$('textInput'), regex:$('regexInput') };
+    const els = { path:$('filterPath'), list:$('filterList'), status:$('status'), title:$('editorTitle'), name:$('nameInput'), priority:$('priorityInput'), enabled:$('enabledInput'), boxes:$('boxesInput'), countryCombo:$('countryCombo'), countryButton:$('countryComboButton'), countrySummary:$('countriesSummary'), countrySearch:$('countrySearchInput'), countryList:$('countryList'), badges:$('badgesInput'), minRate:$('minRateInput'), minViews:$('minViewsInput'), note:$('noteInput'), allCountries:$('allCountriesInput') };
     const COUNTRY_CODES = 'AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW'.split(' ');
     const regionNames = typeof Intl !== 'undefined' && Intl.DisplayNames ? new Intl.DisplayNames([navigator.language || 'en'], { type:'region' }) : null;
     const COUNTRY_OPTIONS = COUNTRY_CODES.map((code) => ({ code, name: countryName(code), flag: flagFromCode(code) })).sort((a,b) => a.name.localeCompare(b.name) || a.code.localeCompare(b.code));
     const COUNTRY_ORDER = new Map(COUNTRY_OPTIONS.map((item,index) => [item.code, index]));
     function esc(value) { return String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
     function toCsv(value) { return Array.isArray(value) ? value.join(',') : String(value ?? ''); }
-    function fromCsv(value) { return String(value || '').split(',').map((item) => item.trim()).filter(Boolean); }
+    function cleanKeyword(value) { return String(value || '').trim().replace(/^[\'\"]+|[\'\"]+$/g, '').trim(); }
+    function fromCsv(value) { return String(value || '').split(',').map(cleanKeyword).filter(Boolean); }
+    function parseBoxMin(value) {
+      const text = String(value || '').trim();
+      if (!text) return null;
+      const match = text.match(/^(\d+)\s*\/\s*(\d+)$/);
+      return match ? { left:Number(match[1]), right:Number(match[2]), label:`${match[1]}/${match[2]}` } : null;
+    }
     function optionalNumber(value) { return value === '' ? undefined : Number(value); }
     function optionalText(value) { const text = String(value || '').trim(); return text ? text : undefined; }
     function countryName(code) { try { return regionNames?.of(code) || code; } catch { return code; } }
@@ -983,30 +992,29 @@ FILTERS_HTML = r"""<!doctype html>
       filter.name = els.name.value.trim() || `filter_${state.selected + 1}`;
       filter.enabled = els.enabled.checked;
       filter.priority = optionalNumber(els.priority.value);
-      filter.boxes = fromCsv(els.boxes.value);
-      filter.min_box1 = optionalNumber(els.minBox1.value);
-      filter.max_box1 = optionalNumber(els.maxBox1.value);
-      filter.min_box2 = optionalNumber(els.minBox2.value);
-      filter.max_box2 = optionalNumber(els.maxBox2.value);
+      const boxMin = parseBoxMin(els.boxes.value);
+      filter.boxes = [];
+      filter.min_box1 = boxMin ? boxMin.left : undefined;
+      filter.min_box2 = boxMin ? boxMin.right : undefined;
+      delete filter.max_box1;
+      delete filter.max_box2;
       filter.countries = sortCountries(filter.countries);
       filter.badges = fromCsv(els.badges.value);
       filter.min_rate = optionalNumber(els.minRate.value);
-      filter.max_rate = optionalNumber(els.maxRate.value);
+      delete filter.max_rate;
       filter.min_views = optionalNumber(els.minViews.value);
-      filter.max_views = optionalNumber(els.maxViews.value);
+      delete filter.max_views;
       filter.note_contains = fromCsv(els.note.value);
-      filter.text_contains = fromCsv(els.text.value);
-      filter.text_regex = optionalText(els.regex.value);
+      filter.text_contains = [];
+      filter.text_regex = undefined;
       compactFilter(filter);
     }
     function renderList() {
       els.list.innerHTML = state.filters.map((filter,index) => {
         const selected = index === state.selected ? 'selected' : '';
         const enabled = filter.enabled !== false;
-        const boxValue1 = [filter.min_box1 ?? '', filter.max_box1 ?? ''].some((value) => String(value).length > 0) ? `${filter.min_box1 ?? 'min'}-${filter.max_box1 ?? 'max'}` : '';
-        const boxValue2 = [filter.min_box2 ?? '', filter.max_box2 ?? ''].some((value) => String(value).length > 0) ? `${filter.min_box2 ?? 'min'}-${filter.max_box2 ?? 'max'}` : '';
-        const boxRange = boxValue1 || boxValue2 ? `box:${boxValue1 || '*'} / ${boxValue2 || '*'}` : '';
-        const meta = [toCsv(filter.boxes), boxRange, toCsv(filter.countries), filter.priority !== undefined ? `p${filter.priority}` : ''].filter(Boolean).join(' | ');
+        const boxMin = filter.min_box1 !== undefined || filter.min_box2 !== undefined ? `box>=${filter.min_box1 ?? 0}/${filter.min_box2 ?? 0}` : toCsv(filter.boxes);
+        const meta = [boxMin, toCsv(filter.countries) || 'all countries', filter.min_rate !== undefined ? `rate>=${filter.min_rate}` : '', filter.min_views !== undefined ? `views>=${filter.min_views}` : '', filter.priority !== undefined ? `p${filter.priority}` : ''].filter(Boolean).join(' | ');
         return `<li class="filter-row ${selected}" data-index="${index}"><div><div class="filter-name">${esc(filter.name || `filter_${index + 1}`)}</div><div class="filter-meta">${esc(meta || 'empty')}</div></div><span class="pill ${enabled ? 'on' : 'off'}">${enabled ? 'on' : 'off'}</span></li>`;
       }).join('');
       els.list.querySelectorAll('.filter-row').forEach((row) => row.addEventListener('click', () => { syncFormToFilter(); state.selected = Number(row.dataset.index); render(); }));
@@ -1018,7 +1026,7 @@ FILTERS_HTML = r"""<!doctype html>
       }
       const selected = sortCountries(filter.countries);
       if (!selected.length) {
-        els.countrySummary.textContent = 'Any country';
+        els.countrySummary.textContent = 'All countries';
         return;
       }
       const preview = selected.slice(0, 6).join(', ');
@@ -1048,19 +1056,20 @@ FILTERS_HTML = r"""<!doctype html>
       }
       updateCountrySummary(filter);
       renderCountryList(filter);
+      if (els.allCountries) els.allCountries.checked = !sortCountries(filter?.countries).length;
     }
     function renderForm() {
       const filter = currentFilter();
       document.querySelectorAll('input, textarea').forEach((node) => node.disabled = !filter);
       els.title.textContent = filter ? (filter.name || `Filter #${state.selected + 1}`) : 'Filter';
       els.name.value = filter?.name || ''; els.priority.value = filter?.priority ?? ''; els.enabled.checked = filter ? filter.enabled !== false : false;
-      els.boxes.value = toCsv(filter?.boxes); els.minBox1.value = filter?.min_box1 ?? ''; els.maxBox1.value = filter?.max_box1 ?? ''; els.minBox2.value = filter?.min_box2 ?? ''; els.maxBox2.value = filter?.max_box2 ?? ''; els.badges.value = toCsv(filter?.badges);
-      els.minRate.value = filter?.min_rate ?? ''; els.maxRate.value = filter?.max_rate ?? ''; els.minViews.value = filter?.min_views ?? ''; els.maxViews.value = filter?.max_views ?? '';
-      els.note.value = toCsv(filter?.note_contains); els.text.value = toCsv(filter?.text_contains); els.regex.value = filter?.text_regex || '';
+      els.boxes.value = filter?.min_box1 !== undefined || filter?.min_box2 !== undefined ? `${filter.min_box1 ?? 0}/${filter.min_box2 ?? 0}` : (Array.isArray(filter?.boxes) ? (filter.boxes[0] || '') : String(filter?.boxes || '')); els.badges.value = toCsv(filter?.badges);
+      els.minRate.value = filter?.min_rate ?? ''; els.minViews.value = filter?.min_views ?? '';
+      els.note.value = toCsv(filter?.note_contains);
       renderCountryCombo(filter);
     }
     function render() { renderList(); renderForm(); }
-    function newFilter() { return { name:`filter_${state.filters.length + 1}`, enabled:true, priority:100, boxes:[], countries:[], badges:[] }; }
+    function newFilter() { return { name:`filter_${state.filters.length + 1}`, enabled:true, priority:100, min_box1:100, min_box2:25, countries:[], badges:[] }; }
     async function loadFilters() {
       const res = await fetch('/api/filters?_=' + Date.now(), { cache:'no-store' });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -1088,6 +1097,7 @@ FILTERS_HTML = r"""<!doctype html>
       if (open) { els.countrySearch.focus(); renderCountryList(currentFilter()); }
     });
     els.countrySearch.addEventListener('input', () => renderCountryList(currentFilter()));
+    els.allCountries.addEventListener('change', () => { const filter = currentFilter(); if (!filter) return; if (els.allCountries.checked) filter.countries = []; updateCountrySummary(filter); renderCountryList(filter); renderList(); });
     els.countryList.addEventListener('change', (event) => {
       const checkbox = event.target.closest('input[type="checkbox"][data-code]');
       const filter = currentFilter();

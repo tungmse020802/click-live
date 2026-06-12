@@ -19,6 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 DEFAULT_LOG_PATH = BASE_DIR / "events.log"
 DEFAULT_SCRCPY_LOG_PATH = BASE_DIR / "scrcpy.log"
+DEFAULT_CAPTURE_DIR = BASE_DIR / "captures"
 LOG_LIMIT = 300
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -114,6 +115,15 @@ HTML = r"""<!doctype html>
     .screen-empty { padding:18px; color:#d1d5db; text-align:center; font-size:13px; line-height:1.45; }
     .screen-stage.has-image .screen-empty { display:none; }
     .screen-tools { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:10px; }
+    .tabs { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+    .tab { border:1px solid var(--border); background:#fff; color:var(--text); border-radius:999px; padding:8px 13px; cursor:pointer; font-weight:700; }
+    .tab.active { background:var(--dark); color:#fff; border-color:var(--dark); }
+    .view { display:none; }
+    .view.active { display:block; }
+    .capture-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:12px; }
+    .capture-card { border:1px solid var(--border); border-radius:6px; background:#fff; overflow:hidden; }
+    .capture-card img { width:100%; display:block; background:#111827; }
+    .capture-meta { padding:8px 10px; color:var(--muted); font-size:12px; line-height:1.35; word-break:break-all; }
     .direct-grid { display:grid; grid-template-columns:1fr auto; gap:10px; align-items:end; }
     .tap-info { min-height:28px; display:flex; align-items:center; color:var(--muted); font-size:13px; }
     .small-input { width:92px; }
@@ -173,6 +183,11 @@ HTML = r"""<!doctype html>
         </section>
       </aside>
       <section class="work">
+        <div class="tabs">
+          <button id="controlTab" class="tab active" data-view="controlView">Điều khiển</button>
+          <button id="capturesTab" class="tab" data-view="capturesView">Màn hình đã capture</button>
+        </div>
+        <div id="controlView" class="view active">
         <section class="section">
           <div class="actions-head">
             <h2>Live Control</h2>
@@ -224,18 +239,32 @@ HTML = r"""<!doctype html>
           <h2>Logs</h2>
           <div id="logBox" class="log"></div>
         </section>
+        </div>
+        <div id="capturesView" class="view">
+          <section class="section">
+            <div class="actions-head">
+              <h2>Saved Captures</h2>
+              <div class="action-tools">
+                <button id="captureNowBtn" class="button primary">Capture now</button>
+                <button id="refreshCapturesBtn" class="button light">Refresh Captures</button>
+              </div>
+            </div>
+            <div id="captureList" class="capture-grid"></div>
+          </section>
+        </div>
       </section>
     </main>
   </div>
   <script>
-    const state = { config:null, status:null, logs:[], streamTimer:null };
+    const state = { config:null, status:null, logs:[], captures:[], streamTimer:null };
     const $ = (id) => document.getElementById(id);
     const els = {
       path:$('configPath'), adb:$('adbValue'), device:$('deviceValue'), screen:$('screenValue'), runner:$('runnerValue'),
       adbPath:$('adbPathInput'), deviceSelect:$('deviceSelect'), deviceList:$('deviceList'), startup:$('startupDelayInput'),
       interval:$('intervalInput'), repeat:$('repeatCountInput'), forever:$('foreverInput'), dryRun:$('dryRunInput'),
       raw:$('rawConfig'), actions:$('actionList'), logs:$('logBox'), screenStage:$('screenStage'), screenImage:$('screenImage'),
-      tapInfo:$('tapInfo'), stream:$('streamInput'), streamInterval:$('streamIntervalInput'), deeplink:$('deeplinkInput')
+      tapInfo:$('tapInfo'), stream:$('streamInput'), streamInterval:$('streamIntervalInput'), deeplink:$('deeplinkInput'),
+      captureList:$('captureList')
     };
     function esc(value) { return String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
     function numberValue(value, fallback=0) { const n = Number(value); return Number.isFinite(n) ? n : fallback; }
@@ -331,6 +360,17 @@ HTML = r"""<!doctype html>
       els.logs.textContent = (state.logs || []).map((item) => `[${item.time}] ${item.message}`).join('\n');
       els.logs.scrollTop = els.logs.scrollHeight;
     }
+    function renderCaptures() {
+      const captures = state.captures || [];
+      if (!captures.length) {
+        els.captureList.innerHTML = '<div class="screen-empty" style="background:#111827;border-radius:6px;">Chưa có ảnh capture. Mở deeplink hoặc bấm Capture now để lưu ảnh.</div>';
+        return;
+      }
+      els.captureList.innerHTML = captures.map((item) => `<a class="capture-card" href="${esc(item.url)}" target="_blank" rel="noreferrer">
+        <img src="${esc(item.url)}" alt="${esc(item.filename)}" loading="lazy">
+        <div class="capture-meta"><strong>${esc(item.created_at)}</strong><br>${esc(item.filename)}<br>${esc(item.size)} bytes</div>
+      </a>`).join('');
+    }
     function renderAll() { renderSettings(); renderActions(); renderStatus(); renderLogs(); }
     async function api(path, options={}) {
       const res = await fetch(path, options);
@@ -348,6 +388,18 @@ HTML = r"""<!doctype html>
       state.logs = (await api('/api/logs')).logs;
       renderStatus();
       renderLogs();
+    }
+    async function refreshCaptures() {
+      state.captures = (await api('/api/captures')).captures;
+      renderCaptures();
+    }
+    async function saveCapture(source='manual') {
+      syncSettings();
+      const data = await api('/api/capture', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ config:state.config, source }) });
+      state.captures = data.captures || state.captures;
+      renderCaptures();
+      els.tapInfo.textContent = `Saved capture ${data.capture?.filename || ''}`;
+      return data.capture;
     }
     async function saveConfig() {
       syncSettings();
@@ -431,7 +483,9 @@ HTML = r"""<!doctype html>
         body:JSON.stringify({ config:state.config, url:els.deeplink.value.trim() })
       });
       await refreshStatus();
-      if (els.stream.checked) setTimeout(refreshSnapshot, 700);
+      setTimeout(() => {
+        saveCapture('deeplink').then(() => refreshSnapshot()).catch((err) => els.tapInfo.textContent = err.message);
+      }, 1000);
     }
     document.querySelectorAll('[data-add]').forEach((button) => button.addEventListener('click', () => {
       syncSettings();
@@ -474,6 +528,13 @@ HTML = r"""<!doctype html>
     });
     $('snapshotBtn').addEventListener('click', () => refreshSnapshot().catch((err) => els.tapInfo.textContent = err.message));
     $('downloadLogsBtn').addEventListener('click', () => { window.location.href = '/api/logs.txt'; });
+    $('captureNowBtn').addEventListener('click', () => saveCapture('manual').catch((err) => els.tapInfo.textContent = err.message));
+    $('refreshCapturesBtn').addEventListener('click', () => refreshCaptures().catch((err) => els.tapInfo.textContent = err.message));
+    document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach((tab) => tab.classList.toggle('active', tab === button));
+      document.querySelectorAll('.view').forEach((view) => view.classList.toggle('active', view.id === button.dataset.view));
+      if (button.dataset.view === 'capturesView') refreshCaptures().catch((err) => els.tapInfo.textContent = err.message);
+    }));
     $('backBtn').addEventListener('click', () => directKey('BACK').catch((err) => els.tapInfo.textContent = err.message));
     $('homeBtn').addEventListener('click', () => directKey('HOME').catch((err) => els.tapInfo.textContent = err.message));
     $('recentsBtn').addEventListener('click', () => directKey('APP_SWITCH').catch((err) => els.tapInfo.textContent = err.message));
@@ -491,7 +552,9 @@ HTML = r"""<!doctype html>
     (async function init() {
       await loadConfig();
       await refreshStatus();
+      await refreshCaptures().catch(() => {});
       renderAll();
+      renderCaptures();
       refreshSnapshot().catch(() => {});
       setInterval(() => refreshStatus().catch(() => {}), 1500);
     })().catch((err) => alert(err.message));
@@ -809,6 +872,20 @@ class AutoClickerApp:
         self.log.add(f"Config saved {self.config_path}")
         return normalized
 
+    def save_capture(self, config: Dict[str, Any], source: str = "manual") -> Dict[str, Any]:
+        DEFAULT_CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+        safe_source = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in source)[:32] or "manual"
+        filename = f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-{safe_source}.png"
+        path = DEFAULT_CAPTURE_DIR / filename
+        data = self.adb.screencap(config)
+        path.write_bytes(data)
+        self.log.add(f"capture saved {path.name}")
+        return capture_info(path)
+
+    def captures(self) -> List[Dict[str, Any]]:
+        DEFAULT_CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+        return [capture_info(path) for path in sorted(DEFAULT_CAPTURE_DIR.glob("*.png"), key=lambda item: item.stat().st_mtime, reverse=True)]
+
     def status(self, config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         config = config or self.load_config()
         adb_path = self.adb.resolve_adb(config)
@@ -821,6 +898,16 @@ class AutoClickerApp:
             "screen_size": self.adb.screen_size(config) if active_device else None,
             "runner": self.runner.status(),
         }
+
+
+def capture_info(path: Path) -> Dict[str, Any]:
+    stat = path.stat()
+    return {
+        "filename": path.name,
+        "url": f"/captures/{path.name}",
+        "size": stat.st_size,
+        "created_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
 
 def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -887,6 +974,15 @@ def text_response(
     handler.end_headers()
     handler.wfile.write(body)
 
+def binary_response(handler: BaseHTTPRequestHandler, body: bytes, content_type: str) -> None:
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store, no-cache, max-age=0")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def png_response(handler: BaseHTTPRequestHandler, body: bytes) -> None:
     handler.send_response(200)
     handler.send_header("Content-Type", "image/png")
@@ -920,11 +1016,22 @@ def make_handler(app: AutoClickerApp):
                 if parsed.path == "/api/logs":
                     json_response(self, {"logs": app.log.snapshot()})
                     return
+                if parsed.path == "/api/captures":
+                    json_response(self, {"captures": app.captures()})
+                    return
                 if parsed.path == "/api/logs.txt":
                     text_response(self, app.log.text(), filename="phone-autoclicker.log")
                     return
                 if parsed.path == "/api/screenshot":
                     png_response(self, app.adb.screencap(app.load_config()))
+                    return
+                if parsed.path.startswith("/captures/"):
+                    filename = Path(parsed.path).name
+                    path = DEFAULT_CAPTURE_DIR / filename
+                    if not path.exists() or path.suffix.lower() != ".png":
+                        json_response(self, {"error": "Capture not found"}, status=404)
+                        return
+                    binary_response(self, path.read_bytes(), "image/png")
                     return
                 json_response(self, {"error": "Not found"}, status=404)
             except Exception as exc:
@@ -967,6 +1074,11 @@ def make_handler(app: AutoClickerApp):
                     config = normalize_config(payload.get("config") or app.load_config())
                     output = app.adb.open_deeplink(config, str(payload.get("url") or ""))
                     json_response(self, {"ok": True, "output": output, "status": app.status(config)})
+                    return
+                if parsed.path == "/api/capture":
+                    config = normalize_config(payload.get("config") or app.load_config())
+                    capture = app.save_capture(config, str(payload.get("source") or "manual"))
+                    json_response(self, {"ok": True, "capture": capture, "captures": app.captures()})
                     return
                 json_response(self, {"error": "Not found"}, status=404)
             except RuntimeError as exc:
