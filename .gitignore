@@ -12,6 +12,7 @@ venv/
 server/telegram_bot/data/*.sqlite3*
 server/telegram_bot/data/message_queue.json
 server/telegram_bot/data/telegram_web_profile/
+server/data
 phone_autoclicker/events.log
 phone_autoclicker/scrcpy.log
 phone_autoclicker/config.json
@@ -28,3 +29,4 @@ local.properties
 .DS_Store
 .vscode/
 .idea/
+

@@ -1228,6 +1228,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_headers("application/json; charset=utf-8", 0)
             return
 
+        if parsed.path == "/events":
+            self._send_headers("text/event-stream; charset=utf-8", 0)
+            return
+
         if parsed.path == "/api/filters":
             self._send_headers("application/json; charset=utf-8", 0)
             return
@@ -1262,6 +1266,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/queue":
             self._send_json(self._queue_snapshot(parse_qs(parsed.query)))
+            return
+
+        if parsed.path == "/events":
+            self._send_events(parse_qs(parsed.query))
             return
 
         if parsed.path == "/api/filters":
@@ -1306,7 +1314,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         logger.debug("%s - %s", self.client_address[0], fmt % args)
 
     def _phone_next_job(self, query: Dict[str, List[str]]) -> Dict[str, object]:
-        after_id = _int_query(query, "after_id", 0)
+        after_id = _non_negative_int_query(query, "after_id", 0, max_value=None)
         items = self.db.get_queue_items(limit=_int_query(query, "limit", 50), statuses=["pending"])
         for item in items:
             if int(item.get("id") or 0) <= after_id:
@@ -1326,6 +1334,57 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                 if job:
                     return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": job}
         return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": None}
+
+    def _send_events(self, query: Dict[str, List[str]]) -> None:
+        after_id = (
+            _non_negative_int_query(query, "after_id", 0, max_value=None)
+            if "after_id" in query
+            else _latest_phone_job_id(self.db, _int_query(query, "limit", 50))
+        )
+        poll_seconds = _float_query(query, "poll", 0.5, 0.1, 10.0)
+        limit = _int_query(query, "limit", 50)
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        self._write_sse_comment("connected")
+        logger.info("SSE client connected address=%s after_id=%s", self.client_address[0], after_id)
+
+        last_keepalive = time.time()
+        while True:
+            try:
+                job = _next_phone_job(self.db, after_id=after_id, limit=limit)
+                if job:
+                    after_id = int(job.get("id") or after_id)
+                    self._write_sse_event("link", {
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                        "job": job,
+                        "id": job.get("id"),
+                        "url": job.get("url"),
+                        "link": job.get("url"),
+                    }, event_id=str(after_id))
+                    last_keepalive = time.time()
+                    continue
+
+                now = time.time()
+                if now - last_keepalive >= 15:
+                    self._write_sse_comment("keepalive")
+                    last_keepalive = now
+                time.sleep(poll_seconds)
+            except (BrokenPipeError, ConnectionResetError):
+                logger.info("SSE client disconnected address=%s", self.client_address[0])
+                return
+            except Exception as exc:
+                logger.exception("SSE stream failed")
+                try:
+                    self._write_sse_event("error", {"error": str(exc)})
+                except Exception:
+                    return
+                time.sleep(poll_seconds)
 
     def _phone_job_result(self) -> None:
         try:
@@ -1443,6 +1502,20 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         self._send_headers("application/json; charset=utf-8", len(body), status=status)
         self.wfile.write(body)
 
+    def _write_sse_event(self, event: str, payload: Dict[str, object], event_id: Optional[str] = None) -> None:
+        if event_id:
+            self.wfile.write(f"id: {event_id}\n".encode("utf-8"))
+        self.wfile.write(f"event: {event}\n".encode("utf-8"))
+        data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        for line in data.splitlines() or [""]:
+            self.wfile.write(f"data: {line}\n".encode("utf-8"))
+        self.wfile.write(b"\n")
+        self.wfile.flush()
+
+    def _write_sse_comment(self, message: str) -> None:
+        self.wfile.write(f": {message}\n\n".encode("utf-8"))
+        self.wfile.flush()
+
     def _send_headers(self, content_type: str, content_length: int, status: int = 200) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -1467,6 +1540,27 @@ def _phone_config() -> Dict[str, object]:
         "auto_open": True,
         "auto_tap_requires_accessibility": True,
     }
+
+
+def _next_phone_job(db: ChatDatabase, after_id: int, limit: int) -> Optional[Dict[str, object]]:
+    items = db.get_queue_items(limit=limit, statuses=["pending"])
+    for item in reversed(items):
+        if int(item.get("id") or 0) <= after_id:
+            continue
+        job = _phone_job_from_queue_item(item)
+        if job:
+            return job
+    return None
+
+
+def _latest_phone_job_id(db: ChatDatabase, limit: int) -> int:
+    items = db.get_queue_items(limit=limit, statuses=["pending"])
+    ids = [
+        int(item.get("id") or 0)
+        for item in items
+        if _phone_job_from_queue_item(item)
+    ]
+    return max(ids) if ids else 0
 
 
 def _extract_link_from_item(item: Dict[str, Any]) -> str:
@@ -1598,6 +1692,38 @@ def _int_query(query: Dict[str, List[str]], key: str, default: int) -> int:
     except ValueError:
         return default
     return max(1, min(value, 5000))
+
+
+def _non_negative_int_query(
+    query: Dict[str, List[str]],
+    key: str,
+    default: int,
+    max_value: Optional[int] = 5000,
+) -> int:
+    raw_value = (query.get(key) or [""])[0]
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    value = max(0, value)
+    if max_value is None:
+        return value
+    return min(value, max_value)
+
+
+def _float_query(
+    query: Dict[str, List[str]],
+    key: str,
+    default: float,
+    min_value: float,
+    max_value: float,
+) -> float:
+    raw_value = (query.get(key) or [""])[0]
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return default
+    return max(min_value, min(value, max_value))
 
 
 def _statuses_query(query: Dict[str, List[str]]) -> List[str]:
