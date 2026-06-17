@@ -33,6 +33,7 @@ local.properties
 ios_wda_controller/captures/
 ios_wda_controller/debug_crops/
 ios_wda_controller/treasure_debug_*.json
+ios_wda_controller/node_modules/
 
 # Electron build output
 wda_control_panel/dist/
