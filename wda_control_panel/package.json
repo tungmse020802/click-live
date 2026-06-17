@@ -6,8 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "fetch:go-ios": "node scripts/fetch-go-ios.js",
-    "start": "cross-env ELECTRON_RUN_AS_NODE= electron .",
-    "dev": "cross-env ELECTRON_RUN_AS_NODE= electron .",
+    "start": "electron .",
+    "dev": "electron .",
     "check": "node --check src/main.js && node --check src/preload.js && node --check src/fleet-agent.js && node --check src/wda-launcher.js && node --check src/macos-launcher.js && node --check src/automation-worker.js && node --check src/device-store.js && node --check src/renderer.js && node --check src/paths.js && node --check src/setup-helper.js && node --check scripts/fetch-go-ios.js",
     "prebuild:mac": "npm run fetch:go-ios",
     "prebuild:win": "npm run fetch:go-ios",
