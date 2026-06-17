@@ -12,10 +12,13 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 from config import QueueUiConfig, load_queue_ui_config
-from db import ChatDatabase
+from db import ChatDatabase, QueueJob
 
 
 logger = logging.getLogger(__name__)
+
+PHONE_SCREENSHOT_DIR = Path(__file__).resolve().parent / "data" / "phone_screenshots"
+PHONE_SCREENSHOT_MAX_BYTES = 15 * 1024 * 1024
 
 
 HTML = r"""<!doctype html>
@@ -454,6 +457,7 @@ HTML = r"""<!doctype html>
         <button id="reloadBtn" class="button" title="Reload" aria-label="Reload">R</button>
         <button id="filtersBtn" class="button" title="Filters" aria-label="Filters">Filters</button>
         <button id="phoneBtn" class="button" title="Phone Monitor" aria-label="Phone Monitor">Phone</button>
+        <button id="nextPhoneBtn" class="button primary" title="Send newest pending job to phone" aria-label="Next queue message">Next queue message</button>
         <span id="liveStatus" class="live-status">Starting...</span>
       </div>
     </header>
@@ -670,6 +674,21 @@ HTML = r"""<!doctype html>
       };
     }
 
+    async function sendNewestToPhone() {
+      if (!state.items.length) await loadQueue();
+      const pending = state.items.filter((item) => item.status === 'pending').sort((a,b) => Number(b.id || 0) - Number(a.id || 0));
+      const item = pending[0];
+      if (!item) {
+        els.liveStatus.textContent = 'No pending queue message';
+        return;
+      }
+      state.selectedId = item.id;
+      renderRows();
+      renderDetail();
+      await sendSelectedToPhone();
+      els.liveStatus.textContent = `Sent newest pending job #${item.id} to phone`;
+    }
+
     async function sendSelectedToPhone() {
       const item = state.items.find((value) => value.id === state.selectedId);
       if (!item) return;
@@ -817,6 +836,9 @@ HTML = r"""<!doctype html>
     });
     document.getElementById('phoneBtn').addEventListener('click', () => {
       window.location.href = '/phone-monitor';
+    });
+    document.getElementById('nextPhoneBtn').addEventListener('click', () => {
+      sendNewestToPhone().catch((err) => { els.liveStatus.textContent = `Next error: ${err.message}`; });
     });
     els.auto.addEventListener('change', schedule);
     els.status.addEventListener('change', loadQueue);
@@ -1240,6 +1262,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_headers("application/json; charset=utf-8", 0)
             return
 
+        if parsed.path.startswith("/api/phone/screenshots/"):
+            self._send_phone_screenshot(parsed.path, head_only=True)
+            return
+
         if parsed.path == "/api/phone/adb-devices":
             self._send_headers("application/json; charset=utf-8", 0)
             return
@@ -1276,6 +1302,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_json(self._phone_next_job(parse_qs(parsed.query)))
             return
 
+        if parsed.path.startswith("/api/phone/screenshots/"):
+            self._send_phone_screenshot(parsed.path)
+            return
+
         if parsed.path == "/api/phone/adb-devices":
             self._send_json(_adb_devices())
             return
@@ -1292,6 +1322,14 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._phone_job_result()
             return
 
+        if parsed.path == "/api/queue/mark-done":
+            self._queue_mark_done()
+            return
+
+        if parsed.path == "/api/phone/screenshot":
+            self._phone_screenshot_upload()
+            return
+
         if parsed.path == "/api/phone/adb-open":
             self._adb_open_link()
             return
@@ -1306,35 +1344,138 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         logger.debug("%s - %s", self.client_address[0], fmt % args)
 
     def _phone_next_job(self, query: Dict[str, List[str]]) -> Dict[str, object]:
-        after_id = _int_query(query, "after_id", 0)
-        items = self.db.get_queue_items(limit=_int_query(query, "limit", 50), statuses=["pending"])
-        for item in items:
-            if int(item.get("id") or 0) <= after_id:
-                continue
-            job = _phone_job_from_queue_item(item)
+        after_id = non_negative_int((query.get("after_id") or ["0"])[0], 0)
+        device_id = str((query.get("device_id") or ["phone"])[0] or "phone")
+        claimed = self.db.claim_next_after(device_id, self.config.queue_lease_seconds, after_id)
+        if claimed:
+            job = _phone_job_from_claimed_job(claimed)
             if job:
                 return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": job}
+            self.db.mark_job_done(claimed.id, f"{device_id}: unsupported phone job")
         wait_seconds = min(_int_query(query, "wait", 0), 25)
         deadline = time.time() + wait_seconds
         while wait_seconds > 0 and time.time() < deadline:
             time.sleep(1)
-            items = self.db.get_queue_items(limit=_int_query(query, "limit", 50), statuses=["pending"])
-            for item in items:
-                if int(item.get("id") or 0) <= after_id:
-                    continue
-                job = _phone_job_from_queue_item(item)
+            claimed = self.db.claim_next_after(device_id, self.config.queue_lease_seconds, after_id)
+            if claimed:
+                job = _phone_job_from_claimed_job(claimed)
                 if job:
                     return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": job}
+                self.db.mark_job_done(claimed.id, f"{device_id}: unsupported phone job")
         return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": None}
 
     def _phone_job_result(self) -> None:
         try:
             payload = self._read_json_body()
+            job_id = non_negative_int(payload.get("job_id"), 0)
+            status = str(payload.get("status") or "")
+            device_id = str(payload.get("device_id") or "phone")
+            error = str(payload.get("error") or "")
+            done_statuses = {"done", "after_tap_screenshot_uploaded", "after_open_tap_screenshot_uploaded"}
+            terminal_skip_statuses = {
+                "client_filter_skipped",
+                "deeplink_open_failed_next_task",
+                "deeplink_not_in_tiktok_next_task",
+                "open_deadline_missed",
+                "open_time_missing",
+                "time_window_skipped",
+                "treasure_not_found",
+                "treasure_not_found_next_task",
+                "treasure_scan_skipped_next_task",
+            }
+            progress_statuses = {
+                "opened",
+                "waiting_time_window",
+                "treasure_detected_tapped",
+                "treasure_tapped",
+                "treasure_scan_screenshot_uploaded",
+                "open_button_tapped",
+                "after_open_tap_screenshot_uploaded",
+                "screenshot_uploaded",
+            }
+            if job_id > 0 and status in done_statuses:
+                self.db.mark_job_done(job_id, f"{device_id}: {status} {error}".strip())
+            elif job_id > 0 and status in terminal_skip_statuses:
+                self.db.mark_job_done(job_id, f"{device_id}: {status} {error}".strip())
+            elif job_id > 0 and status == "failed":
+                self.db.fail_job(job_id, device_id, error or status, self.config.queue_retry_delay_seconds)
+            elif job_id > 0 and status in progress_statuses:
+                self.db.renew_job_lease(job_id, device_id, self.config.queue_lease_seconds)
             logger.info("Phone job result: %s", payload)
         except Exception as exc:
             self._send_json({"error": str(exc)}, status=400)
             return
         self._send_json({"ok": True, "generated_at": datetime.now(timezone.utc).isoformat()})
+
+    def _queue_mark_done(self) -> None:
+        try:
+            payload = self._read_json_body()
+            job_id = non_negative_int(payload.get("job_id"), 0)
+            if job_id <= 0:
+                raise ValueError("job_id is required")
+            ok = self.db.mark_job_done(job_id, str(payload.get("note") or "manual"))
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json({"ok": ok, "job_id": job_id, "generated_at": datetime.now(timezone.utc).isoformat()})
+
+    def _phone_screenshot_upload(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > PHONE_SCREENSHOT_MAX_BYTES:
+                raise ValueError("Invalid screenshot size")
+
+            content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            extensions = {"image/jpeg": "jpg", "image/png": "png"}
+            extension = extensions.get(content_type)
+            if extension is None:
+                raise ValueError("Content-Type must be image/jpeg or image/png")
+
+            job_id = non_negative_int(self.headers.get("X-Job-ID"), 0)
+            device_id = re.sub(r"[^a-zA-Z0-9_-]+", "-", self.headers.get("X-Device-ID", "iphone")).strip("-")
+            device_id = device_id[:40] or "iphone"
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            filename = f"job-{job_id}_{device_id}_{timestamp}.{extension}"
+
+            PHONE_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+            image_data = self.rfile.read(length)
+            if len(image_data) != length:
+                raise ValueError("Incomplete screenshot body")
+            path = PHONE_SCREENSHOT_DIR / filename
+            path.write_bytes(image_data)
+            logger.info("Saved phone screenshot: %s", path)
+        except Exception as exc:
+            logger.exception("Failed to save phone screenshot")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        self._send_json(
+            {
+                "ok": True,
+                "job_id": job_id,
+                "filename": filename,
+                "url": f"/api/phone/screenshots/{filename}",
+                "size": length,
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    def _send_phone_screenshot(self, request_path: str, head_only: bool = False) -> None:
+        filename = request_path.rsplit("/", 1)[-1]
+        if not re.fullmatch(r"[a-zA-Z0-9_.-]+", filename):
+            self.send_error(404)
+            return
+
+        path = PHONE_SCREENSHOT_DIR / filename
+        if not path.is_file():
+            self.send_error(404)
+            return
+
+        content_type = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+        body = path.read_bytes()
+        self._send_headers(content_type, len(body))
+        if not head_only:
+            self.wfile.write(body)
 
     def _queue_snapshot(self, query: Dict[str, List[str]]) -> Dict[str, object]:
         requested_limit = _int_query(query, "limit", self.config.limit)
@@ -1458,6 +1599,13 @@ def _latest_pending_id(items: List[Dict[str, Any]]) -> int:
     return max(pending_ids) if pending_ids else 0
 
 
+def non_negative_int(value: Any, default: int = 0) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def _phone_config() -> Dict[str, object]:
     return {
         "poll_seconds": 0,
@@ -1503,8 +1651,13 @@ def _extract_time_from_item(item: Dict[str, Any]) -> Dict[str, object]:
         match = re.search(r"TIME\s*[:：]\s*([^\n\r]+)", text, re.I) or re.search(r"(\d{1,2}:\d{2}\s*s?\s*-\s*\d{1,2}:\d{2}:\d{2})", text, re.I) or re.search(r"(\d{1,2}:\d{2}\s*s?)", text, re.I)
         if match:
             label = match.group(1).strip()
-            return {"label": label, "click_after_ms": _parse_time_delay_ms(label)}
-    return {"label": "", "click_after_ms": 0}
+            target_match = re.search(r"-\s*(\d{1,2}:\d{2}:\d{2})", label)
+            return {
+                "label": label,
+                "click_after_ms": _parse_time_delay_ms(label),
+                "target_time_hhmmss": target_match.group(1).strip() if target_match else "",
+            }
+    return {"label": "", "click_after_ms": 0, "target_time_hhmmss": ""}
 
 
 def _phone_job_from_queue_item(item: Dict[str, Any]) -> Optional[Dict[str, object]]:
@@ -1518,11 +1671,22 @@ def _phone_job_from_queue_item(item: Dict[str, Any]) -> Optional[Dict[str, objec
         "url": url,
         "time": time_meta["label"],
         "click_after_ms": time_meta["click_after_ms"],
+        "target_time_hhmmss": time_meta.get("target_time_hhmmss", ""),
         "click_x": config["click_x"],
         "click_y": config["click_y"],
         "message": (item.get("message") or {}).get("text", ""),
         "payload": item.get("payload") or {},
     }
+
+
+def _phone_job_from_claimed_job(claimed: QueueJob) -> Optional[Dict[str, object]]:
+    item = {
+        "id": claimed.id,
+        "payload": claimed.payload,
+        "message": {"text": claimed.message_text},
+        "room": {"chat_id": claimed.room_chat_id},
+    }
+    return _phone_job_from_queue_item(item)
 
 
 def _adb_path() -> str:

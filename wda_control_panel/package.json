@@ -1,0 +1,25 @@
+{
+  "name": "wda-control-panel",
+  "version": "0.1.0",
+  "description": "All-in-one Windows panel for managing 20+ iPhones via bundled go-ios + WebDriverAgent.",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "fetch:go-ios": "node scripts/fetch-go-ios.js",
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "dev": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/fleet-agent.js && node --check src/wda-launcher.js && node --check src/macos-launcher.js && node --check src/automation-worker.js && node --check src/device-store.js && node --check src/renderer.js && node --check src/paths.js && node --check src/setup-helper.js && node --check scripts/fetch-go-ios.js",
+    "prebuild:mac": "npm run fetch:go-ios",
+    "prebuild:win": "npm run fetch:go-ios",
+    "build:mac": "electron-builder --mac --config electron-builder.json",
+    "build:win": "electron-builder --win --config electron-builder.json",
+    "build": "npm run fetch:go-ios && electron-builder --mac --win --config electron-builder.json"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  }
+}

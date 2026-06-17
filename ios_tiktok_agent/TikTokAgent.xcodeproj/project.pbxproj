@@ -1,0 +1,198 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 77;
+	objects = {
+		B10000000000000000000001 = { isa = PBXBuildFile; fileRef = C10000000000000000000001; };
+		B10000000000000000000002 = { isa = PBXBuildFile; fileRef = C10000000000000000000002; };
+		B10000000000000000000003 = { isa = PBXBuildFile; fileRef = C10000000000000000000003; };
+		B10000000000000000000004 = { isa = PBXBuildFile; fileRef = C10000000000000000000004; };
+		B10000000000000000000005 = { isa = PBXBuildFile; fileRef = C10000000000000000000005; };
+		B10000000000000000000006 = { isa = PBXBuildFile; fileRef = C10000000000000000000006; };
+		B10000000000000000000007 = { isa = PBXBuildFile; fileRef = C10000000000000000000007; };
+		C10000000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokAgentApp.swift; sourceTree = "<group>"; };
+		C10000000000000000000002 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentState.swift; sourceTree = "<group>"; };
+		C10000000000000000000003 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionMatcher.swift; sourceTree = "<group>"; };
+		C10000000000000000000004 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentViewModel.swift; sourceTree = "<group>"; };
+		C10000000000000000000005 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		C10000000000000000000006 = { isa = PBXFileReference; lastKnownFileType = image.png; path = treasure_box_no_timer.png; sourceTree = "<group>"; };
+		C10000000000000000000007 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueueClient.swift; sourceTree = "<group>"; };
+		C10000000000000000000008 = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10000000000000000000001 = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2650;
+				LastUpgradeCheck = 2650;
+				TargetAttributes = {
+					A10000000000000000000002 = { CreatedOnToolsVersion = 26.5; };
+				};
+			};
+			buildConfigurationList = A10000000000000000000010;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = A10000000000000000000003;
+			productRefGroup = A10000000000000000000004;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (A10000000000000000000002);
+		};
+		A10000000000000000000002 = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000011;
+			buildPhases = (
+				A10000000000000000000005,
+				A10000000000000000000006,
+				A10000000000000000000007,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = TikTokAgent;
+			packageProductDependencies = ();
+			productName = TikTokAgent;
+			productReference = A10000000000000000000008;
+			productType = "com.apple.product-type.application";
+		};
+		A10000000000000000000003 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000009,
+				A10000000000000000000004,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000004 = {
+			isa = PBXGroup;
+			children = (A10000000000000000000008);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000005 = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000001,
+				B10000000000000000000002,
+				B10000000000000000000003,
+				B10000000000000000000004,
+				B10000000000000000000005,
+				B10000000000000000000007,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000006 = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000007 = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (B10000000000000000000006);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000008 = {
+			isa = PBXFileReference;
+			explicitFileType = wrapper.application;
+			includeInIndex = 0;
+			path = TikTokAgent.app;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
+		A10000000000000000000009 = {
+			isa = PBXGroup;
+			children = (
+				C10000000000000000000001,
+				C10000000000000000000002,
+				C10000000000000000000003,
+				C10000000000000000000004,
+				C10000000000000000000005,
+				C10000000000000000000006,
+				C10000000000000000000007,
+				C10000000000000000000008,
+			);
+			path = TikTokAgent;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000010 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000012,
+				A10000000000000000000013,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000011 = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000014,
+				A10000000000000000000015,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000012 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		A10000000000000000000013 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		A10000000000000000000014 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TikTokAgent/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.clicklive.tiktokagent;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A10000000000000000000015 = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TikTokAgent/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.clicklive.tiktokagent;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+	};
+	rootObject = A10000000000000000000001;
+}

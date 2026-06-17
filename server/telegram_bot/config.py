@@ -39,12 +39,15 @@ class WebReaderConfig:
     db_path: str
     queue_default_priority: int
     queue_max_attempts: int
+    queue_max_items: int
     telegram_web_url: str
     telegram_web_profile_dir: str
     telegram_web_headless: bool
     telegram_web_targets: List[TelegramWebTarget]
     telegram_web_poll_interval_seconds: float
+    telegram_web_reload_seconds: int
     telegram_web_message_scan_limit: int
+    telegram_web_queue_max_age_seconds: int
     telegram_web_enqueue: bool
     telegram_web_skip_existing_on_start: bool
     telegram_web_include_outgoing: bool
@@ -72,6 +75,8 @@ class QueueUiConfig:
     port: int
     limit: int
     refresh_seconds: float
+    queue_lease_seconds: int
+    queue_retry_delay_seconds: int
     filter_config_path: str
 
 
@@ -219,12 +224,13 @@ def load_web_reader_config() -> WebReaderConfig:
         db_path=_resolve_path(os.environ.get("BOT_DB_PATH", ""), "data/chatbot.sqlite3"),
         queue_default_priority=_parse_int("BOT_QUEUE_DEFAULT_PRIORITY", 100, 0),
         queue_max_attempts=_parse_int("BOT_QUEUE_MAX_ATTEMPTS", 5, 1),
+        queue_max_items=_parse_int("BOT_QUEUE_MAX_ITEMS", 1000, 100),
         telegram_web_url=telegram_web_url,
         telegram_web_profile_dir=_resolve_path(
             os.environ.get("TELEGRAM_WEB_PROFILE_DIR", ""),
             "data/telegram_web_profile",
         ),
-        telegram_web_headless=_parse_bool(os.environ.get("TELEGRAM_WEB_HEADLESS", ""), False),
+        telegram_web_headless=_parse_bool(os.environ.get("TELEGRAM_WEB_HEADLESS", ""), True),
         telegram_web_targets=_parse_web_targets(
             os.environ.get("TELEGRAM_WEB_TARGETS", ""),
             telegram_web_url,
@@ -234,11 +240,21 @@ def load_web_reader_config() -> WebReaderConfig:
             0.2,
             0.05,
         ),
+        telegram_web_reload_seconds=_parse_int(
+            "TELEGRAM_WEB_RELOAD_SECONDS",
+            900,
+            60,
+        ),
         telegram_web_message_scan_limit=_parse_int("TELEGRAM_WEB_MESSAGE_SCAN_LIMIT", 30, 1),
+        telegram_web_queue_max_age_seconds=_parse_int(
+            "TELEGRAM_WEB_QUEUE_MAX_AGE_SECONDS",
+            300,
+            1,
+        ),
         telegram_web_enqueue=_parse_bool(os.environ.get("TELEGRAM_WEB_ENQUEUE", ""), True),
         telegram_web_skip_existing_on_start=_parse_bool(
             os.environ.get("TELEGRAM_WEB_SKIP_EXISTING_ON_START", ""),
-            True,
+            False,
         ),
         telegram_web_include_outgoing=_parse_bool(
             os.environ.get("TELEGRAM_WEB_INCLUDE_OUTGOING", ""),
@@ -287,6 +303,8 @@ def load_queue_ui_config() -> QueueUiConfig:
         port=_parse_int("QUEUE_UI_PORT", 8787, 1),
         limit=_parse_int("QUEUE_UI_LIMIT", 100, 1),
         refresh_seconds=_parse_float("QUEUE_UI_REFRESH_SECONDS", 0.5, 0.2),
+        queue_lease_seconds=_parse_int("BOT_QUEUE_LEASE_SECONDS", 90, 1),
+        queue_retry_delay_seconds=_parse_int("BOT_QUEUE_RETRY_DELAY_SECONDS", 2, 0),
         filter_config_path=_resolve_path(
             os.environ.get("TELEGRAM_WEB_FILTER_CONFIG_PATH", ""),
             "data/message_filters.json",

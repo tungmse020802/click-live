@@ -39,6 +39,7 @@ class ChatDatabase:
 
     def init_schema(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS chat_rooms (
@@ -109,6 +110,12 @@ class ChatDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_message_queue_locked
                     ON message_queue(status, locked_until);
+
+                CREATE INDEX IF NOT EXISTS idx_message_queue_created
+                    ON message_queue(created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_message_queue_status_created
+                    ON message_queue(status, created_at DESC);
                 """
             )
 
@@ -294,6 +301,69 @@ class ChatDatabase:
         finally:
             conn.close()
 
+    def claim_next_after(self, consumer_id: str, lease_seconds: int, after_id: int = 0) -> Optional[QueueJob]:
+        now = _now()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            self._release_expired_jobs(conn, now)
+
+            row = conn.execute(
+                """
+                SELECT id
+                FROM message_queue
+                WHERE status = 'pending'
+                    AND available_at <= ?
+                    AND id > ?
+                ORDER BY priority DESC, created_at DESC
+                LIMIT 1
+                """,
+                (now, after_id),
+            ).fetchone()
+            if not row:
+                conn.commit()
+                return None
+
+            job_id = int(row["id"])
+            locked_until = now + lease_seconds
+            conn.execute(
+                """
+                UPDATE message_queue
+                SET status = 'processing',
+                    locked_by = ?,
+                    locked_until = ?,
+                    attempts = attempts + 1,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (consumer_id, locked_until, now, job_id),
+            )
+
+            job_row = self._fetch_job_row(conn, job_id)
+            conn.commit()
+            return _row_to_job(job_row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def renew_job_lease(self, job_id: int, consumer_id: str, lease_seconds: int) -> bool:
+        now = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE message_queue
+                SET locked_until = ?,
+                    updated_at = ?
+                WHERE id = ?
+                    AND status = 'processing'
+                    AND locked_by = ?
+                """,
+                (now + lease_seconds, now, job_id, consumer_id),
+            )
+            return cursor.rowcount == 1
+
     def is_job_lock_valid(self, job_id: int, consumer_id: str) -> bool:
         now = _now()
         with self._connect() as conn:
@@ -309,6 +379,24 @@ class ChatDatabase:
                 (job_id, consumer_id, now),
             ).fetchone()
             return row is not None
+
+    def mark_job_done(self, job_id: int, note: str = "") -> bool:
+        now = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE message_queue
+                SET status = 'done',
+                    completed_at = ?,
+                    updated_at = ?,
+                    locked_by = NULL,
+                    locked_until = NULL,
+                    last_error = ?
+                WHERE id = ?
+                """,
+                (now, now, _truncate(note, 1000) if note else None, job_id),
+            )
+            return cursor.rowcount == 1
 
     def complete_job(self, job_id: int, consumer_id: str) -> bool:
         now = _now()
@@ -467,6 +555,65 @@ class ChatDatabase:
         now = _now()
         return [_row_to_queue_item(row, now) for row in rows]
 
+    def prune_queue(self, max_items: int) -> Dict[str, int]:
+        with self._connect() as conn:
+            queue_cursor = conn.execute(
+                """
+                DELETE FROM message_queue
+                WHERE status != 'processing'
+                  AND id NOT IN (
+                      SELECT id
+                      FROM message_queue
+                      ORDER BY id DESC
+                      LIMIT ?
+                  )
+                """,
+                (max_items,),
+            )
+            message_cursor = conn.execute(
+                """
+                DELETE FROM chat_messages
+                WHERE id NOT IN (
+                    SELECT message_id
+                    FROM message_queue
+                )
+                """
+            )
+            return {
+                "queue": queue_cursor.rowcount,
+                "messages": message_cursor.rowcount,
+            }
+
+    def prune_stale_telegram_pending(self, cutoff_timestamp_ms: int) -> Dict[str, int]:
+        with self._connect() as conn:
+            queue_cursor = conn.execute(
+                """
+                DELETE FROM message_queue
+                WHERE status = 'pending'
+                  AND json_extract(payload_json, '$.source') = 'telegram_web'
+                  AND (
+                    json_extract(payload_json, '$.telegram_timestamp_ms') IS NULL
+                    OR CAST(
+                      json_extract(payload_json, '$.telegram_timestamp_ms') AS INTEGER
+                    ) < ?
+                  )
+                """,
+                (cutoff_timestamp_ms,),
+            )
+            message_cursor = conn.execute(
+                """
+                DELETE FROM chat_messages
+                WHERE id NOT IN (
+                    SELECT message_id
+                    FROM message_queue
+                )
+                """
+            )
+            return {
+                "queue": queue_cursor.rowcount,
+                "messages": message_cursor.rowcount,
+            }
+
     def _release_expired_jobs(self, conn: sqlite3.Connection, now: float) -> int:
         cursor = conn.execute(
             """
@@ -511,7 +658,6 @@ class ChatDatabase:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 30000")
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
         return conn
 
 

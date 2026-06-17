@@ -187,13 +187,23 @@ Các biến quan trọng trong `.env`:
 ```env
 TELEGRAM_WEB_URL=https://web.telegram.org/k/
 TELEGRAM_WEB_PROFILE_DIR=data/telegram_web_profile
-TELEGRAM_WEB_HEADLESS=false
+TELEGRAM_WEB_HEADLESS=true
 TELEGRAM_WEB_ENQUEUE=true
+BOT_QUEUE_MAX_ITEMS=1000
+TELEGRAM_WEB_RELOAD_SECONDS=900
+TELEGRAM_WEB_QUEUE_MAX_AGE_SECONDS=300
+TELEGRAM_WEB_SKIP_EXISTING_ON_START=false
 QUEUE_UI_HOST=127.0.0.1
 QUEUE_UI_PORT=8787
 ```
 
 > Lưu ý: `TELEGRAM_WEB_PROFILE_DIR` là profile đăng nhập Telegram Web. Không nên commit/push thư mục này lên git vì có thể chứa session/cookie.
+
+`BOT_QUEUE_MAX_ITEMS` giới hạn số job mới nhất được giữ lại. Reader prune lúc
+khởi động và sau mỗi batch message mới. Telegram Web tự reload định kỳ theo
+`TELEGRAM_WEB_RELOAD_SECONDS` để phục hồi kết nối lâu ngày.
+`TELEGRAM_WEB_QUEUE_MAX_AGE_SECONDS` chỉ cho tin Telegram trong 5 phút gần
+nhất vào queue, tránh reload lại lịch sử cũ.
 
 ## 2. Chạy Queue UI
 
@@ -241,12 +251,15 @@ source .venv/bin/activate
 python3 telegram_web_reader.py
 ```
 
-Lần đầu chạy:
+Trên server, reader mặc định chạy headless và không cần GUI:
 
-1. Chromium sẽ mở Telegram Web.
-2. Đăng nhập Telegram.
-3. Profile đăng nhập được lưu ở `server/telegram_bot/data/telegram_web_profile/`.
-4. Các lần sau reader dùng lại profile này, không cần đăng nhập lại nếu session còn sống.
+1. Chuyển profile Telegram Web đã đăng nhập vào `server/telegram_bot/data/telegram_web_profile/`.
+2. Xóa các file khóa cũ bằng `rm -f data/telegram_web_profile/Singleton*`.
+3. Chạy reader với `TELEGRAM_WEB_HEADLESS=true`.
+4. Reader dùng lại profile này mà không mở cửa sổ Chromium nếu session còn sống.
+
+Nếu chưa có profile đăng nhập, chạy tạm với `TELEGRAM_WEB_HEADLESS=false` trên máy có
+GUI để đăng nhập, sau đó tắt Chromium hoàn toàn và chuyển profile lên server.
 
 Reader sẽ đọc Telegram Web và enqueue message vào queue nếu cấu hình `TELEGRAM_WEB_ENQUEUE=true`.
 

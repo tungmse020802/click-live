@@ -1,0 +1,26 @@
+{
+  "name": "ios_wda_controller",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "wda:build": "./build-wda.sh",
+    "wda:info": "./wda-profile-info.sh",
+    "wda:ipa": "./export-wda-ipa.sh",
+    "wda:install": "./install-wda-ipa.sh",
+    "start": "./run.sh",
+    "worker": "node worker.js",
+    "test": "node --check worker.js && node --check lib/timing.js && node --check lib/debug-mode.js && node test_worker.js && bash -n run.sh && bash -n build-wda.sh && bash -n wda-profile-info.sh && bash -n export-wda-ipa.sh && bash -n install-wda-ipa.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "appium": "^3.5.0",
+    "appium-xcuitest-driver": "^11.11.2"
+  },
+  "dependencies": {
+    "sharp": "^0.34.5"
+  }
+}
