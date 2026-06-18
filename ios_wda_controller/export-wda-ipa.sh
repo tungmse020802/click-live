@@ -18,11 +18,11 @@ codesign --verify --deep --strict "$APP"
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 mkdir -p "$STAGING/Payload" "$OUTPUT_DIR"
-ditto "$APP" "$STAGING/Payload/WebDriverAgentRunner-Runner.app"
+cp -R "$APP" "$STAGING/Payload/WebDriverAgentRunner-Runner.app"
 rm -f "$IPA"
 (
   cd "$STAGING"
-  ditto -c -k --sequesterRsrc --keepParent Payload "$IPA"
+  zip -qry "$IPA" Payload
 )
 
 echo "IPA created: $IPA"
