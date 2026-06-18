@@ -1141,6 +1141,43 @@ async function detectTreasureConfirmSheet(imagePath) {
   }
 }
 
+async function detectKeyboardOpen(imagePath) {
+  // Keyboard (including emoji keyboard) covers bottom ~40% with light gray/white uniform color.
+  // Distinguishable from confirm sheet: keyboard has no live video in top half (stream still visible).
+  try {
+    const source = sharp(imagePath).ensureAlpha();
+    const { data, info } = await source.raw().toBuffer({ resolveWithObject: true });
+    const w = Number(info.width || 0);
+    const h = Number(info.height || 0);
+    const ch = Number(info.channels || 4);
+    if (w <= 0 || h <= 0) return false;
+    // Bottom 40% should be very light (keyboard bg is #f0f0f0 or white).
+    const y0 = Math.floor(h * 0.60);
+    let lightPixels = 0, total = 0;
+    for (let y = y0; y < h; y += 4) {
+      for (let x = 0; x < w; x += 4) {
+        const i = (y * w + x) * ch;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        if (r >= 200 && g >= 200 && b >= 200) lightPixels++;
+        total++;
+      }
+    }
+    const bottomRatio = total > 0 ? lightPixels / total : 0;
+    // Top 40% should NOT be light (live video is dark).
+    let topLight = 0, topTotal = 0;
+    for (let y = 0; y < Math.floor(h * 0.40); y += 4) {
+      for (let x = 0; x < w; x += 4) {
+        const i = (y * w + x) * ch;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        if (r >= 200 && g >= 200 && b >= 200) topLight++;
+        topTotal++;
+      }
+    }
+    const topRatio = topTotal > 0 ? topLight / topTotal : 0;
+    return bottomRatio >= 0.70 && topRatio < 0.30;
+  } catch { return false; }
+}
+
 async function scanTreasure(jobId, options = {}) {
   const configuredDeadline = Date.now() + Math.max(0, config.treasureScanSeconds) * 1000;
   const deadline = Math.min(configuredDeadline, Number(options.deadlineAtMs || configuredDeadline));
@@ -1148,6 +1185,7 @@ async function scanTreasure(jobId, options = {}) {
   const minDetectAttempts = 2;
   let attempt = 0;
   let detectAttempt = 0;
+  let consecutiveFound = 0;  // must find treasure 2 times in a row before tapping
   let bestDetection = null;
   let bestShot = null;
   if (deadline <= Date.now()) {
@@ -1167,6 +1205,18 @@ async function scanTreasure(jobId, options = {}) {
       await tapAt(Math.round(w * 0.5), Math.round(h * 0.25));
       await cleanupCapture(fullShot);
       await sleep(400);
+      continue;
+    }
+    const keyboardOpen = await detectKeyboardOpen(fullShot.image);
+    if (keyboardOpen) {
+      console.log(`Job #${jobId}: keyboard detected, dismissing before scan`);
+      const rect = cachedViewportRect || {};
+      const w = Number(rect.width || 390);
+      const h = Number(rect.height || 844);
+      // Tap center of live video area to close keyboard
+      await tapAt(Math.round(w * 0.5), Math.round(h * 0.30));
+      await cleanupCapture(fullShot);
+      await sleep(500);
       continue;
     }
     await cleanupCapture(fullShot);
@@ -1214,14 +1264,23 @@ async function scanTreasure(jobId, options = {}) {
       detection,
     });
     if (!bestDetection || Number(detection?.score || 0) > Number(bestDetection?.score || 0)) {
+      if (bestShot && bestShot !== shot) await cleanupCapture(bestShot);
       bestDetection = detection;
       bestShot = shot;
     }
     if (detection?.found && detection.tap) {
+      consecutiveFound += 1;
+      console.log(`Job #${jobId}: treasure consecutive=${consecutiveFound}/2`);
+      if (consecutiveFound >= 2) {
+        return { detection, shot };
+      }
+      // Wait interval then scan again to confirm
+      if (config.treasureScanIntervalMs > 0) await sleep(config.treasureScanIntervalMs);
+      continue;
+    } else {
+      consecutiveFound = 0;
       await cleanupCapture(shot);
-      return { detection, shot };
     }
-    await cleanupCapture(shot);
     // Always retry at least minDetectAttempts times even if deadline passed.
     const pastDeadline = Date.now() >= deadline;
     if (pastDeadline && detectAttempt >= minDetectAttempts) break;
