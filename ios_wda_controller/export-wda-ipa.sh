@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="$ROOT_DIR/DerivedData/WDA/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app"
 OUTPUT_DIR="$ROOT_DIR/dist"
-IPA="$OUTPUT_DIR/WebDriverAgentRunner.ipa"
+UDID="${DEVICE_UDID:-unknown}"
+IPA="$OUTPUT_DIR/WebDriverAgentRunner-${UDID}.ipa"
 
 if [[ ! -d "$APP" ]]; then
   echo "Signed WDA app not found. Run: npm run wda:build" >&2
