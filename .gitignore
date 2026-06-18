@@ -9,6 +9,7 @@ __pycache__/
 venv/
 
 # Runtime data
+server/data/
 server/telegram_bot/data/*.sqlite3*
 server/telegram_bot/data/message_queue.json
 server/telegram_bot/data/telegram_web_profile/
