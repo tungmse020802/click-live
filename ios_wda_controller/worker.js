@@ -1191,6 +1191,8 @@ async function scanTreasure(jobId, options = {}) {
   if (deadline <= Date.now()) {
     return { detection: null, shot: null };
   }
+  // 2s initial settle — let TikTok live screen stabilize before first scan.
+  await sleep(2000);
   do {
     attempt += 1;
     // Detect and dismiss the "Mở Rương Báu" confirmation sheet before scanning.
@@ -1274,8 +1276,8 @@ async function scanTreasure(jobId, options = {}) {
       if (consecutiveFound >= 2) {
         return { detection, shot };
       }
-      // Wait interval then scan again to confirm
-      if (config.treasureScanIntervalMs > 0) await sleep(config.treasureScanIntervalMs);
+      // 2s settle between consecutive scans to confirm treasure is stable
+      await sleep(2000);
       continue;
     } else {
       consecutiveFound = 0;
