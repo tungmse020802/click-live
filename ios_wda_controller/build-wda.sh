@@ -12,6 +12,17 @@ if [[ -f config.env ]]; then
 fi
 
 : "${DEVICE_UDID:=00008030-000805902E3B802E}"
+
+# Check if the device is available, if not, try to find any connected device
+if ! xcrun xctrace list devices 2>/dev/null | grep -q "$DEVICE_UDID"; then
+  echo "Device $DEVICE_UDID not found or offline. Searching for any connected device..."
+  DETECTED_UDID=$("$ROOT_DIR/get-connected-device.sh")
+  if [[ -n "$DETECTED_UDID" ]]; then
+    echo "Found device: $DETECTED_UDID. Using it instead."
+    DEVICE_UDID="$DETECTED_UDID"
+  fi
+fi
+
 : "${DEVELOPMENT_TEAM:=827H4SVZSB}"
 : "${WDA_BUNDLE_ID:=com.tungld.clicklive.WebDriverAgentRunner}"
 
