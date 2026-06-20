@@ -414,10 +414,10 @@ async function activateApp(bundleId, label = bundleId) {
     try {
       await wda("POST", `/session/${sessionId}/wda/apps/activate`, { bundleId });
       console.log(`[DEEPLINK] activated ${label} via WDA`);
-      return;
     } catch (error) {
       console.log(`activate ${label} via WDA skipped: ${error.message}`);
     }
+    return;
   }
   try {
     await appium("POST", `/session/${sessionId}/execute/sync`, {
@@ -438,6 +438,7 @@ async function terminateApp(bundleId) {
       return true;
     } catch (error) {
       console.log(`[DEEPLINK] terminate ${bundleId} via WDA skipped: ${error.message}`);
+      return false;
     }
   }
   try {
@@ -492,19 +493,16 @@ async function dismissFloatingOverlay() {
 async function activeAppInfo() {
   if (!config.preferAppiumAppManagement) {
     try {
-      const response = await wda("GET", `/session/${sessionId}/wda/apps/list`);
-      const apps = Array.isArray(response.value) ? response.value : [];
-      const active = apps.find((app) => Number(app.pid || 0) > 0 && Number(app.state || 0) === 4)
-        || apps.find((app) => Number(app.pid || 0) > 0)
-        || {};
+      const response = await wda("GET", `/session/${sessionId}/wda/activeAppInfo`);
+      const val = response.value || {};
       return {
-        bundleId: active.bundleId || active.bundleID || active.bundle || "",
-        pid: active.pid,
-        name: active.name,
-        state: active.state,
+        bundleId: val.bundleId || val.bundleID || val.bundle || "",
+        pid: val.pid,
+        name: val.name,
+        state: val.state,
       };
     } catch (error) {
-      console.log(`active app list via WDA skipped: ${error.message}`);
+      console.log(`active app info via WDA skipped: ${error.message}`);
     }
   }
   try {
