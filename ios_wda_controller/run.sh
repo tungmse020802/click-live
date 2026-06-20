@@ -21,6 +21,17 @@ fi
 [[ -n "${USER_DEEPLINK_OPEN_MODE}" ]] && DEEPLINK_OPEN_MODE="$USER_DEEPLINK_OPEN_MODE"
 
 : "${DEVICE_UDID:=00008030-000805902E3B802E}"
+
+# Check if the device is available, if not, try to find any connected device
+if ! xcrun xctrace list devices 2>/dev/null | grep -q "$DEVICE_UDID"; then
+  echo "Device $DEVICE_UDID not found or offline. Searching for any connected device..."
+  DETECTED_UDID=$("$ROOT_DIR/get-connected-device.sh")
+  if [[ -n "$DETECTED_UDID" ]]; then
+    echo "Found device: $DETECTED_UDID. Using it instead."
+    DEVICE_UDID="$DETECTED_UDID"
+  fi
+fi
+
 : "${APPIUM_URL:=http://127.0.0.1:4723}"
 
 WDA_PROJECT="$ROOT_DIR/node_modules/appium-xcuitest-driver/node_modules/appium-webdriveragent/WebDriverAgent.xcodeproj"
