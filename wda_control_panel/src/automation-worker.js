@@ -7,16 +7,36 @@ const { spawn, spawnSync } = require("node:child_process");
 
 function detectPythonPath(preferred) {
   if (preferred) return preferred;
-  const candidates = os.platform() === "win32"
-    ? ["python", "python3"]
+
+  const isWin = os.platform() === "win32";
+  const candidates = isWin
+    ? [
+        "python",
+        "python3",
+        // Common Windows install paths when PATH alias is broken
+        `${process.env.LOCALAPPDATA || "C:\\Users\\User\\AppData\\Local"}\\Programs\\Python\\Python312\\python.exe`,
+        `${process.env.LOCALAPPDATA || "C:\\Users\\User\\AppData\\Local"}\\Programs\\Python\\Python311\\python.exe`,
+        `${process.env.LOCALAPPDATA || "C:\\Users\\User\\AppData\\Local"}\\Programs\\Python\\Python310\\python.exe`,
+        "C:\\Python312\\python.exe",
+        "C:\\Python311\\python.exe",
+        "C:\\Python310\\python.exe",
+      ]
     : ["python3", "python"];
+
   for (const cmd of candidates) {
     try {
-      const result = spawnSync(cmd, ["--version"], { encoding: "utf8", timeout: 3000 });
-      if (result.status === 0) return cmd;
+      const result = spawnSync(cmd, ["--version"], {
+        encoding: "utf8",
+        timeout: 3000,
+        // Prevent Windows Store alias from opening the Store UI
+        env: { ...process.env, PYTHONNOUSERSITE: "1" },
+      });
+      const output = (result.stdout || "") + (result.stderr || "");
+      // Windows Store alias exits 0 but prints nothing or "Python was not found"
+      if (result.status === 0 && /Python\s+3\.\d/i.test(output)) return cmd;
     } catch {}
   }
-  return candidates[0];
+  return isWin ? "python" : "python3";
 }
 
 const STATE = Object.freeze({
