@@ -1,8 +1,23 @@
 "use strict";
 
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
+
+function detectPythonPath(preferred) {
+  if (preferred) return preferred;
+  const candidates = os.platform() === "win32"
+    ? ["python", "python3"]
+    : ["python3", "python"];
+  for (const cmd of candidates) {
+    try {
+      const result = spawnSync(cmd, ["--version"], { encoding: "utf8", timeout: 3000 });
+      if (result.status === 0) return cmd;
+    } catch {}
+  }
+  return candidates[0];
+}
 
 const STATE = Object.freeze({
   IDLE: "idle",
@@ -99,6 +114,7 @@ class AutomationWorker {
       DEEPLINK_OPEN_MODE: controllerEnv.DEEPLINK_OPEN_MODE || "safari",
       DEEPLINK_FALLBACK_TO_URL: controllerEnv.DEEPLINK_FALLBACK_TO_URL || "false",
       DEEPLINK_REQUIRE_TIKTOK_FOREGROUND: controllerEnv.DEEPLINK_REQUIRE_TIKTOK_FOREGROUND || "true",
+      PREFER_APPIUM_APP_MANAGEMENT: controllerEnv.PREFER_APPIUM_APP_MANAGEMENT || "false",
       RUN_ONCE: "false",
       POLL_WAIT_SECONDS: String(this.settings.queuePollWaitSeconds || 25),
       LIVE_TIME_MIN_SECONDS: String(this.settings.liveTimeMinSeconds ?? 20),
@@ -110,7 +126,7 @@ class AutomationWorker {
       OPEN_TAP_REQUEST_LEAD_MS: String(this.settings.openTapRequestLeadMs ?? 2500),
       OPEN_TAP_TRANSPORT_COMPENSATION_MS: String(this.settings.openTapTransportCompensationMs ?? 200),
       OPEN_MAX_LATENESS_MS: String(this.settings.openMaxLatenessMs ?? 1500),
-      PYTHON_PATH: this.settings.pythonPath || controllerEnv.PYTHON_PATH || "python3",
+      PYTHON_PATH: detectPythonPath(this.settings.pythonPath || controllerEnv.PYTHON_PATH),
       ELECTRON_RUN_AS_NODE: "1",
     };
 
@@ -180,4 +196,4 @@ class AutomationWorker {
   }
 }
 
-module.exports = { AutomationWorker, STATE, DEFAULT_CONTROLLER_DIR, readEnvFile };
+module.exports = { AutomationWorker, STATE, DEFAULT_CONTROLLER_DIR, readEnvFile, detectPythonPath };

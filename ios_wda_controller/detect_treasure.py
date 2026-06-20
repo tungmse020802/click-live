@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import re
 from pathlib import Path
 
 
@@ -176,7 +177,7 @@ def main() -> None:
         cb = cc["box"]
         box = {"x": cb["x"], "y": cb["y"], "w": cb["w"], "h": cb["h"]}
         tap = cc["tap"]
-        ob = cc.get("object_box") or cb
+        ob = cc.get("object_box") or cb  # noqa: F841
         red_ratio = cc.get("red_ratio", red_ratio)
         warm_ratio = cc.get("warm_ratio", warm_ratio)
         color_valid = True
@@ -278,19 +279,55 @@ def detect_timer_label(cv2, image, box):
     label_w = min(width - label_x, box["w"] + pad_x * 2)
     label_h = min(height - label_y, max(28, int(box["h"] * 0.58)))
     if label_w <= 0 or label_h <= 0:
-        return {"found": False, "box": None, "white_ratio": 0.0}
+        return {"found": False, "box": None, "white_ratio": 0.0, "method": "invalid_roi"}
 
     label_roi = image[label_y:label_y + label_h, label_x:label_x + label_w]
     gray = cv2.cvtColor(label_roi, cv2.COLOR_BGR2GRAY)
     white = gray >= 178
     white_ratio = float(white.mean())
-    # Timer text is white digits/colon under the chest. We only need to know
-    # whether the label is visible; parsing exact OCR would add fragile deps.
-    found = white_ratio >= 0.025
+    heuristic_found = white_ratio >= 0.025
+    ocr = detect_timer_label_ocr(cv2, label_roi)
+    # Use OCR when available, but keep the white-pixel heuristic as a fallback.
+    found = bool(ocr["found"] or heuristic_found)
     return {
         "found": found,
         "box": {"x": label_x, "y": label_y, "w": label_w, "h": label_h},
         "white_ratio": round(white_ratio, 4),
+        "method": "ocr" if ocr["found"] else "heuristic",
+        "ocr": ocr,
+    }
+
+
+def detect_timer_label_ocr(cv2, label_roi):
+    try:
+        import pytesseract  # type: ignore
+        from PIL import Image  # type: ignore
+    except ImportError:
+        return {"available": False, "found": False, "text": "", "normalized": "", "error": "pytesseract_or_pillow_missing"}
+
+    if label_roi.size == 0:
+        return {"available": True, "found": False, "text": "", "normalized": "", "error": "empty_roi"}
+
+    gray = cv2.cvtColor(label_roi, cv2.COLOR_BGR2GRAY)
+    enlarged = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    _, thresh = cv2.threshold(enlarged, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    prepared = cv2.bitwise_not(thresh)
+
+    try:
+        text = pytesseract.image_to_string(
+            Image.fromarray(prepared),
+            config="--psm 7 -c tessedit_char_whitelist=0123456789:",
+        )
+    except Exception as error:
+        return {"available": True, "found": False, "text": "", "normalized": "", "error": str(error)}
+
+    normalized = re.sub(r"[^0-9:]", "", text or "")
+    found = bool(re.search(r"\d", normalized))
+    return {
+        "available": True,
+        "found": found,
+        "text": text.strip(),
+        "normalized": normalized,
     }
 
 

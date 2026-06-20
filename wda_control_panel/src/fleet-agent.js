@@ -8,6 +8,7 @@ const {
   STATE: WORKER_STATE,
   DEFAULT_CONTROLLER_DIR,
   readEnvFile,
+  detectPythonPath,
 } = require("./automation-worker");
 const {
   checkAppleMobileDeviceService,
@@ -810,7 +811,7 @@ class FleetAgent {
       OPEN_MAX_LATENESS_MS: String(config.openMaxLatenessMs ?? 1500),
       RUN_ONCE: "true",
       MANUAL_QUEUE_JOB_JSON: JSON.stringify(job),
-      PYTHON_PATH: config.pythonPath || controllerEnv.PYTHON_PATH || "python3",
+      PYTHON_PATH: detectPythonPath(config.pythonPath || controllerEnv.PYTHON_PATH),
       ELECTRON_RUN_AS_NODE: "1",
     };
 
