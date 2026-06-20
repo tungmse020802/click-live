@@ -1189,8 +1189,6 @@ async function scanTreasure(jobId, options = {}) {
   if (deadline <= Date.now()) {
     return { detection: null, shot: null };
   }
-  // 2s initial settle — let TikTok live screen stabilize before first scan.
-  await sleep(2000);
   do {
     attempt += 1;
     // Detect and dismiss the "Mở Rương Báu" confirmation sheet before scanning.
@@ -1274,8 +1272,8 @@ async function scanTreasure(jobId, options = {}) {
       if (consecutiveFound >= 2) {
         return { detection, shot };
       }
-      // 2s settle between consecutive scans to confirm treasure is stable
-      await sleep(2000);
+      // Short settle between consecutive scans to confirm treasure is stable
+      await sleep(500);
       continue;
     } else {
       consecutiveFound = 0;
@@ -1415,8 +1413,8 @@ async function processJob(job, allowSessionRetry = true) {
       const latestTreasureDoneAtMs = schedule
         ? schedule.targetAtMs - config.openTapRequestLeadMs - config.openSafetyReserveMs
         : Infinity;
-      // Spam scan until 4s before open timing — gives enough time for tap cluster.
-      const scanStopAtMs = schedule ? schedule.targetAtMs - 4000 : nowMs + config.treasureScanSeconds * 1000;
+      // Spam scan until 3s before open timing — gives enough time for tap cluster.
+      const scanStopAtMs = schedule ? schedule.targetAtMs - 3000 : nowMs + config.treasureScanSeconds * 1000;
       const treasureDeadlineAtMs = Math.min(
         nowMs + config.treasureScanSeconds * 1000,
         scanStopAtMs,
