@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">TikClaim</string>
+    <string name="accessibility_service_description">Cho phép TikClaim tự động click trong TikTok sau khi nhận link từ máy chủ.</string>
+</resources>
