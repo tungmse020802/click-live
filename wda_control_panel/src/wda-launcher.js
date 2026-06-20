@@ -335,13 +335,15 @@ class WdaLauncher {
     this.emit();
     const procs = [this.forwardProcess, this.runProcess].filter(Boolean);
     if (process.platform === "win32") {
-      // On Windows with shell:true, killing the shell doesn't kill ios.exe child.
-      // Use taskkill /F /T to forcefully kill the entire process tree.
       for (const proc of procs) {
         try {
           if (proc.pid) spawn("taskkill", ["/F", "/T", "/PID", String(proc.pid)], { shell: false, stdio: "ignore" });
         } catch {}
       }
+      // Kill any orphan ios.exe processes for this device's port
+      try {
+        spawn("taskkill", ["/F", "/IM", "ios.exe"], { shell: false, stdio: "ignore" });
+      } catch {}
       await new Promise((resolve) => setTimeout(resolve, 2000));
     } else {
       for (const proc of procs) {
@@ -350,6 +352,12 @@ class WdaLauncher {
       await new Promise((resolve) => setTimeout(resolve, 1200));
       for (const proc of procs) {
         try { if (!proc.killed) proc.kill("SIGKILL"); } catch {}
+      }
+      // Kill orphan xcodebuild processes for this device
+      if (this.device.udid) {
+        try {
+          spawn("pkill", ["-f", `xcodebuild.*${this.device.udid}`], { stdio: "ignore" });
+        } catch {}
       }
     }
     this.runProcess = null;
@@ -362,6 +370,33 @@ class WdaLauncher {
     return this.snapshot();
   }
 }
+
+// Kill all tracked WdaLauncher processes on app exit (SIGINT, SIGTERM, uncaught crash)
+const _globalLaunchers = new Set();
+
+const _exitHandler = () => {
+  for (const launcher of _globalLaunchers) {
+    const procs = [launcher.forwardProcess, launcher.runProcess].filter(Boolean);
+    if (process.platform === "win32") {
+      for (const proc of procs) {
+        try { if (proc.pid) spawn("taskkill", ["/F", "/T", "/PID", String(proc.pid)], { shell: false, stdio: "ignore" }); } catch {}
+      }
+    } else {
+      for (const proc of procs) {
+        try { proc.kill("SIGKILL"); } catch {}
+      }
+      // Kill all xcodebuild/WebDriverAgentRunner orphans on exit
+      try { spawn("pkill", ["-f", "xcodebuild.*WebDriverAgentRunner"], { stdio: "ignore" }); } catch {}
+    }
+  }
+};
+
+process.once("exit", _exitHandler);
+process.once("SIGINT", () => { _exitHandler(); process.exit(0); });
+process.once("SIGTERM", () => { _exitHandler(); process.exit(0); });
+
+WdaLauncher._register = function (launcher) { _globalLaunchers.add(launcher); };
+WdaLauncher._unregister = function (launcher) { _globalLaunchers.delete(launcher); };
 
 module.exports = {
   WdaLauncher,

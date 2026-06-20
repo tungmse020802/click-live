@@ -129,6 +129,7 @@ class FleetAgent {
       const match = config.devices.find((device) => device.deviceId === deviceId);
       if (!match || !match.enabled) {
         launcher.stop().catch(() => {});
+        WdaLauncher._unregister(launcher);
         this.stopAutomationWorker(deviceId).catch(() => {});
         this.launchers.delete(deviceId);
       }
@@ -139,12 +140,14 @@ class FleetAgent {
   makeLauncher(device, config) {
     const tool = config.launcherTool;
     const Launcher = tool === "macos" && process.platform === "darwin" ? MacosLauncher : WdaLauncher;
-    return new Launcher({
+    const launcher = new Launcher({
       device,
       settings: this.runtimeSettings(config),
       onState: () => this.emit(),
       onLog: (line) => this.onLog(line),
     });
+    WdaLauncher._register(launcher);
+    return launcher;
   }
 
   emit() {
@@ -418,6 +421,7 @@ class FleetAgent {
     const launcher = this.launchers.get(deviceId);
     await this.stopAutomationWorker(deviceId);
     if (!launcher) return null;
+    WdaLauncher._unregister(launcher);
     return launcher.stop();
   }
 
@@ -465,6 +469,7 @@ class FleetAgent {
     this.log(`Stopping all launchers (${this.launchers.size})`);
     await Promise.allSettled([...this.workers.keys()].map((deviceId) => this.stopAutomationWorker(deviceId)));
     const launchers = [...this.launchers.values()];
+    for (const launcher of launchers) WdaLauncher._unregister(launcher);
     await Promise.allSettled(launchers.map((launcher) => launcher.stop()));
   }
 
