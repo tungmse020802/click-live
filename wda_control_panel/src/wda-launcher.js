@@ -241,7 +241,7 @@ class WdaLauncher {
 
   async spawnPortForwardWithRetry(maxAttempts = 5, retryDelayMs = 2000) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const ready = await new Promise((resolve) => {
+      const result = await new Promise((resolve) => {
         const { command, args } = buildPortForwardCommand(this.tool, this.device, this.settings);
         if (attempt === 1) this.log(`spawn ${command} ${args.join(" ")}`);
         else this.log(`forward: retry attempt ${attempt}/${maxAttempts}`);
@@ -251,40 +251,48 @@ class WdaLauncher {
         });
         let outputBuf = "";
         let settled = false;
-        const settle = (ok) => { if (!settled) { settled = true; resolve(ok ? child : null); } };
+        // resolve({ child }) on success, resolve({ error }) on fatal, resolve(null) on retryable fail
+        const settle = (val) => { if (!settled) { settled = true; resolve(val); } };
 
-        child.stdout.on("data", (chunk) => {
+        const onData = (chunk) => {
           const text = String(chunk).trimEnd();
           this.log(`forward: ${text}`);
           outputBuf += text;
-          // go-ios prints "Start listening" before the bind error — wait for next output
-        });
-        child.stderr.on("data", (chunk) => {
-          const text = String(chunk).trimEnd();
-          this.log(`forward: ${text}`);
-          outputBuf += text;
-        });
+        };
+        child.stdout.on("data", onData);
+        child.stderr.on("data", onData);
         child.on("error", (error) => {
           this.log(`forward: error ${error.message}`);
-          settle(false);
+          settle(null);
         });
         child.on("close", (code) => {
           this.log(`forward exited code=${code}`);
-          if (code !== 0) { settle(false); return; }
-          settle(true);
+          if (code !== 0) {
+            // Device not found — no point retrying
+            if (outputBuf.includes("Device not found") || outputBuf.includes("not found")) {
+              settle({ error: `Device not found: ${this.device.udid}` });
+            } else {
+              settle(null);
+            }
+            return;
+          }
+          settle({ child });
         });
 
-        // If process is still running after 1.5s it means forward succeeded (didn't exit with error)
+        // Still running after 1.5s → forward is listening successfully
         setTimeout(() => {
-          if (!settled && !child.exitCode && child.exitCode !== 0) settle(true);
+          if (!settled && child.exitCode == null) settle({ child });
         }, 1500);
       });
 
-      if (ready) {
-        // Attach permanent handlers to the running child
-        this.forwardProcess = ready;
-        ready.on("close", (code) => {
-          if (this.forwardProcess !== ready) return;
+      if (result && result.error) {
+        throw new Error(result.error);
+      }
+
+      if (result && result.child) {
+        this.forwardProcess = result.child;
+        result.child.on("close", (code) => {
+          if (this.forwardProcess !== result.child) return;
           this.forwardProcess = null;
           if (this.state === STATE.RUNNING) {
             this.state = STATE.ERROR;
