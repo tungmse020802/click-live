@@ -168,7 +168,7 @@ class WdaLauncher {
       this.spawnRunWda();
       // Give runwda a moment to attach to the device before forwarding the port.
       await new Promise((resolve) => setTimeout(resolve, 800));
-      this.spawnPortForward();
+      await this.spawnPortForwardWithRetry();
       await this.waitUntilWdaReady();
       this.startedAt = new Date().toISOString();
       this.state = STATE.RUNNING;
@@ -239,6 +239,70 @@ class WdaLauncher {
     });
   }
 
+  async spawnPortForwardWithRetry(maxAttempts = 5, retryDelayMs = 2000) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const ready = await new Promise((resolve) => {
+        const { command, args } = buildPortForwardCommand(this.tool, this.device, this.settings);
+        if (attempt === 1) this.log(`spawn ${command} ${args.join(" ")}`);
+        else this.log(`forward: retry attempt ${attempt}/${maxAttempts}`);
+        const child = spawn(command, args, {
+          shell: process.platform === "win32",
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let outputBuf = "";
+        let settled = false;
+        const settle = (ok) => { if (!settled) { settled = true; resolve(ok ? child : null); } };
+
+        child.stdout.on("data", (chunk) => {
+          const text = String(chunk).trimEnd();
+          this.log(`forward: ${text}`);
+          outputBuf += text;
+          // go-ios prints "Start listening" before the bind error — wait for next output
+        });
+        child.stderr.on("data", (chunk) => {
+          const text = String(chunk).trimEnd();
+          this.log(`forward: ${text}`);
+          outputBuf += text;
+        });
+        child.on("error", (error) => {
+          this.log(`forward: error ${error.message}`);
+          settle(false);
+        });
+        child.on("close", (code) => {
+          this.log(`forward exited code=${code}`);
+          if (code !== 0) { settle(false); return; }
+          settle(true);
+        });
+
+        // If process is still running after 1.5s it means forward succeeded (didn't exit with error)
+        setTimeout(() => {
+          if (!settled && !child.exitCode && child.exitCode !== 0) settle(true);
+        }, 1500);
+      });
+
+      if (ready) {
+        // Attach permanent handlers to the running child
+        this.forwardProcess = ready;
+        ready.on("close", (code) => {
+          if (this.forwardProcess !== ready) return;
+          this.forwardProcess = null;
+          if (this.state === STATE.RUNNING) {
+            this.state = STATE.ERROR;
+            this.lastError = `port forward exited with code ${code}`;
+            this.emit();
+          }
+        });
+        return;
+      }
+
+      if (attempt < maxAttempts) {
+        this.log(`forward: port busy, waiting ${retryDelayMs}ms before retry...`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
+    throw new Error(`Failed to forward port ${this.device.port} after ${maxAttempts} attempts`);
+  }
+
   async waitUntilWdaReady() {
     const url = `${trimSlash(this.wdaUrl())}/status`;
     const deadline = Date.now() + READY_TIMEOUT_MS;
@@ -268,6 +332,10 @@ class WdaLauncher {
     await new Promise((resolve) => setTimeout(resolve, 1200));
     for (const proc of procs) {
       try { if (!proc.killed) proc.kill("SIGKILL"); } catch {}
+    }
+    // On Windows, sockets enter TIME_WAIT after process kill. Wait for OS to release ports.
+    if (process.platform === "win32") {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
     }
     this.runProcess = null;
     this.forwardProcess = null;
