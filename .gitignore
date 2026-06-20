@@ -9,6 +9,7 @@ __pycache__/
 venv/
 
 # Runtime data
+server/data/
 server/telegram_bot/data/*.sqlite3*
 server/telegram_bot/data/message_queue.json
 server/telegram_bot/data/telegram_web_profile/
@@ -28,3 +29,17 @@ local.properties
 .DS_Store
 .vscode/
 .idea/
+
+# iOS WDA controller runtime artifacts
+ios_wda_controller/captures/
+ios_wda_controller/debug_crops/
+ios_wda_controller/treasure_debug_*.json
+ios_wda_controller/node_modules/
+
+# Electron build output
+wda_control_panel/dist/
+wda_control_panel/node_modules/
+
+# iOS app build artifacts
+ios_tiktok_agent/build-queue/
+ios_tiktok_agent/build-signed/

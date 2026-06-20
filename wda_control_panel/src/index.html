@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+    <title>WDA Control Panel</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-left">
+        <h1>WDA Control Panel</h1>
+        <span id="lastScanLabel" class="muted">Last scan: never</span>
+      </div>
+      <div class="topbar-right">
+        <button id="scanButton" class="btn">Scan USB</button>
+        <button id="healthButton" class="btn">Health check</button>
+        <button id="startAllButton" class="btn primary">Start all</button>
+        <button id="stopAllButton" class="btn danger">Stop all</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="setup">Setup</button>
+      <button class="tab" data-tab="fleet">Fleet</button>
+      <button class="tab" data-tab="queue">Queue</button>
+      <button class="tab" data-tab="settings">Settings</button>
+      <button class="tab" data-tab="logs">Logs</button>
+    </nav>
+
+    <main class="content">
+      <!-- SETUP WIZARD -->
+      <section id="tab-setup" class="tab-panel active">
+        <div class="card mac-only">
+          <h2>Mac toolchain — build &amp; sign WDA tại đây</h2>
+          <p class="muted">Yêu cầu: Xcode đã cài, đăng nhập Apple Developer
+          (Free hoặc Personal $99). App sẽ dùng cert sẵn có trên máy để ký
+          IPA.</p>
+          <div class="status-row">
+            <span class="dot" id="xcodeDot"></span>
+            <span><strong>Xcode</strong> · <span id="xcodeDetail">checking...</span></span>
+          </div>
+          <div class="status-row">
+            <span class="dot" id="wdaProjectDot"></span>
+            <span><strong>WebDriverAgent.xcodeproj</strong> · <span id="wdaProjectDetail">checking...</span></span>
+          </div>
+          <div class="status-row">
+            <span class="dot" id="signingDot"></span>
+            <span><strong>Signing identity</strong></span>
+          </div>
+          <label>
+            <span class="muted">Chọn signing identity (Team ID sẽ tự nhận):</span>
+            <select id="signingSelect">
+              <option value="">— chưa chọn —</option>
+            </select>
+          </label>
+          <div class="row inline">
+            <span class="muted">Apple Team ID:</span>
+            <input id="appleTeamId" type="text" placeholder="ABCDE12345" />
+          </div>
+          <div class="setup-actions">
+            <button id="refreshSigningButton" class="btn">Refresh identities</button>
+            <button id="buildIpaButton" class="btn primary">Build &amp; sign WDA IPA</button>
+            <span class="muted" id="buildIpaSummary"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>1 / 4 — Apple Mobile Device driver</h2>
+          <p class="muted">PC Windows cần driver USB của Apple. Đi kèm iTunes
+          (bản tải từ apple.com — không phải Microsoft Store). Trên Mac không
+          cần.</p>
+          <div class="status-row">
+            <span class="dot" id="driverDot"></span>
+            <span id="driverDetail">checking...</span>
+            <button id="driverInstallButton" class="btn small">Tải Apple driver</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>2 / 4 — Bundled tools</h2>
+          <p class="muted">Phiên bản Windows đóng gói sẵn go-ios + WDA IPA.
+          Trên macOS dùng xcodebuild trực tiếp, không cần go-ios.</p>
+          <div class="status-row">
+            <span class="dot" id="goIosDot"></span>
+            <span><strong>go-ios</strong> · <span id="goIosDetail">checking...</span></span>
+          </div>
+          <div class="status-row">
+            <span class="dot" id="ipaDot"></span>
+            <span><strong>WebDriverAgentRunner.ipa</strong> · <span id="ipaDetail">checking...</span></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>3 / 4 — Cắm iPhone &amp; gán slot</h2>
+          <p class="muted">Mỗi iPhone là một slot <code>iphone-XX</code>. Click
+          <strong>Scan</strong> rồi <strong>Auto assign</strong> để gán hết
+          UDID đã cắm vào slot trống. Cần lấy UDID đi đăng ký Apple Developer?
+          Bấm <strong>Export UDID</strong>.</p>
+          <div class="setup-actions">
+            <button id="setupScanButton" class="btn">Scan USB</button>
+            <button id="setupAssignButton" class="btn primary">Auto assign tất cả</button>
+            <button id="setupExportDeveloperButton" class="btn">Export Apple Developer CSV</button>
+            <button id="setupExportInternalButton" class="btn">Export full CSV</button>
+            <button id="setupExportTxtButton" class="btn">Export UDID list</button>
+            <span class="muted" id="setupDetectedCount">0 device đã cắm</span>
+          </div>
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Tên</th>
+                <th>iOS</th>
+                <th>UDID</th>
+                <th>Slot đã gán</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="setupDetectedTable">
+              <tr><td colspan="5" class="muted">Chưa có. Bấm Scan USB.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card">
+          <h2>4 / 4 — Cài WebDriverAgent lên iPhone</h2>
+          <p class="muted">Click <strong>Install all</strong> để go-ios cài
+          IPA cho mọi slot enabled. Sau đó trên mỗi iPhone vào
+          <code>Settings → General → VPN &amp; Device Management → Trust</code>
+          và bật <code>Privacy &amp; Security → Developer Mode</code>.</p>
+          <div class="setup-actions">
+            <button id="setupCheckInstalledButton" class="btn">Check WDA đã cài</button>
+            <button id="setupInstallAllButton" class="btn primary">Install IPA tất cả</button>
+            <span class="muted" id="setupInstallSummary"></span>
+          </div>
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Slot</th>
+                <th>UDID</th>
+                <th>WDA</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="setupInstallTable">
+              <tr><td colspan="4" class="muted">Sau khi gán UDID, danh sách hiện ra ở đây.</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="setup-footer">
+          <button id="setupGoFleetButton" class="btn primary large">Sang tab Fleet để Start fleet →</button>
+        </div>
+      </section>
+
+      <!-- MESSAGE QUEUE -->
+      <section id="tab-queue" class="tab-panel">
+        <div class="queue-toolbar">
+          <div class="queue-controls">
+            <label>
+              <span>Status</span>
+              <select id="queueStatus">
+                <option value="pending">Pending</option>
+                <option value="">All</option>
+                <option value="done">Done</option>
+                <option value="processing">Processing</option>
+                <option value="failed">Failed</option>
+              </select>
+            </label>
+            <div class="queue-country-filter">
+              <span>Countries</span>
+              <button id="queueCountryButton" type="button" class="btn small">All countries</button>
+              <div id="queueCountryMenu" class="queue-country-menu"></div>
+            </div>
+            <label>
+              <span>Limit</span>
+              <select id="queueLimit">
+                <option value="25">25</option>
+                <option value="50" selected>50</option>
+                <option value="100">100</option>
+                <option value="250">250</option>
+              </select>
+            </label>
+            <label>
+              <span>Send to iPhone</span>
+              <select id="queueDevice"></select>
+            </label>
+            <label class="queue-auto">
+              <input id="queueAutoRefresh" type="checkbox" checked />
+              <span>Auto refresh</span>
+            </label>
+            <button id="queueRefreshButton" class="btn primary">Refresh queue</button>
+          </div>
+          <div class="queue-summary">
+            <span id="queueServerLabel" class="muted"></span>
+            <span id="queueStats" class="pill total">0 message</span>
+            <span id="queueUpdated" class="muted">Not loaded</span>
+          </div>
+        </div>
+
+        <div id="queueError" class="queue-error"></div>
+        <div class="queue-table-wrap">
+          <table class="table queue-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Status</th>
+                <th>BOX / TIME</th>
+                <th>Message</th>
+                <th>Source</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="queueTableBody">
+              <tr><td colspan="6" class="muted">Open Queue tab to load messages.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- FLEET -->
+      <section id="tab-fleet" class="tab-panel">
+        <div class="fleet-toolbar">
+          <div class="fleet-summary" id="fleetSummary">
+            <span class="pill total" id="pillTotal">0 enabled</span>
+            <span class="pill ok" id="pillRunning">0 running</span>
+            <span class="pill warn" id="pillStarting">0 starting</span>
+            <span class="pill bad" id="pillError">0 error</span>
+          </div>
+          <div class="fleet-trigger">
+            <input id="bulkUrl" type="text" placeholder="https://www.tiktok.com/@user/live" />
+            <button id="bulkOpenButton" class="btn primary">Open on selected</button>
+          </div>
+        </div>
+
+        <div id="deviceGrid" class="device-grid"></div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section id="tab-settings" class="tab-panel">
+        <div class="card">
+          <h2>Launcher</h2>
+          <form id="settingsForm" class="form">
+            <label>
+              <span>Tool</span>
+              <select id="launcherTool">
+                <option value="macos">macOS xcodebuild (Mac host)</option>
+                <option value="go-ios">go-ios (Windows / Linux)</option>
+                <option value="pymobiledevice3">pymobiledevice3 (Python fallback)</option>
+              </select>
+            </label>
+            <div class="row">
+              <label>
+                <span>go-ios path</span>
+                <input id="goIosPath" type="text" placeholder="ios" />
+              </label>
+              <label>
+                <span>pymobiledevice3 path</span>
+                <input id="pymobiledevice3Path" type="text" placeholder="pymobiledevice3" />
+              </label>
+            </div>
+            <div class="row">
+              <label>
+                <span>WDA project path (Mac)</span>
+                <input id="wdaProjectPath" type="text" placeholder="/path/to/WebDriverAgent.xcodeproj" />
+              </label>
+              <label>
+                <span>Apple Team ID (Mac)</span>
+                <input id="appleTeamIdSettings" type="text" placeholder="ABCDE12345" />
+              </label>
+            </div>
+            <label>
+              <span>WDA bundle ID</span>
+              <input id="wdaBundleId" type="text" placeholder="com.tungld.clicklive.WebDriverAgentRunner.xctrunner" />
+            </label>
+            <label>
+              <span>Queue server URL (optional)</span>
+              <input id="queueUrl" type="text" placeholder="http://103.38.237.7:8787" />
+            </label>
+            <label class="checkbox-row">
+              <input id="automationEnabled" type="checkbox" />
+              <span>Start queue automation automatically with each iPhone</span>
+            </label>
+            <div class="row">
+              <label>
+                <span>Automation controller path</span>
+                <input id="automationControllerPath" type="text" placeholder="../ios_wda_controller" />
+              </label>
+              <label>
+                <span>Python path</span>
+                <input id="pythonPath" type="text" placeholder="Use ios_wda_controller/config.env" />
+              </label>
+            </div>
+            <div class="row">
+              <label>
+                <span>Queue long-poll seconds</span>
+                <input id="queuePollWaitSeconds" type="number" min="1" max="25" value="25" />
+              </label>
+              <label>
+                <span>Live Time min (s) <span class="muted">ưu tiên từ</span></span>
+                <input id="liveTimeMinSeconds" type="number" min="0" max="3600" value="20" />
+              </label>
+              <label>
+                <span>Live Time max (s) <span class="muted">ưu tiên đến</span></span>
+                <input id="liveTimeMaxSeconds" type="number" min="0" max="3600" value="30" />
+              </label>
+            </div>
+            <hr style="border:none;border-top:1px solid #2a3040;margin:8px 0;" />
+            <p class="muted" style="margin:4px 0 8px;">⏱ Timing mở rương</p>
+            <div class="row">
+              <label>
+                <span>Tap lead (ms) <span class="muted">gửi lệnh WDA sớm hơn message TIME bao nhiêu ms (phải > RTT WiFi)</span></span>
+                <input id="openTapRequestLeadMs" type="number" min="0" step="100" value="2500" placeholder="2500" />
+              </label>
+            </div>
+            <div class="row">
+              <label>
+                <span>Transport compensation (ms) <span class="muted">bù RTT mạng WiFi → WDA, vd 200</span></span>
+                <input id="openTapTransportCompensationMs" type="number" min="0" step="50" value="200" placeholder="200" />
+              </label>
+              <label>
+                <span>Max lateness (ms) <span class="muted">bỏ tap nếu trễ hơn bao nhiêu ms, vd 1500</span></span>
+                <input id="openMaxLatenessMs" type="number" min="0" step="100" value="1500" placeholder="1500" />
+              </label>
+            </div>
+            <hr style="border:none;border-top:1px solid #2a3040;margin:8px 0;" />
+            <p class="muted" style="margin:4px 0 8px;">🔍 Filter client-side (bổ sung filter server)</p>
+            <div class="row">
+              <label>
+                <span>Max Views <span class="muted">(views ≤ này, 0 = tắt)</span></span>
+                <input id="filterMaxViews" type="number" min="0" step="1" value="0" placeholder="0 = tắt" />
+              </label>
+              <label>
+                <span>Min Rate <span class="muted">(rate ≥ này, 0 = tắt)</span></span>
+                <input id="filterMinRate" type="number" min="0" step="0.1" value="0" placeholder="0 = tắt" />
+              </label>
+            </div>
+            <div class="row">
+              <label>
+                <span>Min BOX value 1 <span class="muted">(box1 ≥ này, 0 = tắt)</span></span>
+                <input id="filterMinBox1" type="number" min="0" step="1" value="0" placeholder="0 = tắt" />
+              </label>
+              <label>
+                <span>Min BOX value 2 <span class="muted">(box2 ≥ này, 0 = tắt)</span></span>
+                <input id="filterMinBox2" type="number" min="0" step="1" value="0" placeholder="0 = tắt" />
+              </label>
+            </div>
+            <div class="actions">
+              <button type="submit" class="btn primary">Save settings</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card">
+          <h2>Detected USB devices</h2>
+          <p class="muted">Use the assignment dropdown on each row to bind a UDID to an iPhone slot.</p>
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>iOS</th>
+                <th>UDID</th>
+                <th>Status</th>
+                <th>Assign to</th>
+              </tr>
+            </thead>
+            <tbody id="detectedTable">
+              <tr><td colspan="5" class="muted">No devices yet. Click <strong>Scan USB</strong>.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- LOGS -->
+      <section id="tab-logs" class="tab-panel">
+        <div class="card">
+          <div class="log-toolbar">
+            <h2>Logs</h2>
+            <div>
+              <select id="logDeviceFilter" class="log-filter">
+                <option value="all">All devices</option>
+              </select>
+              <button id="clearLogsButton" class="btn small">Clear</button>
+            </div>
+          </div>
+          <pre id="logView" class="log"></pre>
+        </div>
+      </section>
+    </main>
+
+    <template id="deviceCardTemplate">
+      <article class="device-card">
+        <header class="device-card-header">
+          <label class="device-toggle">
+            <input type="checkbox" data-role="enabled" />
+            <span data-role="label" class="device-id"></span>
+          </label>
+          <span data-role="state" class="state-pill">idle</span>
+        </header>
+        <div class="device-card-body">
+          <label>
+            <span>UDID</span>
+            <input type="text" data-role="udid" placeholder="00008030-XXXXXX" />
+          </label>
+          <div class="row">
+            <label>
+              <span>Local port</span>
+              <input type="number" data-role="port" min="1024" max="65535" />
+            </label>
+            <label>
+              <span>Display name</span>
+              <input type="text" data-role="name" placeholder="iPhone 12 Tung" />
+            </label>
+          </div>
+          <div class="device-meta">
+            <span data-role="wdaUrl" class="muted"></span>
+            <span data-role="automation" class="muted">Automation: idle</span>
+            <span data-role="error" class="error"></span>
+          </div>
+        </div>
+        <footer class="device-card-footer">
+          <label class="select-toggle">
+            <input type="checkbox" data-role="selected" /> Select for bulk
+          </label>
+          <div class="device-actions">
+            <button class="btn small" data-role="save">Save</button>
+            <button class="btn small primary" data-role="start">Start</button>
+            <button class="btn small danger" data-role="stop">Stop</button>
+            <button class="btn small" data-role="open">Open URL</button>
+          </div>
+        </footer>
+      </article>
+    </template>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>

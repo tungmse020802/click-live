@@ -3,16 +3,19 @@ import argparse
 import json
 import logging
 import os
+import io
 import shlex
 import shutil
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -20,6 +23,7 @@ DEFAULT_CONFIG_PATH = BASE_DIR / "config.json"
 DEFAULT_LOG_PATH = BASE_DIR / "events.log"
 DEFAULT_SCRCPY_LOG_PATH = BASE_DIR / "scrcpy.log"
 DEFAULT_CAPTURE_DIR = BASE_DIR / "captures"
+DEFAULT_TEMPLATE_DIR = BASE_DIR / "templates"
 LOG_LIMIT = 300
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -33,6 +37,32 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "count": 1,
         "forever": False,
         "interval_ms": 800,
+    },
+    "treasure_detection": {
+        "enabled": True,
+        "after_deeplink": True,
+        "load_wait_ms": 1200,
+        "retry_count": 3,
+        "retry_interval_ms": 700,
+        "threshold": 0.78,
+        "roi": {"x": 0, "y": 0, "w": 420, "h": 520},
+        "template_path": "templates/treasure_box.png",
+        "mask_path": "templates/treasure_box_mask.png",
+        "tap": True,
+    },
+    "phone_timing": {
+        "clock_offset_ms": 60000,
+        "tap_lead_ms": 500,
+        "click_x": 540,
+        "click_y": 1800,
+    },
+    "queue_runner": {
+        "enabled": False,
+        "queue_url": "http://127.0.0.1:8787",
+        "poll_interval_ms": 5000,
+        "task_duration_ms": 30000,
+        "fallback_pick_seconds": 18,
+        "deeplink_settle_ms": 1000,
     },
     "actions": [
         {"type": "tap", "x": 500, "y": 1200, "delay_ms": 250},
@@ -125,6 +155,8 @@ HTML = r"""<!doctype html>
     .capture-card img { width:100%; display:block; background:#111827; }
     .capture-meta { padding:8px 10px; color:var(--muted); font-size:12px; line-height:1.35; word-break:break-all; }
     .direct-grid { display:grid; grid-template-columns:1fr auto; gap:10px; align-items:end; }
+    .detect-grid { display:grid; grid-template-columns:repeat(4,minmax(80px,1fr)); gap:10px; margin-top:12px; }
+    .detect-result { margin-top:10px; padding:10px; border:1px solid var(--border); border-radius:6px; background:#fff; color:var(--muted); font-size:13px; line-height:1.45; white-space:pre-wrap; }
     .tap-info { min-height:28px; display:flex; align-items:center; color:var(--muted); font-size:13px; }
     .small-input { width:92px; }
     @media (max-width:980px) {
@@ -146,6 +178,8 @@ HTML = r"""<!doctype html>
         <button id="saveBtn" class="button">Save</button>
         <button id="runBtn" class="button primary">Run</button>
         <button id="stopBtn" class="button danger">Stop</button>
+        <button id="queueStartBtn" class="button primary">Start Queue</button>
+        <button id="queueStopBtn" class="button danger">Stop Queue</button>
       </div>
     </header>
     <section class="statusbar">
@@ -153,7 +187,7 @@ HTML = r"""<!doctype html>
       <div class="stat"><div class="label">Device</div><div id="deviceValue" class="value">Checking</div></div>
       <div class="stat"><div class="label">Screen</div><div id="screenValue" class="value">Unknown</div></div>
       <div class="stat"><div class="label">Runner</div><div id="runnerValue" class="value">Idle</div></div>
-      <div class="stat"><div class="label">Mirror</div><div id="mirrorValue" class="value">Idle</div></div>
+      <div class="stat"><div class="label">Queue</div><div id="queueValue" class="value">Idle</div></div>
     </section>
     <main class="main">
       <aside class="pane">
@@ -175,6 +209,27 @@ HTML = r"""<!doctype html>
             <div class="field"><label class="label" for="repeatCountInput">Repeat count</label><input id="repeatCountInput" type="number" min="1" step="1"></div>
             <div class="field"><label class="checkline"><input id="foreverInput" type="checkbox"> Repeat forever</label></div>
             <div class="field full"><label class="checkline"><input id="dryRunInput" type="checkbox"> Dry run</label></div>
+          </div>
+        </section>
+        <section class="section">
+          <h2>Phone Timing</h2>
+          <div class="grid">
+            <div class="field full"><label class="label" for="clockOffsetInput">Clock offset ms <small style="font-weight:400;text-transform:none;">(phone nhanh hơn = dương, ví dụ +60000 = nhanh 1 phút)</small></label><input id="clockOffsetInput" type="number" step="100"></div>
+            <div class="field"><label class="label" for="tapLeadInput">Tap lead ms <small style="font-weight:400;text-transform:none;">(bấm sớm hơn)</small></label><input id="tapLeadInput" type="number" min="0" step="50"></div>
+            <div class="field"><label class="label" for="tapClickXInput">Click X</label><input id="tapClickXInput" type="number" min="0" step="1"></div>
+            <div class="field"><label class="label" for="tapClickYInput">Click Y</label><input id="tapClickYInput" type="number" min="0" step="1"></div>
+          </div>
+        </section>
+        <section class="section">
+          <h2>Queue Runner</h2>
+          <div class="grid">
+            <div class="field full"><label class="checkline"><input id="queueEnabledInput" type="checkbox"> Auto-pull queue on start</label></div>
+            <div class="field full"><label class="label" for="queueUrlInput">Queue UI URL</label><input id="queueUrlInput" type="text" autocomplete="off" placeholder="http://127.0.0.1:8787"></div>
+            <div class="field"><label class="label" for="pollIntervalInput">Poll interval ms</label><input id="pollIntervalInput" type="number" min="500" step="500"></div>
+            <div class="field"><label class="label" for="taskDurationInput">Task duration ms <small style="font-weight:400;text-transform:none;">(30000 = 30s)</small></label><input id="taskDurationInput" type="number" min="1000" step="1000"></div>
+            <div class="field"><label class="label" for="fallbackPickInput">Fallback pick s <small style="font-weight:400;text-transform:none;">(10–20s)</small></label><input id="fallbackPickInput" type="number" min="1" step="1"></div>
+            <div class="field"><label class="label" for="deeplinkSettleInput">Deeplink settle ms</label><input id="deeplinkSettleInput" type="number" min="0" step="100"></div>
+            <div id="queueStatus" style="grid-column:1/-1;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:#f7f9fb;font-size:12px;color:var(--muted);">Queue idle</div>
           </div>
         </section>
         <section class="section">
@@ -220,6 +275,21 @@ HTML = r"""<!doctype html>
                 <div class="field"><label class="label" for="deeplinkInput">URL</label><input id="deeplinkInput" autocomplete="off" placeholder="tiktok://... or https://..."></div>
                 <button id="openDeeplinkBtn" class="button primary">Open</button>
               </div>
+              <h2 style="margin-top:18px;">Treasure Detect</h2>
+              <label class="checkline"><input id="detectEnabledInput" type="checkbox"> Detect + tap after deeplink</label>
+              <div class="detect-grid">
+                <div class="field"><label class="label" for="detectWaitInput">Load wait ms</label><input id="detectWaitInput" type="number" min="0" step="100"></div>
+                <div class="field"><label class="label" for="detectRetryInput">Retries</label><input id="detectRetryInput" type="number" min="1" step="1"></div>
+                <div class="field"><label class="label" for="detectIntervalInput">Retry ms</label><input id="detectIntervalInput" type="number" min="0" step="100"></div>
+                <div class="field"><label class="label" for="detectThresholdInput">Threshold</label><input id="detectThresholdInput" type="number" min="0" max="1" step="0.01"></div>
+                <div class="field"><label class="label" for="roiXInput">ROI X</label><input id="roiXInput" type="number" min="0" step="1"></div>
+                <div class="field"><label class="label" for="roiYInput">ROI Y</label><input id="roiYInput" type="number" min="0" step="1"></div>
+                <div class="field"><label class="label" for="roiWInput">ROI W</label><input id="roiWInput" type="number" min="1" step="1"></div>
+                <div class="field"><label class="label" for="roiHInput">ROI H</label><input id="roiHInput" type="number" min="1" step="1"></div>
+                <div class="field full"><label class="label" for="templatePathInput">Template path</label><input id="templatePathInput" autocomplete="off" placeholder="templates/treasure_box.png"></div>
+              </div>
+              <div class="action-tools" style="margin-top:10px;"><button id="testDetectBtn" class="button light">Test detect now</button></div>
+              <div id="detectResult" class="detect-result">Template: phone_autoclicker/templates/treasure_box.png. Mask optional: treasure_box_mask.png.</div>
             </div>
           </div>
         </section>
@@ -259,12 +329,14 @@ HTML = r"""<!doctype html>
     const state = { config:null, status:null, logs:[], captures:[], streamTimer:null };
     const $ = (id) => document.getElementById(id);
     const els = {
-      path:$('configPath'), adb:$('adbValue'), device:$('deviceValue'), screen:$('screenValue'), runner:$('runnerValue'),
+      path:$('configPath'), adb:$('adbValue'), device:$('deviceValue'), screen:$('screenValue'), runner:$('runnerValue'), queue:$('queueValue'),
       adbPath:$('adbPathInput'), deviceSelect:$('deviceSelect'), deviceList:$('deviceList'), startup:$('startupDelayInput'),
       interval:$('intervalInput'), repeat:$('repeatCountInput'), forever:$('foreverInput'), dryRun:$('dryRunInput'),
       raw:$('rawConfig'), actions:$('actionList'), logs:$('logBox'), screenStage:$('screenStage'), screenImage:$('screenImage'),
       tapInfo:$('tapInfo'), stream:$('streamInput'), streamInterval:$('streamIntervalInput'), deeplink:$('deeplinkInput'),
-      captureList:$('captureList')
+      captureList:$('captureList'), detectEnabled:$('detectEnabledInput'), detectWait:$('detectWaitInput'), detectRetry:$('detectRetryInput'), detectInterval:$('detectIntervalInput'), detectThreshold:$('detectThresholdInput'), roiX:$('roiXInput'), roiY:$('roiYInput'), roiW:$('roiWInput'), roiH:$('roiHInput'), templatePath:$('templatePathInput'), detectResult:$('detectResult'),
+      clockOffset:$('clockOffsetInput'), tapLead:$('tapLeadInput'), tapClickX:$('tapClickXInput'), tapClickY:$('tapClickYInput'),
+      queueEnabled:$('queueEnabledInput'), queueUrl:$('queueUrlInput'), pollInterval:$('pollIntervalInput'), taskDuration:$('taskDurationInput'), fallbackPick:$('fallbackPickInput'), deeplinkSettle:$('deeplinkSettleInput'), queueStatus:$('queueStatus')
     };
     function esc(value) { return String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
     function numberValue(value, fallback=0) { const n = Number(value); return Number.isFinite(n) ? n : fallback; }
@@ -287,6 +359,31 @@ HTML = r"""<!doctype html>
       state.config.repeat.count = Math.max(1, numberValue(els.repeat.value, 1));
       state.config.repeat.forever = els.forever.checked;
       state.config.repeat.interval_ms = numberValue(els.interval.value, 0);
+      state.config.treasure_detection = state.config.treasure_detection || {};
+      const td = state.config.treasure_detection;
+      td.enabled = Boolean(els.detectEnabled?.checked);
+      td.after_deeplink = td.enabled;
+      td.load_wait_ms = numberValue(els.detectWait?.value, 1200);
+      td.retry_count = Math.max(1, numberValue(els.detectRetry?.value, 3));
+      td.retry_interval_ms = numberValue(els.detectInterval?.value, 700);
+      td.threshold = Number(els.detectThreshold?.value || 0.78);
+      td.template_path = els.templatePath?.value.trim() || "templates/treasure_box.png";
+      td.roi = { x:numberValue(els.roiX?.value, 0), y:numberValue(els.roiY?.value, 0), w:Math.max(1, numberValue(els.roiW?.value, 420)), h:Math.max(1, numberValue(els.roiH?.value, 520)) };
+      td.tap = true;
+      state.config.phone_timing = state.config.phone_timing || {};
+      const pt = state.config.phone_timing;
+      pt.clock_offset_ms = Number(els.clockOffset?.value ?? 60000);
+      pt.tap_lead_ms = Math.max(0, numberValue(els.tapLead?.value, 500));
+      pt.click_x = Math.max(0, numberValue(els.tapClickX?.value, 540));
+      pt.click_y = Math.max(0, numberValue(els.tapClickY?.value, 1800));
+      state.config.queue_runner = state.config.queue_runner || {};
+      const qr = state.config.queue_runner;
+      qr.enabled = Boolean(els.queueEnabled?.checked);
+      qr.queue_url = (els.queueUrl?.value || 'http://127.0.0.1:8787').trim().replace(/\/$/, '');
+      qr.poll_interval_ms = Math.max(500, numberValue(els.pollInterval?.value, 5000));
+      qr.task_duration_ms = Math.max(1000, numberValue(els.taskDuration?.value, 30000));
+      qr.fallback_pick_seconds = Math.max(1, numberValue(els.fallbackPick?.value, 18));
+      qr.deeplink_settle_ms = Math.max(0, numberValue(els.deeplinkSettle?.value, 1000));
     }
     function renderSettings() {
       const cfg = state.config; if (!cfg) return;
@@ -297,6 +394,30 @@ HTML = r"""<!doctype html>
       els.repeat.value = cfg.repeat?.count ?? 1;
       els.forever.checked = Boolean(cfg.repeat?.forever);
       els.dryRun.checked = Boolean(cfg.dry_run);
+      const td = cfg.treasure_detection || {};
+      if (els.detectEnabled) els.detectEnabled.checked = Boolean(td.enabled);
+      if (els.detectWait) els.detectWait.value = td.load_wait_ms ?? 1200;
+      if (els.detectRetry) els.detectRetry.value = td.retry_count ?? 3;
+      if (els.detectInterval) els.detectInterval.value = td.retry_interval_ms ?? 700;
+      if (els.detectThreshold) els.detectThreshold.value = td.threshold ?? 0.78;
+      if (els.templatePath) els.templatePath.value = td.template_path || "templates/treasure_box.png";
+      const roi = td.roi || {};
+      if (els.roiX) els.roiX.value = roi.x ?? 0;
+      if (els.roiY) els.roiY.value = roi.y ?? 0;
+      if (els.roiW) els.roiW.value = roi.w ?? 420;
+      if (els.roiH) els.roiH.value = roi.h ?? 520;
+      const pt = cfg.phone_timing || {};
+      if (els.clockOffset) els.clockOffset.value = pt.clock_offset_ms ?? 60000;
+      if (els.tapLead) els.tapLead.value = pt.tap_lead_ms ?? 500;
+      if (els.tapClickX) els.tapClickX.value = pt.click_x ?? 540;
+      if (els.tapClickY) els.tapClickY.value = pt.click_y ?? 1800;
+      const qr = cfg.queue_runner || {};
+      if (els.queueEnabled) els.queueEnabled.checked = Boolean(qr.enabled);
+      if (els.queueUrl) els.queueUrl.value = qr.queue_url || 'http://127.0.0.1:8787';
+      if (els.pollInterval) els.pollInterval.value = qr.poll_interval_ms ?? 5000;
+      if (els.taskDuration) els.taskDuration.value = qr.task_duration_ms ?? 30000;
+      if (els.fallbackPick) els.fallbackPick.value = qr.fallback_pick_seconds ?? 18;
+      if (els.deeplinkSettle) els.deeplinkSettle.value = qr.deeplink_settle_ms ?? 1000;
       renderDevices();
       els.raw.value = JSON.stringify(cfg, null, 2);
     }
@@ -354,6 +475,14 @@ HTML = r"""<!doctype html>
       els.device.textContent = s.active_device || 'No device';
       els.screen.textContent = s.screen_size || 'Unknown';
       els.runner.textContent = s.runner?.running ? 'Running' : 'Idle';
+      const qr = s.queue_runner || {};
+      if (els.queue) els.queue.textContent = qr.running ? `Running #${qr.last_job_id || '?'}` : 'Idle';
+      if (els.queueStatus) {
+        const jobPart = qr.last_job_id ? ` | job #${qr.last_job_id}` : '';
+        els.queueStatus.textContent = qr.running
+          ? `Running${jobPart} | ${qr.last_status || ''}`
+          : `Idle | ${qr.last_status || 'stopped'}${jobPart}`;
+      }
       renderDevices();
     }
     function renderLogs() {
@@ -392,6 +521,19 @@ HTML = r"""<!doctype html>
     async function refreshCaptures() {
       state.captures = (await api('/api/captures')).captures;
       renderCaptures();
+    }
+    function renderDetectResult(result) {
+      if (!els.detectResult) return;
+      if (!result) { els.detectResult.textContent = "No result"; return; }
+      const d = result.detection || result;
+      els.detectResult.textContent = JSON.stringify(d, null, 2);
+    }
+    async function testTreasureDetect() {
+      syncSettings();
+      const data = await api('/api/treasure/detect', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ config:state.config, tap:false, source:'test' }) });
+      renderDetectResult(data);
+      await refreshCaptures().catch(() => {});
+      await refreshSnapshot().catch(() => {});
     }
     async function saveCapture(source='manual') {
       syncSettings();
@@ -484,7 +626,9 @@ HTML = r"""<!doctype html>
       });
       await refreshStatus();
       setTimeout(() => {
-        saveCapture('deeplink').then(() => refreshSnapshot()).catch((err) => els.tapInfo.textContent = err.message);
+        const td = state.config?.treasure_detection || {};
+        const work = td.enabled && td.after_deeplink ? api('/api/treasure/detect', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ config:state.config, tap:true, source:'deeplink' }) }) : saveCapture('deeplink');
+        work.then((data) => { renderDetectResult(data); return refreshCaptures(); }).then(() => refreshSnapshot()).catch((err) => els.tapInfo.textContent = err.message);
       }, 1000);
     }
     document.querySelectorAll('[data-add]').forEach((button) => button.addEventListener('click', () => {
@@ -529,6 +673,7 @@ HTML = r"""<!doctype html>
     $('snapshotBtn').addEventListener('click', () => refreshSnapshot().catch((err) => els.tapInfo.textContent = err.message));
     $('downloadLogsBtn').addEventListener('click', () => { window.location.href = '/api/logs.txt'; });
     $('captureNowBtn').addEventListener('click', () => saveCapture('manual').catch((err) => els.tapInfo.textContent = err.message));
+    $('testDetectBtn').addEventListener('click', () => testTreasureDetect().catch((err) => els.detectResult.textContent = err.message));
     $('refreshCapturesBtn').addEventListener('click', () => refreshCaptures().catch((err) => els.tapInfo.textContent = err.message));
     document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach((tab) => tab.classList.toggle('active', tab === button));
@@ -541,7 +686,7 @@ HTML = r"""<!doctype html>
     $('openDeeplinkBtn').addEventListener('click', () => openDeeplink().catch((err) => els.tapInfo.textContent = err.message));
     els.stream.addEventListener('change', () => setStreaming(els.stream.checked));
     els.streamInterval.addEventListener('change', () => { if (els.stream.checked) setStreaming(true); });
-    [els.adbPath, els.deviceSelect, els.startup, els.interval, els.repeat, els.forever, els.dryRun].forEach((node) => {
+    [els.adbPath, els.deviceSelect, els.startup, els.interval, els.repeat, els.forever, els.dryRun, els.detectEnabled, els.detectWait, els.detectRetry, els.detectInterval, els.detectThreshold, els.roiX, els.roiY, els.roiW, els.roiH, els.templatePath, els.clockOffset, els.tapLead, els.tapClickX, els.tapClickY, els.queueEnabled, els.queueUrl, els.pollInterval, els.taskDuration, els.fallbackPick, els.deeplinkSettle].filter(Boolean).forEach((node) => {
       node.addEventListener('input', () => { syncSettings(); els.raw.value = JSON.stringify(state.config, null, 2); });
       node.addEventListener('change', () => { syncSettings(); els.raw.value = JSON.stringify(state.config, null, 2); });
     });
@@ -549,6 +694,18 @@ HTML = r"""<!doctype html>
     $('saveBtn').addEventListener('click', () => saveConfig().catch((err) => alert(err.message)));
     $('runBtn').addEventListener('click', () => runConfig().catch((err) => alert(err.message)));
     $('stopBtn').addEventListener('click', () => stopRun().catch((err) => alert(err.message)));
+    async function startQueueRunner() {
+      syncSettings();
+      const data = await api('/api/queue/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ config:state.config }) });
+      state.status = data.status;
+      renderStatus();
+    }
+    async function stopQueueRunner() {
+      await api('/api/queue/stop', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+      await refreshStatus();
+    }
+    $('queueStartBtn').addEventListener('click', () => startQueueRunner().catch((err) => alert(err.message)));
+    $('queueStopBtn').addEventListener('click', () => stopQueueRunner().catch((err) => alert(err.message)));
     (async function init() {
       await loadConfig();
       await refreshStatus();
@@ -844,12 +1001,347 @@ class Runner:
             self._stop.wait(wait_ms / 1000)
 
 
+class QueueRunner:
+    """Auto pulls jobs from queue_ui, opens deeplink, schedules a precise tap at the
+    target wall-clock time and loops. Tries to pick a job whose remaining countdown
+    is between (deeplink_settle_ms + tap_lead_ms) and `task_duration_ms`.
+    """
+
+    def __init__(self, adb: "AdbClient", log: "EventLog", app: "AutoClickerApp") -> None:
+        self.adb = adb
+        self.log = log
+        self.app = app
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._running = False
+        self._started_at: Optional[float] = None
+        self._last_job_id: int = 0
+        self._last_status: str = "idle"
+
+    def status(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "running": self._running,
+                "started_at": self._started_at,
+                "last_job_id": self._last_job_id,
+                "last_status": self._last_status,
+            }
+
+    def start(self, config: Dict[str, Any]) -> None:
+        with self._lock:
+            if self._running:
+                raise RuntimeError("Queue runner is already running")
+            self._stop.clear()
+            self._running = True
+            self._started_at = time.time()
+            self._last_status = "started"
+            self._thread = threading.Thread(target=self._run, args=(deepcopy(config),), daemon=True)
+            self._thread.start()
+        self.log.add("queue runner started")
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.log.add("queue runner stop requested")
+
+    def _set_status(self, status: str, job_id: Optional[int] = None) -> None:
+        with self._lock:
+            self._last_status = status
+            if job_id is not None:
+                self._last_job_id = job_id
+
+    def _run(self, config: Dict[str, Any]) -> None:
+        try:
+            self._loop(config)
+        except Exception as exc:
+            self.log.add(f"queue runner error: {exc}")
+        finally:
+            with self._lock:
+                self._running = False
+                self._started_at = None
+                self._last_status = "stopped"
+            self.log.add("queue runner idle")
+
+    def _loop(self, config: Dict[str, Any]) -> None:
+        seen_ids: set = set()
+        while not self._stop.is_set():
+            cfg = self.app.load_config()
+            qr = cfg.get("queue_runner") or {}
+            pt = cfg.get("phone_timing") or {}
+            queue_url = str(qr.get("queue_url") or "").strip().rstrip("/")
+            poll_interval_ms = max(500, int(qr.get("poll_interval_ms") or 5000))
+            task_duration_ms = max(1000, int(qr.get("task_duration_ms") or 30000))
+            fallback_pick_seconds = max(1, int(qr.get("fallback_pick_seconds") or 18))
+            deeplink_settle_ms = max(0, int(qr.get("deeplink_settle_ms") or 1000))
+            tap_lead_ms = max(0, int(pt.get("tap_lead_ms") or 0))
+            clock_offset_ms = int(pt.get("clock_offset_ms") or 0)
+            click_x = max(0, int(pt.get("click_x") or 540))
+            click_y = max(0, int(pt.get("click_y") or 1800))
+
+            if not queue_url:
+                self._set_status("queue_url empty")
+                self.log.add("queue runner: queue_url empty, waiting")
+                if self._stop.wait(poll_interval_ms / 1000):
+                    return
+                continue
+
+            try:
+                items = self._fetch_pending(queue_url)
+            except Exception as exc:
+                self._set_status(f"fetch error: {exc}")
+                self.log.add(f"queue fetch error: {exc}")
+                if self._stop.wait(poll_interval_ms / 1000):
+                    return
+                continue
+
+            picked = self._pick_job(
+                items,
+                seen_ids=seen_ids,
+                deeplink_settle_ms=deeplink_settle_ms,
+                tap_lead_ms=tap_lead_ms,
+                clock_offset_ms=clock_offset_ms,
+                task_duration_ms=task_duration_ms,
+                fallback_pick_seconds=fallback_pick_seconds,
+            )
+            if not picked:
+                self._set_status("no candidate")
+                if self._stop.wait(poll_interval_ms / 1000):
+                    return
+                continue
+
+            job, target_at = picked
+            job_id = int(job.get("id") or 0)
+            url = str(job.get("url") or "").strip()
+            if not url or job_id == 0:
+                seen_ids.add(job_id)
+                continue
+
+            seen_ids.add(job_id)
+            self._set_status(f"opening #{job_id}", job_id=job_id)
+            self.log.add(f"queue picked #{job_id} url={url} target_at={target_at}")
+
+            try:
+                self._execute_job(cfg, job_id, url, target_at, click_x, click_y, deeplink_settle_ms, tap_lead_ms)
+            except Exception as exc:
+                self._set_status(f"job error: {exc}", job_id=job_id)
+                self.log.add(f"queue job #{job_id} error: {exc}")
+                if self._stop.wait(poll_interval_ms / 1000):
+                    return
+                continue
+
+            self._set_status(f"done #{job_id}", job_id=job_id)
+            try:
+                self._mark_done(queue_url, job_id, "auto-clicker tap completed")
+            except Exception as exc:
+                self.log.add(f"queue mark-done #{job_id} error: {exc}")
+
+    def _fetch_pending(self, queue_url: str) -> List[Dict[str, Any]]:
+        url = f"{queue_url}/api/queue?limit=50&statuses=pending&_={int(time.time() * 1000)}"
+        request = urllib.request.Request(url, headers={"Accept": "application/json", "Cache-Control": "no-store"})
+        with urllib.request.urlopen(request, timeout=8) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return data.get("items") or []
+
+    def _mark_done(self, queue_url: str, job_id: int, note: str) -> None:
+        url = f"{queue_url}/api/queue/mark-done"
+        body = json.dumps({"job_id": job_id, "note": note}).encode("utf-8")
+        request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(request, timeout=8) as response:
+            response.read()
+
+    def _pick_job(
+        self,
+        items: List[Dict[str, Any]],
+        seen_ids: set,
+        deeplink_settle_ms: int,
+        tap_lead_ms: int,
+        clock_offset_ms: int,
+        task_duration_ms: int,
+        fallback_pick_seconds: int,
+    ) -> Optional[Tuple[Dict[str, Any], Optional[float]]]:
+        """Pick the first pending job with countdown that fits the task window
+        (`min_remaining_ms < remaining < task_duration_ms`). If none fits, pick
+        the smallest-countdown job whose remaining > min_remaining_ms.
+        """
+        min_remaining_ms = deeplink_settle_ms + tap_lead_ms + 500
+        now = time.time()
+        candidates: List[Tuple[Dict[str, Any], Optional[float], int]] = []
+        for item in items:
+            try:
+                job_id = int(item.get("id") or 0)
+            except (TypeError, ValueError):
+                continue
+            if job_id == 0 or job_id in seen_ids:
+                continue
+            url = _extract_link(item)
+            if not url:
+                continue
+            target_at, remaining_ms = self._target_for_item(item, now=now, clock_offset_ms=clock_offset_ms)
+            if remaining_ms is None:
+                # No timing info: usable as a fallback only.
+                candidates.append((self._make_runtime_job(item, url), None, fallback_pick_seconds * 1000))
+                continue
+            if remaining_ms < min_remaining_ms:
+                continue
+            candidates.append((self._make_runtime_job(item, url), target_at, remaining_ms))
+
+        if not candidates:
+            return None
+
+        in_window = [c for c in candidates if c[2] <= task_duration_ms]
+        if in_window:
+            in_window.sort(key=lambda c: c[2])
+            job, target_at, _ = in_window[0]
+            return job, target_at
+
+        candidates.sort(key=lambda c: c[2])
+        job, target_at, _ = candidates[0]
+        return job, target_at
+
+    def _target_for_item(
+        self,
+        item: Dict[str, Any],
+        now: float,
+        clock_offset_ms: int,
+    ) -> Tuple[Optional[float], Optional[int]]:
+        target_label = _extract_target_hhmmss(item)
+        if target_label:
+            target_at = _resolve_target_time(target_label, now=now)
+            if target_at is not None:
+                target_at_with_offset = target_at - (clock_offset_ms / 1000)
+                remaining_ms = int(round((target_at_with_offset - now) * 1000))
+                return target_at_with_offset, remaining_ms
+        click_after_ms = _extract_click_after_ms(item)
+        if click_after_ms > 0:
+            target_at = now + (click_after_ms / 1000)
+            return target_at, click_after_ms
+        return None, None
+
+    def _make_runtime_job(self, item: Dict[str, Any], url: str) -> Dict[str, Any]:
+        return {"id": int(item.get("id") or 0), "url": url, "raw": item}
+
+    def _execute_job(
+        self,
+        cfg: Dict[str, Any],
+        job_id: int,
+        url: str,
+        target_at: Optional[float],
+        click_x: int,
+        click_y: int,
+        deeplink_settle_ms: int,
+        tap_lead_ms: int,
+    ) -> None:
+        self.log.add(f"queue #{job_id} open deeplink {url}")
+        self.adb.open_deeplink(cfg, url)
+        if deeplink_settle_ms > 0:
+            if self._stop.wait(deeplink_settle_ms / 1000):
+                return
+
+        if target_at is not None:
+            tap_at = target_at - (tap_lead_ms / 1000)
+            wait_seconds = tap_at - time.time()
+            if wait_seconds > 0:
+                self.log.add(f"queue #{job_id} sleep {wait_seconds:.2f}s before tap")
+                if self._stop.wait(wait_seconds):
+                    return
+
+        self.log.add(f"queue #{job_id} tap {click_x},{click_y}")
+        self.adb.shell(cfg, ["input", "tap", click_x, click_y])
+
+        try:
+            data = self.adb.screencap(cfg)
+            self.app.save_capture_bytes(data, f"queue-{job_id}", {"queue_job_id": job_id, "url": url})
+        except Exception as exc:
+            self.log.add(f"queue #{job_id} capture failed: {exc}")
+
+
+def _extract_link(item: Dict[str, Any]) -> str:
+    import re as _re
+    payload = item.get("payload") or {}
+    message = item.get("message") or {}
+    candidates = [
+        payload.get("url"), payload.get("link"), payload.get("deeplink"),
+        payload.get("deep_link"), payload.get("live_url"), payload.get("room_url"),
+        message.get("text"),
+    ]
+    for value in candidates:
+        match = _re.search(r"(?:https?://|tiktok://)[^\s<>'\"]+", str(value or ""), _re.I)
+        if match:
+            return match.group(0)
+    return ""
+
+
+def _extract_target_hhmmss(item: Dict[str, Any]) -> str:
+    import re as _re
+    payload = item.get("payload") or {}
+    message = item.get("message") or {}
+    candidates = [
+        payload.get("target_time_hhmmss"),
+        payload.get("TIME"), payload.get("time"), payload.get("Time"),
+        message.get("text"),
+    ]
+    for value in candidates:
+        text = str(value or "")
+        match = _re.search(r"-\s*(\d{1,2}):(\d{2}):(\d{2})", text)
+        if match:
+            return f"{match.group(1)}:{match.group(2)}:{match.group(3)}"
+    return ""
+
+
+def _extract_click_after_ms(item: Dict[str, Any]) -> int:
+    import re as _re
+    payload = item.get("payload") or {}
+    message = item.get("message") or {}
+    if isinstance(payload.get("click_after_ms"), (int, float)):
+        return int(payload["click_after_ms"])
+    candidates = [payload.get("TIME"), payload.get("time"), message.get("text")]
+    for value in candidates:
+        text = str(value or "")
+        match = _re.search(r"(\d{1,2}):(\d{2})\s*s", text, _re.I)
+        if match:
+            return (int(match.group(1)) * 60 + int(match.group(2))) * 1000
+        match = _re.search(r"(\d+(?:\.\d+)?)\s*s", text, _re.I)
+        if match:
+            return int(float(match.group(1)) * 1000)
+    return 0
+
+
+def _resolve_target_time(hhmmss: str, now: float) -> Optional[float]:
+    """Convert a `HH:MM:SS` label (where HH may be 24+, meaning past midnight) to
+    an absolute epoch time near `now`. Picks the closest occurrence (today or
+    tomorrow) within ±12h of `now`.
+    """
+    parts = hhmmss.split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds = int(parts[2])
+    except ValueError:
+        return None
+    day_offset, hh = divmod(hours, 24)
+    now_dt = datetime.fromtimestamp(now)
+    base = now_dt.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=day_offset)
+    candidate = base.replace(hour=hh, minute=minutes, second=seconds)
+    best = candidate
+    best_delta = abs((candidate.timestamp() - now))
+    for shift in (-1, 1):
+        alt = candidate + timedelta(days=shift)
+        delta = abs(alt.timestamp() - now)
+        if delta < best_delta:
+            best = alt
+            best_delta = delta
+    return best.timestamp()
+
+
 class AutoClickerApp:
     def __init__(self, config_path: Path) -> None:
         self.config_path = config_path
         self.log = EventLog(DEFAULT_LOG_PATH)
         self.adb = AdbClient(self.log)
         self.runner = Runner(self.adb, self.log)
+        self.queue_runner: "QueueRunner" = QueueRunner(self.adb, self.log, self)
         self._config_lock = threading.Lock()
 
     def load_config(self) -> Dict[str, Any]:
@@ -872,15 +1364,48 @@ class AutoClickerApp:
         self.log.add(f"Config saved {self.config_path}")
         return normalized
 
-    def save_capture(self, config: Dict[str, Any], source: str = "manual") -> Dict[str, Any]:
+    def save_capture_bytes(self, data: bytes, source: str = "manual", metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         DEFAULT_CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
         safe_source = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in source)[:32] or "manual"
         filename = f"{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}-{safe_source}.png"
         path = DEFAULT_CAPTURE_DIR / filename
-        data = self.adb.screencap(config)
         path.write_bytes(data)
+        info = capture_info(path)
+        if metadata is not None:
+            meta_path = path.with_suffix(".json")
+            meta_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            info["metadata_url"] = f"/captures/{meta_path.name}"
         self.log.add(f"capture saved {path.name}")
-        return capture_info(path)
+        return info
+
+    def save_capture(self, config: Dict[str, Any], source: str = "manual") -> Dict[str, Any]:
+        return self.save_capture_bytes(self.adb.screencap(config), source)
+
+    def detect_treasure(self, config: Dict[str, Any], tap: bool = True, source: str = "treasure") -> Dict[str, Any]:
+        td = treasure_config(config)
+        if td["load_wait_ms"] > 0:
+            time.sleep(td["load_wait_ms"] / 1000)
+        last: Dict[str, Any] = {}
+        capture: Optional[Dict[str, Any]] = None
+        for attempt in range(1, td["retry_count"] + 1):
+            data = self.adb.screencap(config)
+            detection = detect_treasure_in_png(data, td)
+            detection["attempt"] = attempt
+            last = detection
+            capture = self.save_capture_bytes(data, source, {"treasure_detection": detection})
+            if detection.get("found"):
+                tap_point = detection.get("tap") or {}
+                if tap and td.get("tap", True):
+                    x = int(tap_point.get("x"))
+                    y = int(tap_point.get("y"))
+                    self.log.add(f"treasure found score={detection.get('score')} tap {x},{y}")
+                    self.adb.shell(config, ["input", "tap", x, y])
+                    detection["tapped"] = True
+                return {"ok": True, "detection": detection, "capture": capture, "captures": self.captures()}
+            self.log.add(f"treasure not found attempt={attempt} score={detection.get('score')}")
+            if attempt < td["retry_count"] and td["retry_interval_ms"] > 0:
+                time.sleep(td["retry_interval_ms"] / 1000)
+        return {"ok": True, "detection": last, "capture": capture, "captures": self.captures()}
 
     def captures(self) -> List[Dict[str, Any]]:
         DEFAULT_CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
@@ -897,7 +1422,89 @@ class AutoClickerApp:
             "active_device": active_device,
             "screen_size": self.adb.screen_size(config) if active_device else None,
             "runner": self.runner.status(),
+            "queue_runner": self.queue_runner.status(),
         }
+
+
+def treasure_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    raw = config.get("treasure_detection") if isinstance(config.get("treasure_detection"), dict) else {}
+    roi = raw.get("roi") if isinstance(raw.get("roi"), dict) else {}
+    template_path = resolve_local_path(str(raw.get("template_path") or "templates/treasure_box.png"))
+    mask_raw = str(raw.get("mask_path") or "templates/treasure_box_mask.png")
+    mask_path = resolve_local_path(mask_raw) if mask_raw else None
+    return {
+        "enabled": bool(raw.get("enabled", True)),
+        "after_deeplink": bool(raw.get("after_deeplink", True)),
+        "load_wait_ms": non_negative_int(raw.get("load_wait_ms"), 1200),
+        "retry_count": max(1, non_negative_int(raw.get("retry_count"), 3)),
+        "retry_interval_ms": non_negative_int(raw.get("retry_interval_ms"), 700),
+        "threshold": float(raw.get("threshold", 0.78)),
+        "roi": {
+            "x": non_negative_int(roi.get("x"), 0),
+            "y": non_negative_int(roi.get("y"), 0),
+            "w": max(1, non_negative_int(roi.get("w"), 420)),
+            "h": max(1, non_negative_int(roi.get("h"), 520)),
+        },
+        "template_path": template_path,
+        "mask_path": mask_path,
+        "tap": bool(raw.get("tap", True)),
+    }
+
+
+def resolve_local_path(value: str) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return BASE_DIR / path
+
+
+def detect_treasure_in_png(data: bytes, td: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("Treasure detection needs opencv-python and numpy. Run: pip install opencv-python numpy") from exc
+
+    template_path: Path = td["template_path"]
+    if not template_path.exists():
+        raise RuntimeError(f"Treasure template not found: {template_path}")
+
+    image_array = np.frombuffer(data, dtype=np.uint8)
+    image = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError("Could not decode screenshot")
+    template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
+    if template is None:
+        raise RuntimeError(f"Could not read template: {template_path}")
+
+    height, width = image.shape[:2]
+    roi_cfg = td["roi"]
+    rx = min(int(roi_cfg["x"]), width - 1)
+    ry = min(int(roi_cfg["y"]), height - 1)
+    rw = min(int(roi_cfg["w"]), width - rx)
+    rh = min(int(roi_cfg["h"]), height - ry)
+    roi = image[ry:ry + rh, rx:rx + rw]
+    th, tw = template.shape[:2]
+    if rw < tw or rh < th:
+        return {"found": False, "reason": "template_larger_than_roi", "screen": {"w": width, "h": height}, "roi": roi_cfg, "template": {"w": tw, "h": th}}
+
+    mask = None
+    mask_path = td.get("mask_path")
+    if mask_path and Path(mask_path).exists():
+        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        if mask is not None and mask.shape[:2] != (th, tw):
+            mask = cv2.resize(mask, (tw, th), interpolation=cv2.INTER_NEAREST)
+
+    method = cv2.TM_CCORR_NORMED if mask is not None else cv2.TM_CCOEFF_NORMED
+    result = cv2.matchTemplate(roi, template, method, mask=mask) if mask is not None else cv2.matchTemplate(roi, template, method)
+    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+    score = float(max_val)
+    x = rx + int(max_loc[0])
+    y = ry + int(max_loc[1])
+    box = {"x": x, "y": y, "w": tw, "h": th}
+    tap = {"x": x + tw // 2, "y": y + th // 2}
+    found = score >= float(td["threshold"])
+    return {"found": found, "score": round(score, 4), "threshold": td["threshold"], "screen": {"w": width, "h": height}, "roi": {"x": rx, "y": ry, "w": rw, "h": rh}, "box": box, "tap": tap, "template": str(template_path), "mask": str(mask_path) if mask_path and Path(mask_path).exists() else None}
 
 
 def capture_info(path: Path) -> Dict[str, Any]:
@@ -926,9 +1533,50 @@ def normalize_config(raw: Dict[str, Any]) -> Dict[str, Any]:
         "interval_ms": non_negative_int(repeat.get("interval_ms"), 0),
     }
 
+    td = config.get("treasure_detection") if isinstance(config.get("treasure_detection"), dict) else {}
+    roi = td.get("roi") if isinstance(td.get("roi"), dict) else {}
+    config["treasure_detection"] = {
+        "enabled": bool(td.get("enabled", True)),
+        "after_deeplink": bool(td.get("after_deeplink", True)),
+        "load_wait_ms": non_negative_int(td.get("load_wait_ms"), 1200),
+        "retry_count": max(1, non_negative_int(td.get("retry_count"), 3)),
+        "retry_interval_ms": non_negative_int(td.get("retry_interval_ms"), 700),
+        "threshold": float(td.get("threshold", 0.78)),
+        "roi": {"x": non_negative_int(roi.get("x"), 0), "y": non_negative_int(roi.get("y"), 0), "w": max(1, non_negative_int(roi.get("w"), 420)), "h": max(1, non_negative_int(roi.get("h"), 520))},
+        "template_path": str(td.get("template_path") or "templates/treasure_box.png"),
+        "mask_path": str(td.get("mask_path") or "templates/treasure_box_mask.png"),
+        "tap": bool(td.get("tap", True)),
+    }
+
+    pt = config.get("phone_timing") if isinstance(config.get("phone_timing"), dict) else {}
+    config["phone_timing"] = {
+        "clock_offset_ms": int_value(pt.get("clock_offset_ms"), 60000),
+        "tap_lead_ms": non_negative_int(pt.get("tap_lead_ms"), 500),
+        "click_x": non_negative_int(pt.get("click_x"), 540),
+        "click_y": non_negative_int(pt.get("click_y"), 1800),
+    }
+
+    qr = config.get("queue_runner") if isinstance(config.get("queue_runner"), dict) else {}
+    config["queue_runner"] = {
+        "enabled": bool(qr.get("enabled", False)),
+        "queue_url": str(qr.get("queue_url") or "http://127.0.0.1:8787").strip().rstrip("/"),
+        "poll_interval_ms": max(500, non_negative_int(qr.get("poll_interval_ms"), 5000)),
+        "task_duration_ms": max(1000, non_negative_int(qr.get("task_duration_ms"), 30000)),
+        "fallback_pick_seconds": max(1, non_negative_int(qr.get("fallback_pick_seconds"), 18)),
+        "deeplink_settle_ms": non_negative_int(qr.get("deeplink_settle_ms"), 1000),
+    }
+
     actions = config.get("actions")
     config["actions"] = actions if isinstance(actions, list) else []
     return config
+
+
+def int_value(value: Any, default: int) -> int:
+    """Like non_negative_int but allows negative values (used for clock offsets)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def non_negative_int(value: Any, default: int) -> int:
@@ -1028,10 +1676,13 @@ def make_handler(app: AutoClickerApp):
                 if parsed.path.startswith("/captures/"):
                     filename = Path(parsed.path).name
                     path = DEFAULT_CAPTURE_DIR / filename
-                    if not path.exists() or path.suffix.lower() != ".png":
+                    if not path.exists() or path.suffix.lower() not in (".png", ".json"):
                         json_response(self, {"error": "Capture not found"}, status=404)
                         return
-                    binary_response(self, path.read_bytes(), "image/png")
+                    if path.suffix.lower() == ".json":
+                        text_response(self, path.read_text(encoding="utf-8"))
+                    else:
+                        binary_response(self, path.read_bytes(), "image/png")
                     return
                 json_response(self, {"error": "Not found"}, status=404)
             except Exception as exc:
@@ -1079,6 +1730,21 @@ def make_handler(app: AutoClickerApp):
                     config = normalize_config(payload.get("config") or app.load_config())
                     capture = app.save_capture(config, str(payload.get("source") or "manual"))
                     json_response(self, {"ok": True, "capture": capture, "captures": app.captures()})
+                    return
+                if parsed.path == "/api/treasure/detect":
+                    config = normalize_config(payload.get("config") or app.load_config())
+                    result = app.detect_treasure(config, bool(payload.get("tap", True)), str(payload.get("source") or "treasure"))
+                    json_response(self, result)
+                    return
+                if parsed.path == "/api/queue/start":
+                    config = normalize_config(payload.get("config", payload) or app.load_config())
+                    app.save_config(config)
+                    app.queue_runner.start(config)
+                    json_response(self, {"ok": True, "status": app.status(config)})
+                    return
+                if parsed.path == "/api/queue/stop":
+                    app.queue_runner.stop()
+                    json_response(self, {"ok": True, "status": app.status()})
                     return
                 json_response(self, {"error": "Not found"}, status=404)
             except RuntimeError as exc:

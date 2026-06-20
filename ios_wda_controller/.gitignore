@@ -1,0 +1,6 @@
+DerivedData/
+dist/
+captures/
+debug_crops/
+*.log
+config.env

@@ -1,0 +1,37 @@
+{
+  "appId": "com.clicklive.wdacontrolpanel",
+  "productName": "WDA Control Panel",
+  "directories": {
+    "output": "dist"
+  },
+  "files": [
+    "src/**/*",
+    "package.json"
+  ],
+  "extraResources": [
+    {
+      "from": "resources/bin",
+      "to": "resources/bin",
+      "filter": ["**/*"]
+    },
+    {
+      "from": "resources/ipa",
+      "to": "resources/ipa",
+      "filter": ["*.ipa"]
+    }
+  ],
+  "mac": {
+    "category": "public.app-category.developer-tools",
+    "target": ["dmg", "zip"]
+  },
+  "win": {
+    "target": ["nsis", "portable"],
+    "requestedExecutionLevel": "asInvoker"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true
+  }
+}

@@ -1,0 +1,238 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 71;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B10000000000000000000001 /* TikTokAgentApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000001 /* TikTokAgentApp.swift */; };
+		B10000000000000000000002 /* AgentState.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000002 /* AgentState.swift */; };
+		B10000000000000000000003 /* VisionMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000003 /* VisionMatcher.swift */; };
+		B10000000000000000000004 /* AgentViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000004 /* AgentViewModel.swift */; };
+		B10000000000000000000005 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000005 /* ContentView.swift */; };
+		B10000000000000000000006 /* treasure_box_no_timer.png in Resources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000006 /* treasure_box_no_timer.png */; };
+		B10000000000000000000007 /* QueueClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000007 /* QueueClient.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A10000000000000000000008 /* TikTokAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TikTokAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C10000000000000000000001 /* TikTokAgentApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TikTokAgentApp.swift; sourceTree = "<group>"; };
+		C10000000000000000000002 /* AgentState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentState.swift; sourceTree = "<group>"; };
+		C10000000000000000000003 /* VisionMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisionMatcher.swift; sourceTree = "<group>"; };
+		C10000000000000000000004 /* AgentViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentViewModel.swift; sourceTree = "<group>"; };
+		C10000000000000000000005 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		C10000000000000000000006 /* treasure_box_no_timer.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = treasure_box_no_timer.png; sourceTree = "<group>"; };
+		C10000000000000000000007 /* QueueClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueueClient.swift; sourceTree = "<group>"; };
+		C10000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000000000000000000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000000003 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000009 /* TikTokAgent */,
+				A10000000000000000000004 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000004 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000008 /* TikTokAgent.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000009 /* TikTokAgent */ = {
+			isa = PBXGroup;
+			children = (
+				C10000000000000000000001 /* TikTokAgentApp.swift */,
+				C10000000000000000000002 /* AgentState.swift */,
+				C10000000000000000000003 /* VisionMatcher.swift */,
+				C10000000000000000000004 /* AgentViewModel.swift */,
+				C10000000000000000000005 /* ContentView.swift */,
+				C10000000000000000000006 /* treasure_box_no_timer.png */,
+				C10000000000000000000007 /* QueueClient.swift */,
+				C10000000000000000000008 /* Info.plist */,
+			);
+			path = TikTokAgent;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000000000000000000002 /* TikTokAgent */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000011 /* Build configuration list for PBXNativeTarget "TikTokAgent" */;
+			buildPhases = (
+				A10000000000000000000005 /* Sources */,
+				A10000000000000000000006 /* Frameworks */,
+				A10000000000000000000007 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TikTokAgent;
+			packageProductDependencies = (
+			);
+			productName = TikTokAgent;
+			productReference = A10000000000000000000008 /* TikTokAgent.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2650;
+				LastUpgradeCheck = 2650;
+				TargetAttributes = {
+					A10000000000000000000002 = {
+						CreatedOnToolsVersion = 26.5;
+					};
+				};
+			};
+			buildConfigurationList = A10000000000000000000010 /* Build configuration list for PBXProject "TikTokAgent" */;
+			compatibilityVersion = "Xcode 16.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A10000000000000000000003;
+			productRefGroup = A10000000000000000000004 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A10000000000000000000002 /* TikTokAgent */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A10000000000000000000007 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000006 /* treasure_box_no_timer.png in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000001 /* TikTokAgentApp.swift in Sources */,
+				B10000000000000000000002 /* AgentState.swift in Sources */,
+				B10000000000000000000003 /* VisionMatcher.swift in Sources */,
+				B10000000000000000000004 /* AgentViewModel.swift in Sources */,
+				B10000000000000000000005 /* ContentView.swift in Sources */,
+				B10000000000000000000007 /* QueueClient.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A10000000000000000000012 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		A10000000000000000000013 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		A10000000000000000000014 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K4AFRCL9WM;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TikTokAgent/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.clicklive.tiktokagent;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		A10000000000000000000015 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = K4AFRCL9WM;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = TikTokAgent/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.clicklive.tiktokagent;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000000000000000000010 /* Build configuration list for PBXProject "TikTokAgent" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000012 /* Debug */,
+				A10000000000000000000013 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000011 /* Build configuration list for PBXNativeTarget "TikTokAgent" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000014 /* Debug */,
+				A10000000000000000000015 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A10000000000000000000001 /* Project object */;
+}

@@ -25,6 +25,26 @@ MESSAGE_EXTRACTOR_JS = """
     }
     return '';
   };
+  const timestampMs = (messageEl, timeEl) => {
+    const names = ['data-timestamp', 'data-date', 'datetime', 'title', 'aria-label'];
+    const raw = attr(timeEl || messageEl, names) || attr(messageEl, names);
+    if (!raw) return null;
+
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return numeric < 100000000000 ? numeric * 1000 : numeric;
+    }
+
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) return parsed;
+
+    const clock = raw.match(/(?:^|\\s)(\\d{1,2}):(\\d{2})(?::(\\d{2}))?(?:\\s|$)/);
+    if (!clock) return null;
+    const value = new Date();
+    value.setHours(Number(clock[1]), Number(clock[2]), Number(clock[3] || 0), 0);
+    if (value.getTime() > Date.now() + 60000) value.setDate(value.getDate() - 1);
+    return value.getTime();
+  };
   const textFromNode = (node) => {
     if (!node) return '';
 
@@ -107,6 +127,7 @@ MESSAGE_EXTRACTOR_JS = """
       text,
       sender_name: senderName,
       timestamp,
+      timestamp_ms: timestampMs(el, timeNode),
       outgoing,
     };
   }).filter((item) => item.text);
@@ -169,6 +190,7 @@ class WebMessage:
     sender_name: Optional[str]
     is_outgoing: bool
     signal: Optional[BoxSignal]
+    timestamp_ms: Optional[int]
 
 
 @dataclass
@@ -193,6 +215,15 @@ class TelegramWebReader:
 
     def run(self) -> None:
         self.db.init_schema()
+        self._prune_stale_pending()
+        deleted = self.db.prune_queue(self.config.queue_max_items)
+        if deleted["queue"] or deleted["messages"]:
+            logger.info(
+                "Pruned queue on startup queue=%s messages=%s max_items=%s",
+                deleted["queue"],
+                deleted["messages"],
+                self.config.queue_max_items,
+            )
 
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
@@ -233,8 +264,24 @@ class TelegramWebReader:
 
     def _poll_pages(self, pages: List[TargetPage]) -> None:
         logger.info("Polling Telegram Web messages targets=%s", len(pages))
+        next_reload_at = time.monotonic() + self.config.telegram_web_reload_seconds
+        next_stale_prune_at = time.monotonic() + 30
 
         while True:
+            if time.monotonic() >= next_stale_prune_at:
+                self._prune_stale_pending()
+                next_stale_prune_at = time.monotonic() + 30
+
+            if time.monotonic() >= next_reload_at:
+                for target_page in pages:
+                    try:
+                        logger.info("Reloading Telegram Web target=%s", target_page.target.label)
+                        target_page.page.reload(wait_until="domcontentloaded")
+                        target_page.page.wait_for_timeout(2000)
+                    except Exception:
+                        logger.exception("Failed to reload Telegram Web target=%s", target_page.target.label)
+                next_reload_at = time.monotonic() + self.config.telegram_web_reload_seconds
+
             for target_page in pages:
                 try:
                     self._scan_page(target_page)
@@ -267,6 +314,19 @@ class TelegramWebReader:
                 continue
 
             if message.is_outgoing and not self.config.telegram_web_include_outgoing:
+                continue
+
+            if not _is_recent_message(
+                message.timestamp_ms,
+                max_age_seconds=self.config.telegram_web_queue_max_age_seconds,
+            ):
+                logger.debug(
+                    "Skipped stale Telegram Web message room=%s message=%s timestamp_ms=%s max_age=%ss",
+                    room_key,
+                    message.key,
+                    message.timestamp_ms,
+                    self.config.telegram_web_queue_max_age_seconds,
+                )
                 continue
 
             filter_result = self.filter_engine.evaluate(message.text, message.signal)
@@ -317,6 +377,7 @@ class TelegramWebReader:
                         "target_label": target.label,
                         "target_url": target.url,
                         "message_key": message.key,
+                        "telegram_timestamp_ms": message.timestamp_ms,
                         "matched_filter": (
                             filter_result.rule.to_payload(self.config.queue_default_priority)
                             if filter_result.rule is not None
@@ -340,6 +401,27 @@ class TelegramWebReader:
         self.initialized_rooms.add(room_key)
         if inserted_count:
             logger.info("Inserted Telegram Web messages room=%s count=%s", room_key, inserted_count)
+            deleted = self.db.prune_queue(self.config.queue_max_items)
+            if deleted["queue"] or deleted["messages"]:
+                logger.info(
+                    "Pruned queue queue=%s messages=%s max_items=%s",
+                    deleted["queue"],
+                    deleted["messages"],
+                    self.config.queue_max_items,
+                )
+
+    def _prune_stale_pending(self) -> None:
+        cutoff_ms = int(
+            (time.time() - self.config.telegram_web_queue_max_age_seconds) * 1000
+        )
+        deleted = self.db.prune_stale_telegram_pending(cutoff_ms)
+        if deleted["queue"] or deleted["messages"]:
+            logger.info(
+                "Pruned stale Telegram pending queue=%s messages=%s max_age=%ss",
+                deleted["queue"],
+                deleted["messages"],
+                self.config.telegram_web_queue_max_age_seconds,
+            )
 
     def _read_messages(self, page: Page, room_key: str) -> List[WebMessage]:
         raw_items = page.evaluate(MESSAGE_EXTRACTOR_JS, self.config.telegram_web_message_scan_limit)
@@ -357,6 +439,7 @@ class TelegramWebReader:
                     sender_name=(item.get("sender_name") or None),
                     is_outgoing=bool(item.get("outgoing")),
                     signal=parse_box_signal(text),
+                    timestamp_ms=_optional_positive_int(item.get("timestamp_ms")),
                 )
             )
 
@@ -434,6 +517,26 @@ def setup_logging(log_level: str) -> None:
 
 def _hash_key(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _optional_positive_int(value: object) -> Optional[int]:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _is_recent_message(
+    timestamp_ms: Optional[int],
+    max_age_seconds: int,
+    now_ms: Optional[int] = None,
+) -> bool:
+    if timestamp_ms is None:
+        return False
+    current_ms = now_ms if now_ms is not None else int(time.time() * 1000)
+    age_ms = current_ms - timestamp_ms
+    return 0 <= age_ms <= max_age_seconds * 1000
 
 
 def main() -> None:

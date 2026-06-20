@@ -35,15 +35,18 @@ BOT_QUEUE_LEASE_SECONDS=30
 BOT_QUEUE_POLL_INTERVAL_SECONDS=0.1
 BOT_QUEUE_MAX_ATTEMPTS=5
 BOT_QUEUE_RETRY_DELAY_SECONDS=2
+BOT_QUEUE_MAX_ITEMS=1000
 
 TELEGRAM_WEB_URL=https://web.telegram.org/k/
 TELEGRAM_WEB_PROFILE_DIR=data/telegram_web_profile
-TELEGRAM_WEB_HEADLESS=false
+TELEGRAM_WEB_HEADLESS=true
 TELEGRAM_WEB_TARGETS=""     # ví dụ: "Group A|https://web.telegram.org/k/#-100xxx;Group B|https://web.telegram.org/k/#@group_username"
 TELEGRAM_WEB_POLL_INTERVAL_SECONDS=0.2
+TELEGRAM_WEB_RELOAD_SECONDS=900
+TELEGRAM_WEB_QUEUE_MAX_AGE_SECONDS=300
 TELEGRAM_WEB_MESSAGE_SCAN_LIMIT=30
 TELEGRAM_WEB_ENQUEUE=true
-TELEGRAM_WEB_SKIP_EXISTING_ON_START=true
+TELEGRAM_WEB_SKIP_EXISTING_ON_START=false
 TELEGRAM_WEB_INCLUDE_OUTGOING=false
 TELEGRAM_WEB_FILTER_ENABLED=false
 TELEGRAM_WEB_FILTER_CONFIG_PATH=data/message_filters.json
@@ -100,10 +103,16 @@ docker run --env-file .env --rm telegram-bot python telegram_web_reader.py
 ```
 
 Ghi chú:
-- Lần đầu chạy browser reader, hãy đăng nhập Telegram Web trong cửa sổ mở ra.
+- Trên server, dùng `TELEGRAM_WEB_HEADLESS=true` với profile đã đăng nhập. Nếu chưa
+  có profile, đăng nhập một lần trên máy có GUI rồi chuyển profile lên server.
 - `TELEGRAM_WEB_TARGETS` nhận dạng `label|url`, ngăn cách nhiều target bằng dấu `;`.
 - Nếu để trống `TELEGRAM_WEB_TARGETS`, reader sẽ mở Telegram Web và đọc chat đang active.
 - Bật `TELEGRAM_WEB_FILTER_ENABLED=true` để chỉ enqueue message rương đạt filter trong `TELEGRAM_WEB_FILTER_CONFIG_PATH`.
+- Reader chỉ enqueue message Telegram có timestamp trong vòng
+  `TELEGRAM_WEB_QUEUE_MAX_AGE_SECONDS` gần nhất, mặc định 5 phút. Tin cũ hoặc
+  không xác định được timestamp sẽ không vào queue.
+- Đặt `TELEGRAM_WEB_SKIP_EXISTING_ON_START=false` để sau khi restart vẫn nhận
+  các tin chưa lưu trong cửa sổ 5 phút; SQLite tự chống trùng theo message ID.
 - Reader tự reload file filter theo `TELEGRAM_WEB_FILTER_RELOAD_SECONDS`, nên có thể sửa filter mà không cần restart.
 - Mỗi filter dùng AND logic bên trong filter đó. Nhiều filter dùng OR logic: match một filter bất kỳ là được enqueue.
 - Nếu file filter không có rule (`"filters": []`) hoặc toàn bộ rule bị tắt, reader sẽ nhận tất cả message.
