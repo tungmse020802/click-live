@@ -326,16 +326,23 @@ class WdaLauncher {
     this.state = STATE.STOPPING;
     this.emit();
     const procs = [this.forwardProcess, this.runProcess].filter(Boolean);
-    for (const proc of procs) {
-      try { proc.kill("SIGTERM"); } catch {}
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    for (const proc of procs) {
-      try { if (!proc.killed) proc.kill("SIGKILL"); } catch {}
-    }
-    // On Windows, sockets enter TIME_WAIT after process kill. Wait for OS to release ports.
     if (process.platform === "win32") {
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      // On Windows with shell:true, killing the shell doesn't kill ios.exe child.
+      // Use taskkill /F /T to forcefully kill the entire process tree.
+      for (const proc of procs) {
+        try {
+          if (proc.pid) spawn("taskkill", ["/F", "/T", "/PID", String(proc.pid)], { shell: false, stdio: "ignore" });
+        } catch {}
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    } else {
+      for (const proc of procs) {
+        try { proc.kill("SIGTERM"); } catch {}
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      for (const proc of procs) {
+        try { if (!proc.killed) proc.kill("SIGKILL"); } catch {}
+      }
     }
     this.runProcess = null;
     this.forwardProcess = null;
