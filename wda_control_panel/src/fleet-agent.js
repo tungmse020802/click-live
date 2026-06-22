@@ -926,25 +926,25 @@ function parseXcrunDevices(output) {
 
 function parseGoIosList(output) {
   const lines = String(output).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const json = lines.find((line) => line.startsWith("{") || line.startsWith("["));
-  if (json) {
-    const data = parseJson(json, null);
-    if (data?.deviceList) {
-      return data.deviceList.map((entry) => ({
-        udid: entry.Udid || entry.udid,
-        name: entry.ProductType || entry.productType || "iPhone",
-        version: entry.ProductVersion || entry.productVersion || "",
+  const payloads = lines
+    .filter((line) => line.startsWith("{") || line.startsWith("["))
+    .map((line) => parseJson(line, null))
+    .filter(Boolean);
+  const data = payloads.find((entry) => Array.isArray(entry?.deviceList))
+    || payloads.find(Array.isArray);
+  const entries = Array.isArray(data?.deviceList) ? data.deviceList : data;
+  if (Array.isArray(entries)) {
+    return entries.map((entry) => {
+      const details = typeof entry === "string" ? { Udid: entry } : entry;
+      return {
+        udid: details.Udid || details.udid,
+        name: details.ProductName || details.productName
+          || details.ProductType || details.productType || "iPhone",
+        version: details.ProductVersion || details.productVersion || "",
+        productType: details.ProductType || details.productType || "",
         status: "connected",
-      }));
-    }
-    if (Array.isArray(data)) {
-      return data.map((entry) => ({
-        udid: entry.Udid || entry.udid,
-        name: entry.ProductType || entry.productType || "iPhone",
-        version: entry.ProductVersion || entry.productVersion || "",
-        status: "connected",
-      }));
-    }
+      };
+    }).filter((entry) => entry.udid);
   }
   return lines
     .filter((line) => /^[0-9A-Fa-f-]{20,}$/.test(line))

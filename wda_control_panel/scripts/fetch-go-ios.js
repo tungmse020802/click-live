@@ -21,6 +21,7 @@ const { promisify } = require("node:util");
 const execFileAsync = promisify(execFile);
 
 const GO_IOS_VERSION = process.env.GO_IOS_VERSION || "v1.0.143";
+const WINTUN_VERSION = process.env.WINTUN_VERSION || "0.14.1";
 const TARGETS = [
   {
     platform: "windows",
@@ -111,12 +112,46 @@ async function downloadTarget(target, assets) {
   }
 }
 
+async function ensureWintun() {
+  const outDir = path.join(BIN_ROOT, "windows");
+  const dllPath = path.join(outDir, "wintun.dll");
+  if (await fileExists(dllPath)) {
+    console.log(`Wintun already present at ${dllPath}, skipping`);
+    return;
+  }
+
+  const zipName = `wintun-${WINTUN_VERSION}.zip`;
+  const zipPath = path.join(outDir, zipName);
+  const extractDir = path.join(outDir, `.wintun-${WINTUN_VERSION}`);
+  const url = `https://www.wintun.net/builds/${zipName}`;
+  try {
+    await fetchAsset(url, zipPath);
+    await unzip(zipPath, extractDir);
+    const sourcePath = path.join(
+      extractDir,
+      "wintun",
+      "bin",
+      "amd64",
+      "wintun.dll",
+    );
+    if (!await fileExists(sourcePath)) {
+      throw new Error(`Missing amd64/wintun.dll in ${zipName}`);
+    }
+    await fs.copyFile(sourcePath, dllPath);
+    console.log(`Installed Wintun -> ${dllPath}`);
+  } finally {
+    await fs.unlink(zipPath).catch(() => {});
+    await fs.rm(extractDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function main() {
   await fs.mkdir(BIN_ROOT, { recursive: true });
   const assets = await releaseAssets();
   for (const target of TARGETS) {
     await downloadTarget(target, assets);
   }
+  await ensureWintun();
   console.log("All required go-ios binaries ready under resources/bin/");
 }
 

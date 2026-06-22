@@ -45,7 +45,8 @@ npm install
 npm run build:win
 ```
 
-`npm run build:win` sẽ tự chạy `npm run fetch:go-ios`, tải `go-ios.exe` vào
+`npm run build:win` sẽ tự chạy `npm run fetch:go-ios`, tải `go-ios.exe` và
+`wintun.dll` vào
 `resources/bin/windows/`, rồi đóng gói tất cả vào installer.
 
 Output nằm trong:

@@ -23,7 +23,7 @@ npm run build:win
 
 Lệnh build sẽ:
 
-1. Chạy `scripts/fetch-go-ios.js` để tải `go-ios.exe` vào `resources/bin/windows/`.
+1. Chạy `scripts/fetch-go-ios.js` để tải `go-ios.exe` và `wintun.dll` vào `resources/bin/windows/`.
 2. Copy `resources/bin/**` và `resources/ipa/*.ipa` vào app bằng
    `electron-builder.extraResources`.
 3. Xuất installer ở `dist/`.

@@ -114,13 +114,17 @@ async function listInstalledApps(device, config = {}) {
 
 function parseApps(output) {
   const lines = String(output).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const json = lines.find((line) => line.startsWith("{") || line.startsWith("["));
-  if (json) {
-    const data = parseJson(json, null);
-    if (Array.isArray(data)) return data;
-    if (Array.isArray(data?.apps)) return data.apps;
-  }
-  return lines.map((line) => ({ bundleId: line }));
+  const payloads = lines
+    .filter((line) => line.startsWith("{") || line.startsWith("["))
+    .map((line) => parseJson(line, null))
+    .filter(Boolean);
+  const data = payloads.find(Array.isArray)
+    || payloads.find((entry) => Array.isArray(entry?.apps));
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.apps)) return data.apps;
+  return lines
+    .filter((line) => !line.startsWith("{") && !line.startsWith("["))
+    .map((line) => ({ bundleId: line.split(/\s+/)[0] }));
 }
 
 function hasWdaInstalled(apps, bundleId) {
