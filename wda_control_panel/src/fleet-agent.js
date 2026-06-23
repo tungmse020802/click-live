@@ -73,6 +73,14 @@ function uniqueStrings(values) {
   return [...new Set(values.filter(Boolean))];
 }
 
+function resolveDeeplinkOpenMode(configuredMode) {
+  const mode = String(configuredMode || "").trim();
+  if (process.platform === "win32") {
+    return mode && mode !== "safari" ? mode : "mobile_deeplink";
+  }
+  return mode || "mobile_deeplink";
+}
+
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
@@ -843,7 +851,7 @@ class FleetAgent {
       PLATFORM_VERSION: device.version || config.platformVersion || "",
       TIKTOK_BUNDLE_ID: controllerEnv.TIKTOK_BUNDLE_ID || "com.ss.iphone.ugc.Ame",
       WDA_SESSION_BUNDLE_ID: controllerEnv.WDA_SESSION_BUNDLE_ID || "com.apple.mobilesafari",
-      DEEPLINK_OPEN_MODE: controllerEnv.DEEPLINK_OPEN_MODE || "mobile_deeplink",
+      DEEPLINK_OPEN_MODE: resolveDeeplinkOpenMode(controllerEnv.DEEPLINK_OPEN_MODE),
       DEEPLINK_FALLBACK_TO_URL: controllerEnv.DEEPLINK_FALLBACK_TO_URL || "false",
       DEEPLINK_REQUIRE_TIKTOK_FOREGROUND: controllerEnv.DEEPLINK_REQUIRE_TIKTOK_FOREGROUND || "true",
       LIVE_TIME_MIN_SECONDS: String(config.liveTimeMinSeconds ?? 20),

@@ -32,6 +32,14 @@ function readEnvFile(filePath) {
   return result;
 }
 
+function resolveDeeplinkOpenMode(configuredMode) {
+  const mode = String(configuredMode || "").trim();
+  if (process.platform === "win32") {
+    return mode && mode !== "safari" ? mode : "mobile_deeplink";
+  }
+  return mode || "mobile_deeplink";
+}
+
 function extractTimeMeta(item) {
   const payload = item?.payload || {};
   const text = String(item?.message?.text || "");
@@ -133,7 +141,7 @@ async function main() {
     PLATFORM_VERSION: device.version,
     TIKTOK_BUNDLE_ID: controllerEnv.TIKTOK_BUNDLE_ID || "com.ss.iphone.ugc.Ame",
     WDA_SESSION_BUNDLE_ID: controllerEnv.WDA_SESSION_BUNDLE_ID || "com.apple.mobilesafari",
-    DEEPLINK_OPEN_MODE: controllerEnv.DEEPLINK_OPEN_MODE || "mobile_deeplink",
+    DEEPLINK_OPEN_MODE: resolveDeeplinkOpenMode(controllerEnv.DEEPLINK_OPEN_MODE),
     DEEPLINK_FALLBACK_TO_URL: controllerEnv.DEEPLINK_FALLBACK_TO_URL || "false",
     DEEPLINK_REQUIRE_TIKTOK_FOREGROUND: controllerEnv.DEEPLINK_REQUIRE_TIKTOK_FOREGROUND || "true",
     LIVE_TIME_MIN_SECONDS: controllerEnv.LIVE_TIME_MIN_SECONDS || "20",
