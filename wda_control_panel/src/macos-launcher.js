@@ -143,19 +143,47 @@ class MacosLauncher {
     }
   }
 
-  hasBuildProducts() {
+  buildBundleId() {
+    return String(this.settings.wdaBundleId || "com.tungld.clicklive.WebDriverAgentRunner.xctrunner")
+      .replace(/\.xctrunner$/, "");
+  }
+
+  buildFingerprint() {
+    return JSON.stringify({
+      udid: this.device.udid,
+      teamId: this.settings.appleTeamId,
+      bundleId: this.buildBundleId(),
+      projectPath: path.resolve(this.settings.wdaProjectPath),
+    });
+  }
+
+  buildMetadataPath() {
+    return path.join(this.derivedDataPath, ".wda-build-fingerprint.json");
+  }
+
+  hasBuildProducts(fingerprint) {
     const products = path.join(this.derivedDataPath, "Build", "Products");
     if (!fs.existsSync(products)) return false;
-    return fs.readdirSync(products).some((name) => name.endsWith(".xctestrun"));
+    const hasXctestrun = fs.readdirSync(products).some((name) => name.endsWith(".xctestrun"));
+    if (!hasXctestrun) return false;
+    try {
+      return fs.readFileSync(this.buildMetadataPath(), "utf8") === fingerprint;
+    } catch {
+      return false;
+    }
   }
 
   async ensureBuilt() {
-    if (this.hasBuildProducts()) return;
     if (!this.settings.appleTeamId) {
       throw new Error("WDA is not built for this slot. Select Apple Team ID in Setup first.");
     }
-    const bundleId = String(this.settings.wdaBundleId || "com.tungld.clicklive.WebDriverAgentRunner.xctrunner")
-      .replace(/\.xctrunner$/, "");
+    const fingerprint = this.buildFingerprint();
+    if (this.hasBuildProducts(fingerprint)) return;
+    if (fs.existsSync(this.derivedDataPath)) {
+      this.log("WDA signing cache is stale; removing DerivedData before rebuild...");
+      fs.rmSync(this.derivedDataPath, { recursive: true, force: true });
+    }
+    const bundleId = this.buildBundleId();
     const args = [
       "-project", this.settings.wdaProjectPath,
       "-scheme", "WebDriverAgentRunner",
@@ -184,6 +212,7 @@ class MacosLauncher {
         else reject(new Error(`WDA build failed with code ${code}: ${tail.slice(-1200)}`));
       });
     });
+    fs.writeFileSync(this.buildMetadataPath(), fingerprint, "utf8");
     this.log("WDA build-for-testing succeeded");
   }
 

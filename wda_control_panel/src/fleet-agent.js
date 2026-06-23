@@ -69,6 +69,10 @@ function run(command, args, options = {}) {
   });
 }
 
+function uniqueStrings(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
@@ -178,6 +182,15 @@ class FleetAgent {
     };
   }
 
+  getReachableTargetDevices(config, options = {}) {
+    const requireDetected = options.requireDetected !== false;
+    const enabledWithUdid = config.devices.filter((device) => device.enabled && device.udid);
+    if (!requireDetected) return enabledWithUdid;
+    const detectedUdids = new Set((this.detectedDevices || []).map((device) => device.udid).filter(Boolean));
+    if (!detectedUdids.size) return enabledWithUdid;
+    return enabledWithUdid.filter((device) => detectedUdids.has(device.udid));
+  }
+
   async scanDetected() {
     const settings = this.store.get();
     const tool = settings.launcherTool;
@@ -204,7 +217,13 @@ class FleetAgent {
       args = ["list", "--details"];
     }
     this.log(`Scanning USB devices via ${command} ${args.join(" ")}`);
-    const result = await run(command, args);
+    let result = await run(command, args);
+    if (!result.ok && tool !== "pymobiledevice3") {
+      const detail = result.stderr || result.stdout;
+      this.log(`Detailed scan failed, retrying UDID-only scan: ${detail}`);
+      args = ["list"];
+      result = await run(command, args);
+    }
     if (!result.ok) {
       this.detectedDevices = [];
       this.lastScanAt = new Date().toISOString();
@@ -292,8 +311,16 @@ class FleetAgent {
 
   async installWdaAll() {
     const config = this.store.get();
-    const targets = config.devices.filter((device) => device.enabled && device.udid);
+    const targets = this.getReachableTargetDevices(config);
+    const skipped = uniqueStrings(
+      config.devices
+        .filter((device) => device.enabled && device.udid && !targets.includes(device))
+        .map((device) => device.deviceId),
+    );
     this.log(`Installing WDA on ${targets.length} device(s)`);
+    if (skipped.length) {
+      this.log(`Skipping ${skipped.length} device(s) not present in latest scan: ${skipped.join(", ")}`);
+    }
     const results = await Promise.allSettled(
       targets.map((device) => this.installWda(device.deviceId)),
     );
@@ -322,7 +349,7 @@ class FleetAgent {
 
   async checkWdaInstalledAll() {
     const config = this.store.get();
-    const targets = config.devices.filter((device) => device.enabled && device.udid);
+    const targets = this.getReachableTargetDevices(config);
     return Promise.all(targets.map(async (device) => ({
       deviceId: device.deviceId,
       ...(await this.checkWdaInstalled(device.deviceId)),
@@ -387,6 +414,12 @@ class FleetAgent {
     if (!device) throw new Error(`Unknown deviceId ${deviceId}`);
     if (!device.enabled) throw new Error(`Device ${deviceId} is disabled`);
     if (!device.udid) throw new Error(`Device ${deviceId} has no UDID`);
+    if ((this.detectedDevices || []).length > 0) {
+      const detectedUdids = new Set(this.detectedDevices.map((entry) => entry.udid).filter(Boolean));
+      if (!detectedUdids.has(device.udid)) {
+        throw new Error(`Device ${device.udid} is not present in the latest USB scan`);
+      }
+    }
     if (config.launcherTool === "macos" && process.platform === "darwin") {
       const controllerDir = config.automationControllerPath || DEFAULT_CONTROLLER_DIR;
       const controllerEnv = readEnvFile(`${controllerDir}/config.env`);
@@ -455,8 +488,16 @@ class FleetAgent {
 
   async startAllEnabled() {
     const config = this.store.get();
-    const targets = config.devices.filter((device) => device.enabled && device.udid);
+    const targets = this.getReachableTargetDevices(config);
+    const skipped = uniqueStrings(
+      config.devices
+        .filter((device) => device.enabled && device.udid && !targets.includes(device))
+        .map((device) => device.deviceId),
+    );
     this.log(`Starting WDA on ${targets.length} device(s)`);
+    if (skipped.length) {
+      this.log(`Skipping ${skipped.length} device(s) not present in latest scan: ${skipped.join(", ")}`);
+    }
     const results = await Promise.allSettled(targets.map((device) => this.startDevice(device.deviceId)));
     return results.map((result, index) => ({
       deviceId: targets[index].deviceId,
@@ -802,7 +843,7 @@ class FleetAgent {
       PLATFORM_VERSION: device.version || config.platformVersion || "",
       TIKTOK_BUNDLE_ID: controllerEnv.TIKTOK_BUNDLE_ID || "com.ss.iphone.ugc.Ame",
       WDA_SESSION_BUNDLE_ID: controllerEnv.WDA_SESSION_BUNDLE_ID || "com.apple.mobilesafari",
-      DEEPLINK_OPEN_MODE: controllerEnv.DEEPLINK_OPEN_MODE || "safari",
+      DEEPLINK_OPEN_MODE: controllerEnv.DEEPLINK_OPEN_MODE || "mobile_deeplink",
       DEEPLINK_FALLBACK_TO_URL: controllerEnv.DEEPLINK_FALLBACK_TO_URL || "false",
       DEEPLINK_REQUIRE_TIKTOK_FOREGROUND: controllerEnv.DEEPLINK_REQUIRE_TIKTOK_FOREGROUND || "true",
       LIVE_TIME_MIN_SECONDS: String(config.liveTimeMinSeconds ?? 20),

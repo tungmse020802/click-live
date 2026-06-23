@@ -79,6 +79,7 @@ class AutomationWorker {
     this.process = null;
     this.state = STATE.IDLE;
     this.lastError = "";
+    this.lastOutputLine = "";
     this.startedAt = null;
   }
 
@@ -117,6 +118,7 @@ class AutomationWorker {
 
     this.state = STATE.STARTING;
     this.lastError = "";
+    this.lastOutputLine = "";
     this.emit();
 
     const env = {
@@ -131,7 +133,7 @@ class AutomationWorker {
       PLATFORM_VERSION: this.device.version || this.settings.platformVersion || "",
       TIKTOK_BUNDLE_ID: controllerEnv.TIKTOK_BUNDLE_ID || "com.ss.iphone.ugc.Ame",
       WDA_SESSION_BUNDLE_ID: controllerEnv.WDA_SESSION_BUNDLE_ID || "com.apple.mobilesafari",
-      DEEPLINK_OPEN_MODE: controllerEnv.DEEPLINK_OPEN_MODE || "safari",
+      DEEPLINK_OPEN_MODE: controllerEnv.DEEPLINK_OPEN_MODE || "mobile_deeplink",
       DEEPLINK_FALLBACK_TO_URL: controllerEnv.DEEPLINK_FALLBACK_TO_URL || "false",
       DEEPLINK_REQUIRE_TIKTOK_FOREGROUND: controllerEnv.DEEPLINK_REQUIRE_TIKTOK_FOREGROUND || "true",
       PREFER_APPIUM_APP_MANAGEMENT: controllerEnv.PREFER_APPIUM_APP_MANAGEMENT || "false",
@@ -173,6 +175,7 @@ class AutomationWorker {
 
     const handleOutput = (chunk) => {
       for (const line of String(chunk).split(/\r?\n/).filter(Boolean)) {
+        this.lastOutputLine = line.trim();
         this.log(line);
         if (line.includes("Appium session ready:")) {
           this.state = STATE.RUNNING;
@@ -192,7 +195,10 @@ class AutomationWorker {
       this.process = null;
       if (this.state !== STATE.IDLE) {
         this.state = code === 0 ? STATE.IDLE : STATE.ERROR;
-        this.lastError = code === 0 ? "" : `worker exited code=${code} signal=${signal || ""}`.trim();
+        const exitLabel = `worker exited code=${code} signal=${signal || ""}`.trim();
+        this.lastError = code === 0
+          ? ""
+          : `${exitLabel}${this.lastOutputLine ? `: ${this.lastOutputLine}` : ""}`;
         this.emit();
       }
       this.log(`exited code=${code} signal=${signal || ""}`);

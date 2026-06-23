@@ -133,7 +133,7 @@ async function main() {
     PLATFORM_VERSION: device.version,
     TIKTOK_BUNDLE_ID: controllerEnv.TIKTOK_BUNDLE_ID || "com.ss.iphone.ugc.Ame",
     WDA_SESSION_BUNDLE_ID: controllerEnv.WDA_SESSION_BUNDLE_ID || "com.apple.mobilesafari",
-    DEEPLINK_OPEN_MODE: controllerEnv.DEEPLINK_OPEN_MODE || "safari",
+    DEEPLINK_OPEN_MODE: controllerEnv.DEEPLINK_OPEN_MODE || "mobile_deeplink",
     DEEPLINK_FALLBACK_TO_URL: controllerEnv.DEEPLINK_FALLBACK_TO_URL || "false",
     DEEPLINK_REQUIRE_TIKTOK_FOREGROUND: controllerEnv.DEEPLINK_REQUIRE_TIKTOK_FOREGROUND || "true",
     LIVE_TIME_MIN_SECONDS: controllerEnv.LIVE_TIME_MIN_SECONDS || "20",

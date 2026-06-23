@@ -17,7 +17,7 @@ const config = {
   deviceId: process.env.DEVICE_ID || "iphone-01",
   tiktokBundleId: process.env.TIKTOK_BUNDLE_ID || "",
   wdaSessionBundleId: process.env.WDA_SESSION_BUNDLE_ID || process.env.TIKTOK_BUNDLE_ID || "",
-  deeplinkOpenMode: process.env.DEEPLINK_OPEN_MODE || "safari",
+  deeplinkOpenMode: process.env.DEEPLINK_OPEN_MODE || "mobile_deeplink",
   deeplinkFallbackToUrl: boolEnv("DEEPLINK_FALLBACK_TO_URL", false),
   deeplinkOpenRetries: numberEnv("DEEPLINK_OPEN_RETRIES", 2),
   deeplinkAlertWaitMs: numberEnv("DEEPLINK_ALERT_WAIT_MS", 1800),

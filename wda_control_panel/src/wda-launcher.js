@@ -100,6 +100,35 @@ function buildPortForwardCommand(tool, device, settings) {
   };
 }
 
+function runCommand(command, args) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("error", (error) => resolve({ ok: false, stdout, stderr: error.message, code: -1 }));
+    child.on("close", (code) => resolve({ ok: code === 0, stdout, stderr, code }));
+  });
+}
+
+async function killPortListenerWindows(port, log) {
+  const result = await runCommand("netstat", ["-ano", "-p", "tcp"]);
+  if (!result.ok) return;
+  const lines = `${result.stdout}\n${result.stderr}`.split(/\r?\n/);
+  const candidates = lines
+    .map((line) => line.trim())
+    .filter((line) => line && /\bLISTENING\b/i.test(line) && new RegExp(`:${port}\\s`).test(line));
+  const pids = [...new Set(candidates.map((line) => line.split(/\s+/).at(-1)).filter((pid) => /^\d+$/.test(pid)))];
+  for (const pid of pids) {
+    if (log) log(`forward: cleaning stale listener on port ${port} (pid ${pid})`);
+    await runCommand("taskkill", ["/F", "/T", "/PID", pid]);
+  }
+}
+
 class WdaLauncher {
   constructor({ device, settings, onState, onLog }) {
     this.device = device;
@@ -204,7 +233,7 @@ class WdaLauncher {
       this.log(`runwda exited code=${code}`);
       if (this.runProcess !== child) return;
       this.runProcess = null;
-      if (this.state === STATE.RUNNING) {
+      if (this.state === STATE.RUNNING || this.state === STATE.STARTING) {
         this.state = STATE.ERROR;
         this.lastError = `runwda exited unexpectedly with code ${code}`;
         this.emit();
@@ -241,6 +270,9 @@ class WdaLauncher {
 
   async spawnPortForwardWithRetry(maxAttempts = 5, retryDelayMs = 2000) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (process.platform === "win32") {
+        await killPortListenerWindows(this.device.port, (message) => this.log(message));
+      }
       const result = await new Promise((resolve) => {
         const { command, args } = buildPortForwardCommand(this.tool, this.device, this.settings);
         if (attempt === 1) this.log(`spawn ${command} ${args.join(" ")}`);
@@ -294,7 +326,7 @@ class WdaLauncher {
         result.child.on("close", (code) => {
           if (this.forwardProcess !== result.child) return;
           this.forwardProcess = null;
-          if (this.state === STATE.RUNNING) {
+          if (this.state === STATE.RUNNING || this.state === STATE.STARTING) {
             this.state = STATE.ERROR;
             this.lastError = `port forward exited with code ${code}`;
             this.emit();
