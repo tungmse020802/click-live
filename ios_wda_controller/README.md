@@ -99,6 +99,20 @@ Khi dùng tài khoản Developer trả phí, đăng ký các iPhone trong Apple 
 build lại IPA với profile chứa các thiết bị đó, rồi có thể dùng cùng IPA để cài
 lên từng máy.
 
+Khi cần đổi sang bundle id mới, không cần sửa tay `config.env` trước. Chạy:
+
+```bash
+cd ios_wda_controller
+./build-wda-ipa-with-bundle.sh com.tungld.clicklive.WebDriverAgentRunner 827H4SVZSB
+```
+
+Script sẽ build lại app với bundle id mới, tạo IPA trong `ios_wda_controller/dist/`
+và mặc định copy luôn sang:
+
+```text
+wda_control_panel/resources/ipa/WebDriverAgentRunner.ipa
+```
+
 WDA cài từ IPA vẫn là XCTest runner. Nó không hoạt động bằng cách bấm icon như
 app thường; Mac/Appium phải launch runner khi bắt đầu phiên điều khiển.
 

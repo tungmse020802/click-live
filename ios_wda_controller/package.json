@@ -5,12 +5,13 @@
   "main": "index.js",
   "scripts": {
     "wda:build": "./build-wda.sh",
+    "wda:build:ipa": "./build-wda-ipa-with-bundle.sh",
     "wda:info": "./wda-profile-info.sh",
     "wda:ipa": "./export-wda-ipa.sh",
     "wda:install": "./install-wda-ipa.sh",
     "start": "./run.sh",
     "worker": "node worker.js",
-    "test": "node --check worker.js && node --check lib/timing.js && node --check lib/debug-mode.js && node test_worker.js && bash -n run.sh && bash -n build-wda.sh && bash -n wda-profile-info.sh && bash -n export-wda-ipa.sh && bash -n install-wda-ipa.sh"
+    "test": "node --check worker.js && node --check lib/timing.js && node --check lib/debug-mode.js && node test_worker.js && bash -n run.sh && bash -n build-wda.sh && bash -n build-wda-ipa-with-bundle.sh && bash -n wda-profile-info.sh && bash -n export-wda-ipa.sh && bash -n install-wda-ipa.sh"
   },
   "keywords": [],
   "author": "",
