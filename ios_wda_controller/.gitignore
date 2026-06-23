@@ -4,3 +4,4 @@ captures/
 debug_crops/
 *.log
 config.env
+!config.env
