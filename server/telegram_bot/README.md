@@ -36,6 +36,7 @@ BOT_QUEUE_POLL_INTERVAL_SECONDS=0.1
 BOT_QUEUE_MAX_ATTEMPTS=5
 BOT_QUEUE_RETRY_DELAY_SECONDS=2
 BOT_QUEUE_MAX_ITEMS=1000
+BOT_QUEUE_TTL_SECONDS=600
 
 TELEGRAM_WEB_URL=https://web.telegram.org/k/
 TELEGRAM_WEB_PROFILE_DIR=data/telegram_web_profile
@@ -51,6 +52,21 @@ TELEGRAM_WEB_INCLUDE_OUTGOING=false
 TELEGRAM_WEB_FILTER_ENABLED=false
 TELEGRAM_WEB_FILTER_CONFIG_PATH=data/message_filters.json
 TELEGRAM_WEB_FILTER_RELOAD_SECONDS=1
+
+TELEGRAM_API_ID=               # api_id từ https://my.telegram.org/apps
+TELEGRAM_API_HASH=             # api_hash từ https://my.telegram.org/apps
+TELEGRAM_PHONE=                # số điện thoại Telegram, ví dụ: +849...
+TELEGRAM_CLIENT_SESSION=data/telegram_client.session
+TELEGRAM_CLIENT_TARGETS=""     # ví dụ: "JunB|#-3734576353;Room383|#-3832976333"
+TELEGRAM_CLIENT_ENQUEUE=true
+TELEGRAM_CLIENT_SKIP_EXISTING_ON_START=true
+TELEGRAM_CLIENT_INCLUDE_OUTGOING=false
+TELEGRAM_CLIENT_QUEUE_MAX_AGE_SECONDS=300
+TELEGRAM_CLIENT_HISTORY_POLL_SECONDS=2
+TELEGRAM_CLIENT_HISTORY_POLL_LIMIT=20
+TELEGRAM_CLIENT_FILTER_ENABLED=false
+TELEGRAM_CLIENT_FILTER_CONFIG_PATH=data/message_filters.json
+TELEGRAM_CLIENT_FILTER_RELOAD_SECONDS=1
 
 QUEUE_JSON_PATH=data/message_queue.json
 QUEUE_JSON_POLL_INTERVAL_SECONDS=0.2
@@ -70,6 +86,7 @@ Database/queue:
 - `chat_messages` lưu lịch sử incoming/outgoing theo `room_id`.
 - `message_queue` lưu job xử lý với `priority`, `status`, `locked_by`, `locked_until`.
 - Worker claim job theo `priority` cao trước. Nếu job bị giữ quá `BOT_QUEUE_LEASE_SECONDS` giây mà chưa hoàn tất, job được đưa lại về `pending` để worker khác nhận.
+- Queue/message cũ hơn `BOT_QUEUE_TTL_SECONDS` giây được dọn tự động nếu không còn đang `processing`. Mặc định là 10 phút; đặt `300` nếu chỉ muốn giữ 5 phút.
 - Gõ `/history` trong một phòng để xem nhanh lịch sử gần nhất của phòng đó.
 - Gõ `/status` để xem thống kê queue.
 
@@ -118,6 +135,18 @@ Ghi chú:
 - Nếu file filter không có rule (`"filters": []`) hoặc toàn bộ rule bị tắt, reader sẽ nhận tất cả message.
 - `BOX: 100/25` là một BOX; các field `min_box1/max_box1` lọc giá trị 1 (`100`), `min_box2/max_box2` lọc giá trị 2 (`25`).
 - `reply_transport=none` nghĩa là job sẽ được xử lý và lưu trace, nhưng không gửi reply ngược bằng Bot API.
+
+Telegram client reader (ổn định hơn Telegram Web):
+```bash
+cd server/telegram_bot
+source .venv/bin/activate
+python3 telethon_reader.py
+```
+
+Ghi chú:
+- Reader này dùng Telegram API thay vì Chromium/Telegram Web nên không bị trắng tab hoặc crash renderer.
+- Lần đầu chạy cần `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_PHONE`; terminal sẽ hỏi mã login Telegram nếu chưa có session.
+- Với room dạng Telegram Web `#-3734576353`, reader tự chuyển sang entity ref `-1003734576353` cho Telethon.
 
 Ví dụ `data/message_filters.json`:
 

@@ -116,6 +116,9 @@ class ChatDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_message_queue_status_created
                     ON message_queue(status, created_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_message_queue_message_id
+                    ON message_queue(message_id);
                 """
             )
 
@@ -569,6 +572,31 @@ class ChatDatabase:
                   )
                 """,
                 (max_items,),
+            )
+            message_cursor = conn.execute(
+                """
+                DELETE FROM chat_messages
+                WHERE id NOT IN (
+                    SELECT message_id
+                    FROM message_queue
+                )
+                """
+            )
+            return {
+                "queue": queue_cursor.rowcount,
+                "messages": message_cursor.rowcount,
+            }
+
+    def prune_queue_older_than(self, max_age_seconds: int) -> Dict[str, int]:
+        cutoff = _now() - max_age_seconds
+        with self._connect() as conn:
+            queue_cursor = conn.execute(
+                """
+                DELETE FROM message_queue
+                WHERE status != 'processing'
+                  AND created_at < ?
+                """,
+                (cutoff,),
             )
             message_cursor = conn.execute(
                 """

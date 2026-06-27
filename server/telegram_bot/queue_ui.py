@@ -1352,6 +1352,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         logger.debug("%s - %s", self.client_address[0], fmt % args)
 
     def _phone_next_job(self, query: Dict[str, List[str]]) -> Dict[str, object]:
+        self._prune_queue_ttl()
         after_id = non_negative_int((query.get("after_id") or ["0"])[0], 0)
         device_id = str((query.get("device_id") or ["phone"])[0] or "phone")
         claimed = self.db.claim_next_after(device_id, self.config.queue_lease_seconds, after_id)
@@ -1373,6 +1374,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": None}
 
     def _send_events(self, query: Dict[str, List[str]]) -> None:
+        self._prune_queue_ttl()
         after_id = (
             _non_negative_int_query(query, "after_id", 0, max_value=None)
             if "after_id" in query
@@ -1537,6 +1539,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _queue_snapshot(self, query: Dict[str, List[str]]) -> Dict[str, object]:
+        self._prune_queue_ttl()
         requested_limit = _int_query(query, "limit", self.config.limit)
         limit = min(requested_limit, self.config.limit)
         statuses = _statuses_query(query)
@@ -1555,6 +1558,16 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             "stats": self.db.get_queue_stats(),
             "items": items,
         }
+
+    def _prune_queue_ttl(self) -> None:
+        deleted = self.db.prune_queue_older_than(self.config.queue_ttl_seconds)
+        if deleted["queue"] or deleted["messages"]:
+            logger.info(
+                "Pruned queue TTL queue=%s messages=%s ttl=%ss",
+                deleted["queue"],
+                deleted["messages"],
+                self.config.queue_ttl_seconds,
+            )
 
     def _filters_snapshot(self) -> Dict[str, object]:
         path = Path(self.config.filter_config_path)

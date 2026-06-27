@@ -197,6 +197,7 @@ class WebMessage:
 class TargetPage:
     target: TelegramWebTarget
     page: Page
+    crashed: bool = False
 
 
 class TelegramWebReader:
@@ -206,6 +207,7 @@ class TelegramWebReader:
         self.seen_keys: Dict[str, Set[str]] = {}
         self.initialized_rooms: Set[str] = set()
         self.room_ids: Dict[str, int] = {}
+        self._last_prune_at = 0.0
         self.filter_engine = MessageFilterEngine(
             enabled=config.telegram_web_filter_enabled,
             config_path=config.telegram_web_filter_config_path,
@@ -216,14 +218,7 @@ class TelegramWebReader:
     def run(self) -> None:
         self.db.init_schema()
         self._prune_stale_pending()
-        deleted = self.db.prune_queue(self.config.queue_max_items)
-        if deleted["queue"] or deleted["messages"]:
-            logger.info(
-                "Pruned queue on startup queue=%s messages=%s max_items=%s",
-                deleted["queue"],
-                deleted["messages"],
-                self.config.queue_max_items,
-            )
+        self._prune_queue(force=True)
 
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
@@ -249,13 +244,22 @@ class TelegramWebReader:
                 )
             ]
 
+        for page in list(context.pages):
+            try:
+                page.close()
+            except Exception:
+                logger.debug("Could not close stale Telegram Web page", exc_info=True)
+
         pages = []
-        for index, target in enumerate(targets):
-            page = context.pages[index] if index < len(context.pages) else context.new_page()
+        for target in targets:
+            page = context.new_page()
+            target_page = TargetPage(target=target, page=page)
+            self._attach_page_handlers(target_page)
             logger.info("Opening Telegram Web target label=%s url=%s", target.label, target.url)
+            page.bring_to_front()
             page.goto(target.url, wait_until="domcontentloaded")
             page.wait_for_timeout(2000)
-            pages.append(TargetPage(target=target, page=page))
+            pages.append(target_page)
 
         logger.info(
             "Telegram Web reader ready. If login is required, complete it in the opened browser."
@@ -275,6 +279,8 @@ class TelegramWebReader:
             if time.monotonic() >= next_reload_at:
                 for target_page in pages:
                     try:
+                        if self._page_needs_reopen(target_page):
+                            self._reopen_page(target_page)
                         logger.info("Reloading Telegram Web target=%s", target_page.target.label)
                         target_page.page.reload(wait_until="domcontentloaded")
                         target_page.page.wait_for_timeout(2000)
@@ -284,11 +290,51 @@ class TelegramWebReader:
 
             for target_page in pages:
                 try:
+                    if self._page_needs_reopen(target_page):
+                        self._reopen_page(target_page)
+                    target_page.page.bring_to_front()
                     self._scan_page(target_page)
                 except Exception:
                     logger.exception("Failed to scan Telegram Web target=%s", target_page.target.label)
 
             time.sleep(self.config.telegram_web_poll_interval_seconds)
+
+    def _attach_page_handlers(self, target_page: TargetPage) -> None:
+        target_page.page.on(
+            "crash",
+            lambda *args: self._mark_page_crashed(target_page),
+        )
+        target_page.page.on(
+            "close",
+            lambda *args: logger.warning(
+                "Telegram Web target closed label=%s url=%s",
+                target_page.target.label,
+                target_page.target.url,
+            ),
+        )
+
+    def _mark_page_crashed(self, target_page: TargetPage) -> None:
+        target_page.crashed = True
+        logger.warning("Telegram Web target crashed label=%s url=%s", target_page.target.label, target_page.target.url)
+
+    def _page_needs_reopen(self, target_page: TargetPage) -> bool:
+        return target_page.crashed or target_page.page.is_closed()
+
+    def _reopen_page(self, target_page: TargetPage) -> None:
+        context = target_page.page.context
+        logger.info("Reopening Telegram Web target label=%s url=%s", target_page.target.label, target_page.target.url)
+        try:
+            if not target_page.page.is_closed():
+                target_page.page.close()
+        except Exception:
+            logger.debug("Could not close crashed Telegram Web page", exc_info=True)
+
+        target_page.page = context.new_page()
+        target_page.crashed = False
+        self._attach_page_handlers(target_page)
+        target_page.page.bring_to_front()
+        target_page.page.goto(target_page.target.url, wait_until="domcontentloaded")
+        target_page.page.wait_for_timeout(2000)
 
     def _scan_page(self, target_page: TargetPage) -> None:
         page = target_page.page
@@ -401,14 +447,28 @@ class TelegramWebReader:
         self.initialized_rooms.add(room_key)
         if inserted_count:
             logger.info("Inserted Telegram Web messages room=%s count=%s", room_key, inserted_count)
-            deleted = self.db.prune_queue(self.config.queue_max_items)
-            if deleted["queue"] or deleted["messages"]:
-                logger.info(
-                    "Pruned queue queue=%s messages=%s max_items=%s",
-                    deleted["queue"],
-                    deleted["messages"],
-                    self.config.queue_max_items,
-                )
+            self._prune_queue()
+
+    def _prune_queue(self, force: bool = False) -> None:
+        now = time.time()
+        if not force and now - self._last_prune_at < 30:
+            return
+        self._last_prune_at = now
+
+        ttl_deleted = self.db.prune_queue_older_than(self.config.queue_ttl_seconds)
+        size_deleted = self.db.prune_queue(self.config.queue_max_items)
+        deleted = {
+            "queue": ttl_deleted["queue"] + size_deleted["queue"],
+            "messages": ttl_deleted["messages"] + size_deleted["messages"],
+        }
+        if deleted["queue"] or deleted["messages"]:
+            logger.info(
+                "Pruned queue queue=%s messages=%s ttl=%ss max_items=%s",
+                deleted["queue"],
+                deleted["messages"],
+                self.config.queue_ttl_seconds,
+                self.config.queue_max_items,
+            )
 
     def _prune_stale_pending(self) -> None:
         cutoff_ms = int(
