@@ -98,8 +98,18 @@ app.whenReady().then(() => {
   });
 
   createWindow();
-  agent.scanDetected().catch((error) => send("agent:log", `Initial scan failed: ${error.message}`));
-  agent.startAllEnabled().catch((error) => send("agent:log", `Auto start failed: ${error.message}`));
+  (async () => {
+    try {
+      await agent.scanDetected();
+    } catch (error) {
+      send("agent:log", `Initial scan failed: ${error.message}`);
+    }
+    try {
+      await agent.startAllEnabled();
+    } catch (error) {
+      send("agent:log", `Auto start failed: ${error.message}`);
+    }
+  })();
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -12,15 +12,14 @@
 //      `ServerURLHere->http://...:8100<-ServerURLHere` once WDA is ready.
 //   3. Stop() sends SIGTERM/SIGKILL.
 //
-// Unlike WdaLauncher (go-ios + forward), the WDA URL exposed by xcodebuild is
-// already routable on the Mac LAN; we still record device.port locally so the
-// fleet UI keeps the same per-slot port abstraction.
+// xcodebuild starts WDA on the device; go-ios forwards that device port to the
+// per-slot localhost port used by the rest of the panel.
 
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { spawn } = require("node:child_process");
-const { resolveDerivedDataPath } = require("./paths");
+const { resolveDerivedDataPath, resolveGoIosPath } = require("./paths");
 
 const STATE = Object.freeze({
   IDLE: "idle",
@@ -31,8 +30,19 @@ const STATE = Object.freeze({
 });
 
 const READY_TIMEOUT_MS = 180_000;
-const READY_POLL_INTERVAL_MS = 1_500;
+const READY_POLL_INTERVAL_MS = 500;
+const FORWARD_READY_GRACE_MS = 700;
 const URL_REGEX = /ServerURLHere->(http:\/\/[^<\s]+)<-ServerURLHere/;
+const IMPORTANT_LOG_PATTERNS = [
+  /ServerURLHere/i,
+  /Running tests/i,
+  /Test Suite .*started/i,
+  /Test Case .*started/i,
+  /error:/i,
+  /failed/i,
+  /Unable to find a destination/i,
+  /ApplicationVerificationFailed/i,
+];
 
 function nowLabel() {
   return new Date().toLocaleTimeString("sv-SE", { hour12: false });
@@ -49,6 +59,7 @@ class MacosLauncher {
     this.onState = onState || (() => {});
     this.onLog = onLog || (() => {});
     this.process = null;
+    this.forwardProcess = null;
     this.state = STATE.IDLE;
     this.lastError = "";
     this.startedAt = null;
@@ -89,7 +100,7 @@ class MacosLauncher {
       wdaUrl: this.wdaUrl(),
       state: this.state,
       runPid: this.process?.pid || null,
-      forwardPid: null,
+      forwardPid: this.forwardProcess?.pid || null,
       lastError: this.lastError,
       startedAt: this.startedAt,
       tool: this.tool,
@@ -98,7 +109,16 @@ class MacosLauncher {
   }
 
   wdaUrl() {
-    return this.discoveredUrl || (this.device.port ? `http://127.0.0.1:${this.device.port}` : "");
+    return this.device.port ? `http://127.0.0.1:${this.device.port}` : "";
+  }
+
+  async isWdaHealthy(url, timeoutMs = 1200) {
+    try {
+      const response = await fetch(`${trimSlash(url)}/status`, { signal: AbortSignal.timeout(timeoutMs) });
+      return response.ok;
+    } catch {
+      return false;
+    }
   }
 
   isRunning() {
@@ -125,8 +145,18 @@ class MacosLauncher {
     this.emit();
 
     try {
+      const warmUrl = this.wdaUrl();
+      if (warmUrl && await this.isWdaHealthy(warmUrl, 700)) {
+        this.startedAt = new Date().toISOString();
+        this.state = STATE.RUNNING;
+        this.emit();
+        this.log(`WDA already healthy on ${warmUrl}`);
+        return this.snapshot();
+      }
       await this.ensureBuilt();
       this.spawnXcodebuild();
+      await this.waitForDiscoveredUrl();
+      await this.spawnPortForwardWithRetry();
       await this.waitUntilWdaReady();
       this.startedAt = new Date().toISOString();
       this.state = STATE.RUNNING;
@@ -234,10 +264,11 @@ class MacosLauncher {
     const handleChunk = (chunk) => {
       const text = String(chunk);
       this.logBuffer += text;
-      // Throttle: emit non-empty lines but skip xcodebuild noise like timestamps.
       const lines = text.split(/\r?\n/).filter((line) => line.trim());
-      for (const line of lines.slice(-5)) {
-        this.log(`xcodebuild: ${line.trimEnd()}`);
+      for (const line of lines) {
+        if (IMPORTANT_LOG_PATTERNS.some((pattern) => pattern.test(line))) {
+          this.log(`xcodebuild: ${line.trimEnd()}`);
+        }
       }
       const match = this.logBuffer.match(URL_REGEX);
       if (match && !this.discoveredUrl) {
@@ -266,18 +297,123 @@ class MacosLauncher {
     });
   }
 
+  discoveredDevicePort() {
+    try {
+      const url = new URL(this.discoveredUrl);
+      return Number(url.port) || 8100;
+    } catch {
+      return 8100;
+    }
+  }
+
+  async waitForDiscoveredUrl() {
+    const deadline = Date.now() + READY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (!this.process && this.state !== STATE.STARTING) {
+        throw new Error(this.lastError || "xcodebuild exited before WDA printed URL");
+      }
+      if (this.discoveredUrl) return;
+      await new Promise((resolve) => setTimeout(resolve, READY_POLL_INTERVAL_MS));
+    }
+    throw new Error(`WDA did not print ServerURLHere within ${READY_TIMEOUT_MS}ms`);
+  }
+
+  buildPortForwardCommand() {
+    return {
+      command: resolveGoIosPath(this.settings),
+      args: [
+        "forward",
+        String(this.device.port),
+        String(this.discoveredDevicePort()),
+        `--udid=${this.device.udid}`,
+      ],
+    };
+  }
+
+  async spawnPortForwardWithRetry(maxAttempts = 3, retryDelayMs = 700) {
+    if (!this.device.port) throw new Error("device.port is required");
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      if (await this.isWdaHealthy(this.wdaUrl(), 500)) {
+        this.log(`forward: existing listener is healthy on ${this.wdaUrl()}`);
+        return;
+      }
+      const result = await new Promise((resolve) => {
+        const { command, args } = this.buildPortForwardCommand();
+        if (attempt === 1) this.log(`spawn ${command} ${args.join(" ")}`);
+        else this.log(`forward: retry attempt ${attempt}/${maxAttempts}`);
+        const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+        let outputBuf = "";
+        let settled = false;
+        const settle = (value) => {
+          if (!settled) {
+            settled = true;
+            resolve(value);
+          }
+        };
+        const onData = (chunk) => {
+          const text = String(chunk);
+          outputBuf += text;
+          const lines = text.split(/\r?\n/).filter((line) => line.trim());
+          for (const line of lines.slice(-2)) this.log(`forward: ${line.trimEnd()}`);
+        };
+        child.stdout.on("data", onData);
+        child.stderr.on("data", onData);
+        child.on("error", (error) => {
+          this.log(`forward: error ${error.message}`);
+          settle(null);
+        });
+        child.on("close", (code) => {
+          this.log(`forward exited code=${code}`);
+          if (outputBuf.includes("Device not found") || outputBuf.includes("not found")) {
+            settle({ error: `Device not found: ${this.device.udid}` });
+            return;
+          }
+          if (outputBuf.includes("address already in use")) {
+            settle({ portBusy: true });
+            return;
+          }
+          settle(code === 0 ? { child } : null);
+        });
+        setTimeout(() => {
+          if (!settled && child.exitCode == null) settle({ child });
+        }, FORWARD_READY_GRACE_MS);
+      });
+
+      if (result?.error) throw new Error(result.error);
+      if (result?.portBusy && await this.isWdaHealthy(this.wdaUrl(), 800)) {
+        this.log(`forward: port ${this.device.port} is already healthy`);
+        return;
+      }
+      if (result?.child) {
+        this.forwardProcess = result.child;
+        result.child.on("close", (code) => {
+          if (this.forwardProcess !== result.child) return;
+          this.forwardProcess = null;
+          if (this.state === STATE.RUNNING || this.state === STATE.STARTING) {
+            this.state = STATE.ERROR;
+            this.lastError = `port forward exited with code ${code}`;
+            this.emit();
+          }
+        });
+        return;
+      }
+      if (attempt < maxAttempts) {
+        this.log(`forward: waiting ${retryDelayMs}ms before retry...`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
+    throw new Error(`Failed to forward port ${this.device.port} after ${maxAttempts} attempts`);
+  }
+
   async waitUntilWdaReady() {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < deadline) {
       if (!this.process && this.state !== STATE.STARTING) {
         throw new Error(this.lastError || "xcodebuild exited before WDA was ready");
       }
-      const url = trimSlash(this.discoveredUrl);
+      const url = trimSlash(this.wdaUrl());
       if (url) {
-        try {
-          const response = await fetch(`${url}/status`, { signal: AbortSignal.timeout(2000) });
-          if (response.ok) return;
-        } catch {}
+        if (await this.isWdaHealthy(url, 1000)) return;
       }
       await new Promise((resolve) => setTimeout(resolve, READY_POLL_INTERVAL_MS));
     }
@@ -288,13 +424,16 @@ class MacosLauncher {
     if (this.state === STATE.IDLE && !this.process) return this.snapshot();
     this.state = STATE.STOPPING;
     this.emit();
-    const child = this.process;
-    if (child) {
+    const procs = [this.forwardProcess, this.process].filter(Boolean);
+    for (const child of procs) {
       try { child.kill("SIGTERM"); } catch {}
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      try { if (this.process === child && !child.killed) child.kill("SIGKILL"); } catch {}
-      if (this.process === child) this.process = null;
     }
+    for (const child of procs) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try { if (!child.killed) child.kill("SIGKILL"); } catch {}
+    }
+    this.process = null;
+    this.forwardProcess = null;
     this.state = STATE.IDLE;
     this.startedAt = null;
     this.lastError = "";

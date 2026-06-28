@@ -154,7 +154,7 @@ class AutomationWorker {
       FILTER_MIN_BOX2: String(this.settings.filterMinBox2 ?? 0),
       FILTER_MIN_RATE: String(this.settings.filterMinRate ?? 0),
       OPEN_TAP_REQUEST_LEAD_MS: String(this.settings.openTapRequestLeadMs ?? 2500),
-      OPEN_TAP_TRANSPORT_COMPENSATION_MS: String(this.settings.openTapTransportCompensationMs ?? 200),
+      OPEN_TAP_TRANSPORT_COMPENSATION_MS: String(this.settings.openTapTransportCompensationMs ?? 500),
       OPEN_MAX_LATENESS_MS: String(this.settings.openMaxLatenessMs ?? 1500),
       PYTHON_PATH: detectPythonPath(this.settings.pythonPath || controllerEnv.PYTHON_PATH),
       ELECTRON_RUN_AS_NODE: "1",

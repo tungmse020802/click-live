@@ -27,7 +27,17 @@ const STATE = Object.freeze({
 const DEFAULT_BUNDLE_ID = "com.tungld.clicklive.WebDriverAgentRunner.xctrunner";
 const DEFAULT_WDA_DEVICE_PORT = 8100;
 const READY_TIMEOUT_MS = 90_000;
-const READY_POLL_INTERVAL_MS = 1_500;
+const READY_POLL_INTERVAL_MS = 500;
+const FORWARD_READY_GRACE_MS = 700;
+const IMPORTANT_TOOL_LOG_PATTERNS = [
+  /listening/i,
+  /connected/i,
+  /ServerURLHere/i,
+  /error/i,
+  /failed/i,
+  /not found/i,
+  /ApplicationVerificationFailed/i,
+];
 
 function nowLabel() {
   return new Date().toLocaleTimeString("sv-SE", { hour12: false });
@@ -35,6 +45,23 @@ function nowLabel() {
 
 function trimSlash(value) {
   return String(value || "").replace(/\/+$/, "");
+}
+
+async function isHttpHealthy(url, timeoutMs = 900) {
+  try {
+    const response = await fetch(`${trimSlash(url)}/status`, { signal: AbortSignal.timeout(timeoutMs) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+function importantToolOutput(text) {
+  return String(text)
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line && IMPORTANT_TOOL_LOG_PATTERNS.some((pattern) => pattern.test(line)))
+    .slice(-4);
 }
 
 function buildRunWdaCommand(tool, device, settings) {
@@ -194,6 +221,13 @@ class WdaLauncher {
     this.emit();
 
     try {
+      if (await isHttpHealthy(this.wdaUrl(), 700)) {
+        this.startedAt = new Date().toISOString();
+        this.state = STATE.RUNNING;
+        this.emit();
+        this.log(`WDA already healthy on ${this.wdaUrl()}`);
+        return this.snapshot();
+      }
       this.spawnRunWda();
       // Give runwda a moment to attach to the device before forwarding the port.
       await new Promise((resolve) => setTimeout(resolve, 800));
@@ -222,8 +256,11 @@ class WdaLauncher {
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.runProcess = child;
-    child.stdout.on("data", (chunk) => this.log(`runwda: ${String(chunk).trimEnd()}`));
-    child.stderr.on("data", (chunk) => this.log(`runwda: ${String(chunk).trimEnd()}`));
+    const handleOutput = (chunk) => {
+      for (const line of importantToolOutput(chunk)) this.log(`runwda: ${line}`);
+    };
+    child.stdout.on("data", handleOutput);
+    child.stderr.on("data", handleOutput);
     child.on("error", (error) => {
       this.lastError = error.message;
       this.state = STATE.ERROR;
@@ -249,8 +286,11 @@ class WdaLauncher {
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.forwardProcess = child;
-    child.stdout.on("data", (chunk) => this.log(`forward: ${String(chunk).trimEnd()}`));
-    child.stderr.on("data", (chunk) => this.log(`forward: ${String(chunk).trimEnd()}`));
+    const handleOutput = (chunk) => {
+      for (const line of importantToolOutput(chunk)) this.log(`forward: ${line}`);
+    };
+    child.stdout.on("data", handleOutput);
+    child.stderr.on("data", handleOutput);
     child.on("error", (error) => {
       this.lastError = error.message;
       this.state = STATE.ERROR;
@@ -268,7 +308,7 @@ class WdaLauncher {
     });
   }
 
-  async spawnPortForwardWithRetry(maxAttempts = 5, retryDelayMs = 2000) {
+  async spawnPortForwardWithRetry(maxAttempts = 3, retryDelayMs = 700) {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (process.platform === "win32") {
         await killPortListenerWindows(this.device.port, (message) => this.log(message));
@@ -287,8 +327,8 @@ class WdaLauncher {
         const settle = (val) => { if (!settled) { settled = true; resolve(val); } };
 
         const onData = (chunk) => {
-          const text = String(chunk).trimEnd();
-          this.log(`forward: ${text}`);
+          const text = String(chunk);
+          for (const line of importantToolOutput(text)) this.log(`forward: ${line}`);
           outputBuf += text;
         };
         child.stdout.on("data", onData);
@@ -311,10 +351,10 @@ class WdaLauncher {
           settle({ child });
         });
 
-        // Still running after 1.5s → forward is listening successfully
+        // Still running after a short grace period → forward is listening successfully.
         setTimeout(() => {
           if (!settled && child.exitCode == null) settle({ child });
-        }, 1500);
+        }, FORWARD_READY_GRACE_MS);
       });
 
       if (result && result.error) {
@@ -350,10 +390,7 @@ class WdaLauncher {
       if (!this.runProcess && this.state !== STATE.STARTING) {
         throw new Error(this.lastError || "runwda process exited before WDA was ready");
       }
-      try {
-        const response = await fetch(url, { signal: AbortSignal.timeout(2000) });
-        if (response.ok) return;
-      } catch {}
+      if (await isHttpHealthy(url, 900)) return;
       await new Promise((resolve) => setTimeout(resolve, READY_POLL_INTERVAL_MS));
     }
     throw new Error(`WDA on ${this.wdaUrl()} did not respond within ${READY_TIMEOUT_MS}ms`);
@@ -408,7 +445,7 @@ const _globalLaunchers = new Set();
 
 const _exitHandler = () => {
   for (const launcher of _globalLaunchers) {
-    const procs = [launcher.forwardProcess, launcher.runProcess].filter(Boolean);
+    const procs = [launcher.forwardProcess, launcher.runProcess, launcher.process].filter(Boolean);
     if (process.platform === "win32") {
       for (const proc of procs) {
         try { if (proc.pid) spawn("taskkill", ["/F", "/T", "/PID", String(proc.pid)], { shell: false, stdio: "ignore" }); } catch {}

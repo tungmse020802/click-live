@@ -28,7 +28,7 @@ const defaults = {
   liveTimeMinSeconds: 20,
   liveTimeMaxSeconds: 30,
   openTapRequestLeadMs: 2500,
-  openTapTransportCompensationMs: 200,
+  openTapTransportCompensationMs: 500,
   openMaxLatenessMs: 1500,
   filterMaxViews: 0,
   filterMinBox1: 0,
@@ -89,7 +89,7 @@ function normalizeConfig(config) {
   next.openTapTransportCompensationMs = migrateOldNumber(
     next.openTapTransportCompensationMs,
     defaults.openTapTransportCompensationMs,
-    [400, 500],
+    [200, 400],
   );
   next.openMaxLatenessMs = nonNegativeNumber(next.openMaxLatenessMs, defaults.openMaxLatenessMs);
   next.filterMaxViews = nonNegativeNumber(next.filterMaxViews, defaults.filterMaxViews);

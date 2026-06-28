@@ -861,7 +861,7 @@ class FleetAgent {
       FILTER_MIN_BOX2: String(config.filterMinBox2 ?? 0),
       FILTER_MIN_RATE: String(config.filterMinRate ?? 0),
       OPEN_TAP_REQUEST_LEAD_MS: String(config.openTapRequestLeadMs ?? 2500),
-      OPEN_TAP_TRANSPORT_COMPENSATION_MS: String(config.openTapTransportCompensationMs ?? 200),
+      OPEN_TAP_TRANSPORT_COMPENSATION_MS: String(config.openTapTransportCompensationMs ?? 500),
       OPEN_MAX_LATENESS_MS: String(config.openMaxLatenessMs ?? 1500),
       RUN_ONCE: "true",
       MANUAL_QUEUE_JOB_JSON: JSON.stringify(job),
