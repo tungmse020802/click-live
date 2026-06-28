@@ -36,6 +36,15 @@ const IMPORTANT_TOOL_LOG_PATTERNS = [
   /error/i,
   /failed/i,
   /not found/i,
+  /no such/i,
+  /bundle/i,
+  /xctest/i,
+  /developer/i,
+  /trust/i,
+  /pair/i,
+  /provision/i,
+  /install/i,
+  /locked/i,
   /ApplicationVerificationFailed/i,
 ];
 
@@ -62,6 +71,19 @@ function importantToolOutput(text) {
     .map((line) => line.trimEnd())
     .filter((line) => line && IMPORTANT_TOOL_LOG_PATTERNS.some((pattern) => pattern.test(line)))
     .slice(-4);
+}
+
+function appendTail(current, chunk, limit = 6000) {
+  return `${current || ""}${String(chunk || "")}`.slice(-limit);
+}
+
+function summarizeToolOutput(text) {
+  const lines = String(text || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const important = lines.filter((line) => IMPORTANT_TOOL_LOG_PATTERNS.some((pattern) => pattern.test(line)));
+  return (important.length ? important : lines).slice(-6).join(" | ");
 }
 
 function buildRunWdaCommand(tool, device, settings) {
@@ -168,6 +190,8 @@ class WdaLauncher {
     this.lastError = "";
     this.startedAt = null;
     this.tool = this.settings.launcherTool === "pymobiledevice3" ? "pymobiledevice3" : "go-ios";
+    this.runOutputTail = "";
+    this.forwardOutputTail = "";
   }
 
   setSettings(settings) {
@@ -231,6 +255,9 @@ class WdaLauncher {
       this.spawnRunWda();
       // Give runwda a moment to attach to the device before forwarding the port.
       await new Promise((resolve) => setTimeout(resolve, 800));
+      if (!this.runProcess) {
+        throw new Error(this.lastError || "runwda exited before port forward started");
+      }
       await this.spawnPortForwardWithRetry();
       await this.waitUntilWdaReady();
       this.startedAt = new Date().toISOString();
@@ -239,11 +266,15 @@ class WdaLauncher {
       this.log(`WDA ready on ${this.wdaUrl()}`);
       return this.snapshot();
     } catch (error) {
-      this.lastError = error.message;
+      const failure = error.message;
+      this.lastError = failure;
       this.state = STATE.ERROR;
       this.emit();
-      this.log(`Start failed: ${error.message}`);
-      await this.stop().catch(() => {});
+      this.log(`Start failed: ${failure}`);
+      await this.stop({ preserveError: true }).catch(() => {});
+      this.lastError = failure;
+      this.state = STATE.ERROR;
+      this.emit();
       throw error;
     }
   }
@@ -251,13 +282,21 @@ class WdaLauncher {
   spawnRunWda() {
     const { command, args } = buildRunWdaCommand(this.tool, this.device, this.settings);
     this.log(`spawn ${command} ${args.join(" ")}`);
+    this.runOutputTail = "";
     const child = spawn(command, args, {
       shell: process.platform === "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.runProcess = child;
     const handleOutput = (chunk) => {
-      for (const line of importantToolOutput(chunk)) this.log(`runwda: ${line}`);
+      this.runOutputTail = appendTail(this.runOutputTail, chunk);
+      const important = importantToolOutput(chunk);
+      if (important.length) {
+        for (const line of important) this.log(`runwda: ${line}`);
+      } else {
+        const lastLine = String(chunk).split(/\r?\n/).map((line) => line.trim()).filter(Boolean).at(-1);
+        if (lastLine) this.log(`runwda: ${lastLine.slice(0, 240)}`);
+      }
     };
     child.stdout.on("data", handleOutput);
     child.stderr.on("data", handleOutput);
@@ -272,7 +311,10 @@ class WdaLauncher {
       this.runProcess = null;
       if (this.state === STATE.RUNNING || this.state === STATE.STARTING) {
         this.state = STATE.ERROR;
-        this.lastError = `runwda exited unexpectedly with code ${code}`;
+        const detail = summarizeToolOutput(this.runOutputTail);
+        this.lastError = detail
+          ? `runwda exited unexpectedly with code ${code}: ${detail}`
+          : `runwda exited unexpectedly with code ${code}`;
         this.emit();
       }
     });
@@ -281,12 +323,14 @@ class WdaLauncher {
   spawnPortForward() {
     const { command, args } = buildPortForwardCommand(this.tool, this.device, this.settings);
     this.log(`spawn ${command} ${args.join(" ")}`);
+    this.forwardOutputTail = "";
     const child = spawn(command, args, {
       shell: process.platform === "win32",
       stdio: ["ignore", "pipe", "pipe"],
     });
     this.forwardProcess = child;
     const handleOutput = (chunk) => {
+      this.forwardOutputTail = appendTail(this.forwardOutputTail, chunk);
       for (const line of importantToolOutput(chunk)) this.log(`forward: ${line}`);
     };
     child.stdout.on("data", handleOutput);
@@ -302,7 +346,10 @@ class WdaLauncher {
       this.forwardProcess = null;
       if (this.state === STATE.RUNNING) {
         this.state = STATE.ERROR;
-        this.lastError = `port forward exited with code ${code}`;
+        const detail = summarizeToolOutput(this.forwardOutputTail);
+        this.lastError = detail
+          ? `port forward exited with code ${code}: ${detail}`
+          : `port forward exited with code ${code}`;
         this.emit();
       }
     });
@@ -344,7 +391,8 @@ class WdaLauncher {
             if (outputBuf.includes("Device not found") || outputBuf.includes("not found")) {
               settle({ error: `Device not found: ${this.device.udid}` });
             } else {
-              settle(null);
+              const detail = summarizeToolOutput(outputBuf);
+              settle(detail ? { retryableError: `forward exited code=${code}: ${detail}` } : null);
             }
             return;
           }
@@ -359,6 +407,9 @@ class WdaLauncher {
 
       if (result && result.error) {
         throw new Error(result.error);
+      }
+      if (result && result.retryableError) {
+        this.log(`forward: ${result.retryableError}`);
       }
 
       if (result && result.child) {
@@ -396,7 +447,7 @@ class WdaLauncher {
     throw new Error(`WDA on ${this.wdaUrl()} did not respond within ${READY_TIMEOUT_MS}ms`);
   }
 
-  async stop() {
+  async stop(options = {}) {
     if (this.state === STATE.IDLE && !this.runProcess && !this.forwardProcess) {
       return this.snapshot();
     }
@@ -433,7 +484,7 @@ class WdaLauncher {
     this.forwardProcess = null;
     this.state = STATE.IDLE;
     this.startedAt = null;
-    this.lastError = "";
+    if (!options.preserveError) this.lastError = "";
     this.emit();
     this.log("stopped");
     return this.snapshot();
