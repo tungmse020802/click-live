@@ -28,12 +28,14 @@ const defaults = {
   liveTimeMinSeconds: 20,
   liveTimeMaxSeconds: 30,
   openTapRequestLeadMs: 2500,
-  openTapTransportCompensationMs: 500,
+  openTapTransportCompensationMs: 0,
   openMaxLatenessMs: 1500,
   filterMaxViews: 0,
+  filterRewardMode: "all",
   filterMinBox1: 0,
   filterMinBox2: 0,
   filterMinRate: 0,
+  filterNoteContains: "",
   devices: DEFAULT_DEVICES,
 };
 
@@ -93,9 +95,11 @@ function normalizeConfig(config) {
   );
   next.openMaxLatenessMs = nonNegativeNumber(next.openMaxLatenessMs, defaults.openMaxLatenessMs);
   next.filterMaxViews = nonNegativeNumber(next.filterMaxViews, defaults.filterMaxViews);
+  next.filterRewardMode = normalizeRewardMode(next.filterRewardMode);
   next.filterMinBox1 = nonNegativeNumber(next.filterMinBox1, defaults.filterMinBox1);
   next.filterMinBox2 = nonNegativeNumber(next.filterMinBox2, defaults.filterMinBox2);
   next.filterMinRate = nonNegativeNumber(next.filterMinRate, defaults.filterMinRate);
+  next.filterNoteContains = String(next.filterNoteContains || "").trim();
 
   if (next.liveTimeMinSeconds > next.liveTimeMaxSeconds) {
     next.liveTimeMinSeconds = defaults.liveTimeMinSeconds;
@@ -112,6 +116,11 @@ function normalizeComparable(value) {
   const next = { ...value };
   delete next.devices;
   return next;
+}
+
+function normalizeRewardMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  return ["all", "bag", "box", "both"].includes(mode) ? mode : defaults.filterRewardMode;
 }
 
 function positiveNumber(value, fallback) {

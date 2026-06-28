@@ -423,9 +423,15 @@ class FleetAgent {
     if (!device.enabled) throw new Error(`Device ${deviceId} is disabled`);
     if (!device.udid) throw new Error(`Device ${deviceId} has no UDID`);
     if ((this.detectedDevices || []).length > 0) {
-      const detectedUdids = new Set(this.detectedDevices.map((entry) => entry.udid).filter(Boolean));
-      if (!detectedUdids.has(device.udid)) {
+      const detectedDevice = this.detectedDevices.find((entry) => entry.udid === device.udid);
+      if (!detectedDevice) {
         throw new Error(`Device ${device.udid} is not present in the latest USB scan`);
+      }
+      if (detectedDevice.status && detectedDevice.status !== "connected") {
+        throw new Error(
+          `Device ${device.udid} is ${detectedDevice.status}. `
+          + "Unplug/replug USB, unlock the phone, trust this computer, then Scan USB again.",
+        );
       }
     }
     if (config.launcherTool === "macos" && process.platform === "darwin") {
@@ -857,11 +863,13 @@ class FleetAgent {
       LIVE_TIME_MIN_SECONDS: String(config.liveTimeMinSeconds ?? 20),
       LIVE_TIME_MAX_SECONDS: String(config.liveTimeMaxSeconds ?? 30),
       FILTER_MAX_VIEWS: String(config.filterMaxViews ?? 0),
+      FILTER_REWARD_MODE: String(config.filterRewardMode || "all"),
       FILTER_MIN_BOX1: String(config.filterMinBox1 ?? 0),
       FILTER_MIN_BOX2: String(config.filterMinBox2 ?? 0),
       FILTER_MIN_RATE: String(config.filterMinRate ?? 0),
+      FILTER_NOTE_CONTAINS: String(config.filterNoteContains || ""),
       OPEN_TAP_REQUEST_LEAD_MS: String(config.openTapRequestLeadMs ?? 2500),
-      OPEN_TAP_TRANSPORT_COMPENSATION_MS: String(config.openTapTransportCompensationMs ?? 500),
+      OPEN_TAP_TRANSPORT_COMPENSATION_MS: String(config.openTapTransportCompensationMs ?? 0),
       OPEN_MAX_LATENESS_MS: String(config.openMaxLatenessMs ?? 1500),
       RUN_ONCE: "true",
       MANUAL_QUEUE_JOB_JSON: JSON.stringify(job),
@@ -952,13 +960,13 @@ function parseDeviceList(tool, output) {
 
 function parseXcrunDevices(output) {
   const lines = String(output).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  let inDevices = false;
+  let section = "";
   const devices = [];
   for (const line of lines) {
-    if (line.startsWith("== Devices ==")) { inDevices = true; continue; }
-    if (line.startsWith("== Devices Offline ==")) { inDevices = true; continue; }
-    if (line.startsWith("== Simulators ==")) { inDevices = false; continue; }
-    if (!inDevices) continue;
+    if (line.startsWith("== Devices Offline ==")) { section = "offline"; continue; }
+    if (line.startsWith("== Devices ==")) { section = "online"; continue; }
+    if (line.startsWith("== Simulators ==")) { section = ""; continue; }
+    if (!section) continue;
     if (/Mac/i.test(line) && !/iPhone|iPad/i.test(line)) continue;
     const match = line.match(/^(.*?)\s+\(([^()]+)\)\s+\(([0-9A-Fa-f-]{20,}|[0-9a-f-]{36})\)\s*$/);
     if (!match) continue;
@@ -967,7 +975,7 @@ function parseXcrunDevices(output) {
       version: match[2].trim(),
       udid: match[3],
       productType: "",
-      status: "connected",
+      status: section === "offline" ? "offline" : "connected",
     });
   }
   return devices;

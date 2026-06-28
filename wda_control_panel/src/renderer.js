@@ -16,9 +16,11 @@ const SETTING_FIELDS = [
   "openTapTransportCompensationMs",
   "openMaxLatenessMs",
   "filterMaxViews",
+  "filterRewardMode",
   "filterMinBox1",
   "filterMinBox2",
   "filterMinRate",
+  "filterNoteContains",
   "automationEnabled",
 ];
 

@@ -314,8 +314,8 @@
             </div>
             <div class="row">
               <label>
-                <span>Transport compensation (ms) <span class="muted">bù RTT mạng WiFi → WDA, vd 200</span></span>
-                <input id="openTapTransportCompensationMs" type="number" min="0" step="50" value="500" placeholder="500" />
+                <span>Transport compensation (ms) <span class="muted">để 0 để tap đúng TIME</span></span>
+                <input id="openTapTransportCompensationMs" type="number" min="0" step="50" value="0" placeholder="0" />
               </label>
               <label>
                 <span>Max lateness (ms) <span class="muted">bỏ tap nếu trễ hơn bao nhiêu ms, vd 1500</span></span>
@@ -324,6 +324,21 @@
             </div>
             <hr style="border:none;border-top:1px solid #2a3040;margin:8px 0;" />
             <p class="muted" style="margin:4px 0 8px;">🔍 Filter client-side (bổ sung filter server)</p>
+            <div class="row">
+              <label>
+                <span>Reward mode</span>
+                <select id="filterRewardMode">
+                  <option value="all">All BOX/BAG</option>
+                  <option value="bag">BAG only</option>
+                  <option value="box">BOX only</option>
+                  <option value="both">Both BOX and BAG</option>
+                </select>
+              </label>
+              <label>
+                <span>Note contains <span class="muted">(vd: Rương ít view)</span></span>
+                <input id="filterNoteContains" type="text" placeholder="trống = tắt" />
+              </label>
+            </div>
             <div class="row">
               <label>
                 <span>Max Views <span class="muted">(views ≤ này, 0 = tắt)</span></span>
@@ -336,11 +351,11 @@
             </div>
             <div class="row">
               <label>
-                <span>Min BOX value 1 <span class="muted">(box1 ≥ này, 0 = tắt)</span></span>
+                <span>Min value 1 <span class="muted">(BOX/BAG trái ≥ này, 0 = tắt)</span></span>
                 <input id="filterMinBox1" type="number" min="0" step="1" value="0" placeholder="0 = tắt" />
               </label>
               <label>
-                <span>Min BOX value 2 <span class="muted">(box2 ≥ này, 0 = tắt)</span></span>
+                <span>Min value 2 <span class="muted">(BOX/BAG phải ≥ này, 0 = tắt)</span></span>
                 <input id="filterMinBox2" type="number" min="0" step="1" value="0" placeholder="0 = tắt" />
               </label>
             </div>

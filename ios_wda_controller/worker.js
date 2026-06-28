@@ -43,9 +43,11 @@ const config = {
   clockSource: process.env.CLOCK_SOURCE || "mac_local",
   allowClickAfterFallback: boolEnv("ALLOW_CLICK_AFTER_FALLBACK", true),
   filterMaxViews: numberEnv("FILTER_MAX_VIEWS", 0),    // 0 = disabled (views <= this; 0 means accept all)
+  filterRewardMode: normalizeRewardMode(process.env.FILTER_REWARD_MODE || "all"),
   filterMinBox1: numberEnv("FILTER_MIN_BOX1", 0),      // box value 1 >= this
   filterMinBox2: numberEnv("FILTER_MIN_BOX2", 0),      // box value 2 >= this
   filterMinRate: numberEnv("FILTER_MIN_RATE", 0),       // rate >= this
+  filterNoteContains: process.env.FILTER_NOTE_CONTAINS || "",
   treasureTapEnabled: boolEnv("TREASURE_TAP_ENABLED", true),
   treasureDetectEnabled: boolEnv("TREASURE_DETECT_ENABLED", true),
   treasureTemplatePath: process.env.TREASURE_TEMPLATE_PATH
@@ -56,6 +58,11 @@ const config = {
   treasureMinWarmRatio: numberEnv("TREASURE_MIN_WARM_RATIO", 0.18),
   treasureScales: process.env.TREASURE_SCALES || "0.88,1.0,1.12",
   treasureEarlyExitScore: numberEnv("TREASURE_EARLY_EXIT_SCORE", 0.5),
+  treasureTapScore: numberEnv("TREASURE_TAP_SCORE", 0.72),
+  treasureConfirmFrames: numberEnv("TREASURE_CONFIRM_FRAMES", 2),
+  treasureCandidateTtlMs: numberEnv("TREASURE_CANDIDATE_TTL_MS", 2200),
+  treasureMaxFrameAgeMs: numberEnv("TREASURE_MAX_FRAME_AGE_MS", 700),
+  treasureSameTargetDistance: numberEnv("TREASURE_SAME_TARGET_DISTANCE", 90),
   treasureRoi: process.env.TREASURE_ROI || "0,240,430,360",
   treasureStabilizeDelayMs: numberEnv("TREASURE_STABILIZE_DELAY_MS", 2000),
   treasureScanSeconds: numberEnv("TREASURE_SCAN_SECONDS", 8),
@@ -80,9 +87,13 @@ const config = {
   openButtonYRatio: numberEnv("OPEN_BUTTON_Y_RATIO", 0.93),
   openButtonDetectEnabled: boolEnv("OPEN_BUTTON_DETECT_ENABLED", true),
   openTapRequestLeadMs: numberEnv("OPEN_TAP_REQUEST_LEAD_MS", 1200),
-  openTapTransportCompensationMs: numberEnv("OPEN_TAP_TRANSPORT_COMPENSATION_MS", 500),
-  openResultWaitMs: numberEnv("OPEN_RESULT_WAIT_SECONDS", 2.5) * 1000,
+  openTapTransportCompensationMs: numberEnv("OPEN_TAP_TRANSPORT_COMPENSATION_MS", 0),
+  openDetectMinRemainingMs: numberEnv("OPEN_DETECT_MIN_REMAINING_MS", 3000),
+  openResultWaitMs: numberEnv("OPEN_RESULT_WAIT_SECONDS", 0) * 1000,
+  openPostTapSettleMs: numberEnv("OPEN_POST_TAP_SETTLE_MS", 200),
+  openAfterTapCapture: boolEnv("OPEN_AFTER_TAP_CAPTURE", false),
   openMaxLatenessMs: numberEnv("OPEN_MAX_LATENESS_MS", 1500),
+  httpTimeoutMs: numberEnv("WORKER_HTTP_TIMEOUT_MS", 35000),
 };
 
 let sessionId = "";
@@ -104,6 +115,11 @@ function boolEnv(name, fallback) {
   return !["0", "false", "no", "off"].includes(String(value).toLowerCase());
 }
 
+function normalizeRewardMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  return ["all", "bag", "box", "both"].includes(mode) ? mode : "all";
+}
+
 function resolveWorkDir(value) {
   const raw = String(value || "").trim();
   if (!raw) return __dirname;
@@ -119,7 +135,10 @@ function sleep(ms) {
 }
 
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const response = await fetch(url, {
+    ...options,
+    signal: options.signal || AbortSignal.timeout(config.httpTimeoutMs),
+  });
   const text = await response.text();
   let body = {};
   if (text) {
@@ -783,12 +802,15 @@ async function tapOpenButtonAtDeadline(job) {
     `  target  : ${localTimeLabel(schedule.targetAtMs)}`,
     `  now     : ${localTimeLabel(nowMs)}`,
     `  remaining: ${((schedule.targetAtMs - nowMs) / 1000).toFixed(2)}s`,
-    `  tap lead: -${config.openTapRequestLeadMs}ms | transport: -${config.openTapTransportCompensationMs}ms`,
+    `  tap lead: -${config.openTapRequestLeadMs}ms | post settle: ${config.openPostTapSettleMs}ms`,
   ].join("\n"));
 
-  const point = await detectOpenButtonFromScreenshot(job.id) || await openButtonPoint();
+  const remainingBeforePointMs = schedule.targetAtMs - Date.now();
+  const point = remainingBeforePointMs >= config.openDetectMinRemainingMs
+    ? await detectOpenButtonFromScreenshot(job.id) || await openButtonPoint()
+    : await openButtonPoint();
   const requestAtMs = openTapRequestTime(schedule.targetAtMs, config.openTapRequestLeadMs);
-  const lateness = nowMs - schedule.targetAtMs;
+  const lateness = Date.now() - schedule.targetAtMs;
   if (lateness > config.openMaxLatenessMs) {
     console.log(`Job #${job.id}: Open deadline missed by ${lateness}ms, skip tap`);
     await report(job.id, "open_deadline_missed", JSON.stringify({ ...schedule, lateness }));
@@ -805,7 +827,7 @@ async function tapOpenButtonAtDeadline(job) {
   const requestedAtMs = Date.now();
   const delayMs = Math.max(
     0,
-    schedule.targetAtMs - requestedAtMs - config.openTapTransportCompensationMs,
+    schedule.targetAtMs - requestedAtMs,
   );
   console.log(
     `[TIMING] Job #${job.id}: sending WDA scheduledTap`
@@ -813,7 +835,14 @@ async function tapOpenButtonAtDeadline(job) {
     + ` | target: ${localTimeLabel(schedule.targetAtMs)}`
     + ` | drift: ${requestedAtMs + delayMs - schedule.targetAtMs}ms`,
   );
-  await scheduledWdaTap(point.x, point.y, delayMs);
+  try {
+    await scheduledWdaTap(point.x, point.y, delayMs);
+  } catch (error) {
+    if (delayMs > 0) throw error;
+    console.warn(`Job #${job.id}: scheduledTap failed at deadline, falling back to immediate session tap: ${error.message}`);
+    await tapAt(point.x, point.y);
+  }
+  await sleepUntil(requestedAtMs + delayMs + config.openPostTapSettleMs);
   const completedAtMs = Date.now();
   const requestOffsetMs = requestedAtMs - schedule.targetAtMs;
   const completedOffsetMs = completedAtMs - schedule.targetAtMs;
@@ -1098,6 +1127,57 @@ async function tapClusterFromScreenshotPoint(x, y, screen) {
   await tapCluster(pointX, pointY);
 }
 
+function detectionScore(detection) {
+  return Number(detection?.score || 0);
+}
+
+function detectionTapDistance(a, b) {
+  const ax = Number(a?.tap?.x);
+  const ay = Number(a?.tap?.y);
+  const bx = Number(b?.tap?.x);
+  const by = Number(b?.tap?.y);
+  if (![ax, ay, bx, by].every(Number.isFinite)) return Infinity;
+  return Math.hypot(ax - bx, ay - by);
+}
+
+async function cleanupCandidate(candidate, keepShot = null) {
+  const keepShots = Array.isArray(keepShot) ? keepShot : [keepShot];
+  if (!candidate?.shot || keepShots.includes(candidate.shot)) return;
+  await cleanupCapture(candidate.shot);
+}
+
+function buildTreasureCandidate(detection, shot, previous = null) {
+  const now = Date.now();
+  const isSameTarget = previous
+    && now - previous.lastSeenAtMs <= Math.max(0, config.treasureCandidateTtlMs)
+    && detectionTapDistance(previous.detection, detection) <= Math.max(1, config.treasureSameTargetDistance);
+  const confirmations = isSameTarget ? previous.confirmations + 1 : 1;
+  return {
+    detection,
+    shot,
+    confirmations,
+    firstSeenAtMs: isSameTarget ? previous.firstSeenAtMs : now,
+    lastSeenAtMs: now,
+    score: detectionScore(detection),
+  };
+}
+
+function candidateTapReady(candidate) {
+  if (!candidate?.detection?.found || !candidate?.detection?.tap) return false;
+  const frameAgeMs = treasureFrameAgeMs(candidate.shot);
+  if (frameAgeMs > Math.max(0, config.treasureMaxFrameAgeMs)) return false;
+  if (candidate.score >= config.treasureTapScore) return true;
+  return candidate.confirmations >= Math.max(1, Math.floor(config.treasureConfirmFrames));
+}
+
+function treasureFrameAgeMs(shot) {
+  return shot?.capturedAtMs ? Date.now() - shot.capturedAtMs : 0;
+}
+
+function treasureShotFresh(shot) {
+  return treasureFrameAgeMs(shot) <= Math.max(0, config.treasureMaxFrameAgeMs);
+}
+
 async function detectTreasureConfirmSheet(imagePath) {
   // Detect the "Mở Rương Báu" confirmation bottom sheet:
   // large white area covering bottom ~50% of screen while top half is live video (dark).
@@ -1183,7 +1263,7 @@ async function scanTreasure(jobId, options = {}) {
   const minDetectAttempts = 2;
   let attempt = 0;
   let detectAttempt = 0;
-  let consecutiveFound = 0;  // must find treasure 2 times in a row before tapping
+  let hotCandidate = null;
   let bestDetection = null;
   let bestShot = null;
   if (deadline <= Date.now()) {
@@ -1258,6 +1338,10 @@ async function scanTreasure(jobId, options = {}) {
       threshold: config.treasureThreshold,
       stabilize_delay_ms: config.treasureStabilizeDelayMs,
       scan_interval_ms: config.treasureScanIntervalMs,
+      tap_score: config.treasureTapScore,
+      confirm_frames: config.treasureConfirmFrames,
+      candidate_ttl_ms: config.treasureCandidateTtlMs,
+      max_frame_age_ms: config.treasureMaxFrameAgeMs,
       overlay,
       detection,
     });
@@ -1267,16 +1351,50 @@ async function scanTreasure(jobId, options = {}) {
       bestShot = shot;
     }
     if (detection?.found && detection.tap) {
-      consecutiveFound += 1;
-      console.log(`Job #${jobId}: treasure consecutive=${consecutiveFound}/2`);
-      if (consecutiveFound >= 2) {
-        return { detection, shot };
+      const previousCandidate = hotCandidate;
+      hotCandidate = buildTreasureCandidate(detection, shot, hotCandidate);
+      console.log(
+        `Job #${jobId}: treasure candidate score=${hotCandidate.score}`
+        + ` confirmations=${hotCandidate.confirmations}/${Math.max(1, Math.floor(config.treasureConfirmFrames))}`
+        + ` age=${treasureFrameAgeMs(shot)}ms`,
+      );
+      await cleanupCandidate(previousCandidate, [hotCandidate.shot, bestShot]);
+      if (candidateTapReady(hotCandidate)) {
+        console.log(`Job #${jobId}: treasure candidate ready, tapping without extra settle`);
+        return {
+          detection: {
+            ...hotCandidate.detection,
+            candidate_confirmations: hotCandidate.confirmations,
+            candidate_score: hotCandidate.score,
+            candidate_age_ms: treasureFrameAgeMs(hotCandidate.shot),
+            candidate_reason: hotCandidate.score >= config.treasureTapScore ? "high_score" : "confirmed_frames",
+          },
+          shot: hotCandidate.shot,
+        };
       }
-      // Short settle between consecutive scans to confirm treasure is stable
-      await sleep(500);
+      // Medium-confidence hits get a very short confirm pass; high-confidence hits tap above.
+      await sleep(Math.min(180, Math.max(0, config.treasureScanIntervalMs)));
       continue;
     } else {
-      consecutiveFound = 0;
+      const hotAgeMs = hotCandidate ? Date.now() - hotCandidate.lastSeenAtMs : Infinity;
+      if (hotCandidate && hotAgeMs <= Math.max(0, config.treasureCandidateTtlMs) && candidateTapReady(hotCandidate)) {
+        console.log(`Job #${jobId}: treasure detector missed one frame, using hot candidate age=${hotAgeMs}ms`);
+        await cleanupCapture(shot);
+        return {
+          detection: {
+            ...hotCandidate.detection,
+            candidate_confirmations: hotCandidate.confirmations,
+            candidate_score: hotCandidate.score,
+            candidate_age_ms: treasureFrameAgeMs(hotCandidate.shot),
+            candidate_reason: "hot_candidate",
+          },
+          shot: hotCandidate.shot,
+        };
+      }
+      if (hotCandidate && hotAgeMs > Math.max(0, config.treasureCandidateTtlMs)) {
+        await cleanupCandidate(hotCandidate, bestShot);
+        hotCandidate = null;
+      }
       await cleanupCapture(shot);
     }
     // Always retry at least minDetectAttempts times even if deadline passed.
@@ -1286,6 +1404,46 @@ async function scanTreasure(jobId, options = {}) {
       await sleep(config.treasureScanIntervalMs);
     }
   } while (Date.now() < deadline || detectAttempt < minDetectAttempts);
+  if (hotCandidate && candidateTapReady(hotCandidate)) {
+    if (bestShot && bestShot !== hotCandidate.shot) await cleanupCapture(bestShot);
+    return {
+      detection: {
+        ...hotCandidate.detection,
+        candidate_confirmations: hotCandidate.confirmations,
+        candidate_score: hotCandidate.score,
+        candidate_age_ms: treasureFrameAgeMs(hotCandidate.shot),
+        candidate_reason: "deadline_hot_candidate",
+      },
+      shot: hotCandidate.shot,
+    };
+  }
+  await cleanupCandidate(hotCandidate, bestShot);
+  if (bestDetection?.found && bestDetection.tap && treasureShotFresh(bestShot)) {
+    return {
+      detection: {
+        ...bestDetection,
+        candidate_reason: "fresh_best_detection",
+        candidate_age_ms: treasureFrameAgeMs(bestShot),
+      },
+      shot: bestShot,
+    };
+  }
+  if (bestDetection?.found && bestDetection.tap) {
+    console.log(
+      `Job #${jobId}: best treasure detection is stale `
+      + `age=${treasureFrameAgeMs(bestShot)}ms max=${config.treasureMaxFrameAgeMs}ms; skip tap`,
+    );
+    return {
+      detection: {
+        ...bestDetection,
+        found: false,
+        stale: true,
+        reject_reasons: [...(bestDetection.reject_reasons || []), "stale_frame"],
+        candidate_age_ms: treasureFrameAgeMs(bestShot),
+      },
+      shot: bestShot,
+    };
+  }
   return { detection: bestDetection, shot: bestShot };
 }
 
@@ -1514,16 +1672,18 @@ async function processJob(job, allowSessionRetry = true) {
 
       console.log(
         `[FLOW] Job #${job.id}: Open button tap scheduled;`
-        + ` waiting ${config.openResultWaitMs}ms before completing`,
+        + ` post_settle=${config.openPostTapSettleMs}ms capture=${config.openAfterTapCapture}`,
       );
-      try {
-        await sleep(config.openResultWaitMs);
-        const afterOpen = await capture(job.id);
-        const uploadedAfterOpen = await upload(job.id, afterOpen.image, "after_open_button_tap");
-        await report(job.id, "after_open_tap_screenshot_uploaded");
-        console.log(`Job #${job.id}: screenshot after Open tap saved at ${uploadedAfterOpen.url}`);
-      } catch (error) {
-        console.warn(`Job #${job.id}: after Open tap screenshot skipped: ${error.message}`);
+      if (config.openAfterTapCapture) {
+        try {
+          if (config.openResultWaitMs > 0) await sleep(config.openResultWaitMs);
+          const afterOpen = await capture(job.id);
+          const uploadedAfterOpen = await upload(job.id, afterOpen.image, "after_open_button_tap");
+          await report(job.id, "after_open_tap_screenshot_uploaded");
+          console.log(`Job #${job.id}: screenshot after Open tap saved at ${uploadedAfterOpen.url}`);
+        } catch (error) {
+          console.warn(`Job #${job.id}: after Open tap screenshot skipped: ${error.message}`);
+        }
       }
       await report(job.id, "done");
       console.log(`[FLOW] Job #${job.id}: done after treasure + Open tap total=${Date.now() - jobStartedAtMs}ms`);
@@ -1558,25 +1718,128 @@ async function shutdown() {
 // time as possible, then sleep until we are inside the ideal window before
 // running. This maximises treasure chests per 30-second task cycle.
 function jobPassesClientFilter(job) {
-  const signal = job?.payload?.box_signal || {};
-  const views = Number(signal.views ?? job?.payload?.views ?? NaN);
-  const box1 = Number(signal.box1 ?? (String(signal.box || "").split("/")[0]) ?? NaN);
-  const box2 = Number(signal.box2 ?? (String(signal.box || "").split("/")[1]) ?? NaN);
-  const rate = Number(signal.rate ?? job?.payload?.rate ?? NaN);
+  const rewards = extractRewardSignals(job);
+  const mode = config.filterRewardMode;
+  const selectedRewards = rewards.filter((reward) => (
+    mode === "all"
+    || mode === reward.type
+    || (mode === "both" && rewards.some((item) => item.type === "box") && rewards.some((item) => item.type === "bag"))
+  ));
+  if (mode !== "all" && selectedRewards.length === 0) {
+    return { pass: false, reason: `reward mode ${mode} not matched` };
+  }
 
-  if (config.filterMaxViews > 0 && Number.isFinite(views) && views > config.filterMaxViews) {
-    return { pass: false, reason: `views ${views} > max ${config.filterMaxViews}` };
+  const needsReward = config.filterMaxViews > 0
+    || config.filterMinBox1 > 0
+    || config.filterMinBox2 > 0
+    || config.filterMinRate > 0
+    || mode !== "all";
+  if (needsReward && selectedRewards.length === 0) {
+    return { pass: false, reason: "missing reward signal" };
   }
-  if (config.filterMinBox1 > 0 && Number.isFinite(box1) && box1 < config.filterMinBox1) {
-    return { pass: false, reason: `box1 ${box1} < min ${config.filterMinBox1}` };
+
+  const noteNeedles = splitNeedles(config.filterNoteContains);
+  if (noteNeedles.length) {
+    const noteText = String(extractNote(job) || "").toLowerCase();
+    const fullText = jobText(job).toLowerCase();
+    const matched = noteNeedles.some((needle) => noteText.includes(needle) || fullText.includes(needle));
+    if (!matched) return { pass: false, reason: `note missing ${noteNeedles.join("|")}` };
   }
-  if (config.filterMinBox2 > 0 && Number.isFinite(box2) && box2 < config.filterMinBox2) {
-    return { pass: false, reason: `box2 ${box2} < min ${config.filterMinBox2}` };
+  if (!needsReward) return { pass: true, reason: "" };
+
+  for (const reward of selectedRewards.length ? selectedRewards : rewards) {
+    if (config.filterMaxViews > 0 && Number.isFinite(reward.views) && reward.views > config.filterMaxViews) {
+      continue;
+    }
+    if (config.filterMinBox1 > 0 && Number.isFinite(reward.left) && reward.left < config.filterMinBox1) {
+      continue;
+    }
+    if (config.filterMinBox2 > 0 && Number.isFinite(reward.right) && reward.right < config.filterMinBox2) {
+      continue;
+    }
+    if (config.filterMinRate > 0 && Number.isFinite(reward.rate) && reward.rate < config.filterMinRate) {
+      continue;
+    }
+    return { pass: true, reason: "" };
   }
-  if (config.filterMinRate > 0 && Number.isFinite(rate) && rate < config.filterMinRate) {
-    return { pass: false, reason: `rate ${rate} < min ${config.filterMinRate}` };
+
+  const reward = selectedRewards[0] || rewards[0] || {};
+  if (config.filterMaxViews > 0 && Number.isFinite(reward.views) && reward.views > config.filterMaxViews) {
+    return { pass: false, reason: `views ${reward.views} > max ${config.filterMaxViews}` };
   }
-  return { pass: true, reason: "" };
+  if (config.filterMinBox1 > 0 && Number.isFinite(reward.left) && reward.left < config.filterMinBox1) {
+    return { pass: false, reason: `${reward.type || "reward"}1 ${reward.left} < min ${config.filterMinBox1}` };
+  }
+  if (config.filterMinBox2 > 0 && Number.isFinite(reward.right) && reward.right < config.filterMinBox2) {
+    return { pass: false, reason: `${reward.type || "reward"}2 ${reward.right} < min ${config.filterMinBox2}` };
+  }
+  if (config.filterMinRate > 0 && Number.isFinite(reward.rate) && reward.rate < config.filterMinRate) {
+    return { pass: false, reason: `rate ${reward.rate} < min ${config.filterMinRate}` };
+  }
+  return { pass: false, reason: "reward filter not matched" };
+}
+
+function extractRewardSignals(job) {
+  const payload = job?.payload || {};
+  const signal = payload.box_signal || {};
+  const text = jobText(job);
+  const parsed = parseRewardSignals(text);
+  if (parsed.length) return parsed;
+
+  const rawBox = String(signal.box || payload.box || "");
+  const [left, right] = rawBox.split("/").map((value) => Number(value));
+  if (!Number.isFinite(left) || !Number.isFinite(right)) return [];
+  return [{
+    type: normalizeRewardType(signal.reward_type || signal.type || payload.reward_type || payload.type || "box"),
+    left,
+    right,
+    rate: Number(signal.rate ?? payload.rate ?? NaN),
+    views: Number(signal.views ?? payload.views ?? NaN),
+  }];
+}
+
+function parseRewardSignals(text) {
+  const rewards = [];
+  const rewardRe = /(?:🎁|🟡|🟪)?\s*(BOX|BAG)\s*:\s*(\d+)\s*\/\s*(\d+)/gi;
+  for (const match of String(text || "").matchAll(rewardRe)) {
+    rewards.push({
+      type: normalizeRewardType(match[1]),
+      left: Number(match[2]),
+      right: Number(match[3]),
+      rate: parseNumberMatch(text, /📈\s*Rate\s*:\s*(\d+(?:\.\d+)?)/i),
+      views: parseNumberMatch(text, /👀\s*(\d+)/),
+    });
+  }
+  return rewards;
+}
+
+function normalizeRewardType(value) {
+  return String(value || "").trim().toLowerCase() === "bag" ? "bag" : "box";
+}
+
+function parseNumberMatch(text, regex) {
+  const match = String(text || "").match(regex);
+  return match ? Number(match[1]) : NaN;
+}
+
+function extractNote(job) {
+  const signal = job?.payload?.box_signal || {};
+  if (signal.note) return signal.note;
+  const text = jobText(job);
+  const match = text.match(/(?:📝|💬)\s*([^\r\n]+)/);
+  return match ? match[1].trim() : "";
+}
+
+function jobText(job) {
+  if (typeof job?.message === "string") return job.message;
+  return String(job?.message?.text || "");
+}
+
+function splitNeedles(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim().replace(/^['"]+|['"]+$/g, "").toLowerCase())
+    .filter(Boolean);
 }
 
 function queueUrlFromItem(item) {
@@ -1630,22 +1893,21 @@ async function latestPendingQueueJob() {
 }
 
 async function pickInitialJob() {
-  const job = await latestPendingQueueJob();
-  if (job) {
-    console.log(`Initial scheduler picked latest pending job #${job.id}`);
-    return job;
-  }
-  return pickBestJob(0);
+  const job = await pickBestJob(0);
+  if (job) console.log(`Initial scheduler claimed pending job #${job.id}`);
+  return job;
 }
 
 async function pickBestJob(afterId) {
   const url = new URL(`${config.queueUrl}/api/phone/next-job`);
-  url.searchParams.set("after_id", String(afterId));
+  // Always let the server choose the best currently-pending job. If a job was
+  // claimed and later failed, it keeps the same id; using a monotonically
+  // increasing after_id would make this worker ignore its retry forever.
+  url.searchParams.set("after_id", "0");
   url.searchParams.set("wait", String(config.pollWaitSeconds));
   url.searchParams.set("device_id", config.deviceId);
   const response = await requestJson(url);
   if (!response.job) return null;
-  if (Number(response.job.id || 0) <= Number(afterId || 0)) return null;
   const job = {
     ...response.job,
     received_at_ms: Date.now(),
@@ -1690,49 +1952,11 @@ async function waitForWindow(job, allowFirstPreempt) {
     );
     const wakeAtMs = Date.now() + waitMs;
     let nextHeartbeatMs = 0;
-    let nextCheckMs = 0;
     while (!stopping && Date.now() < wakeAtMs) {
       const nowMs = Date.now();
-      if (nowMs >= nextCheckMs) {
-        nextCheckMs = nowMs + 1000;
-        try {
-          const candidate = await latestPendingQueueJob();
-          if (allowFirstPreempt && shouldPreemptFirstJob(currentJob, candidate)) {
-            await report(currentJob.id, "time_window_skipped", JSON.stringify({
-              reason: "first_job_replaced_by_newer_closer_timing",
-              replaced_by_job_id: candidate.id,
-            })).catch((error) => console.warn(`Job #${currentJob.id}: replace report failed: ${error.message}`));
-            console.log(
-              `Job #${currentJob.id}: replaced by newer closer job #${candidate.id}`
-              + ` (${((jobTimeWindow(candidate).remainingMs || 0) / 1000).toFixed(1)}s away)`,
-            );
-            currentJob = candidate;
-            break;
-          }
-          // Run another job while waiting if there's enough time before wakeAtMs.
-          // Need at least 10s gap so the side job finishes before our window opens.
-          const sideJobBudgetMs = wakeAtMs - Date.now() - 10_000;
-          if (candidate && Number(candidate.id || 0) !== Number(currentJob.id || 0) && sideJobBudgetMs >= 5000) {
-            const candidateWindow = jobTimeWindow(candidate);
-            // Only run side job if it's ready/in-window now and won't conflict with our wakeAtMs.
-            const candidateOk = candidateWindow.state === "ready" || candidateWindow.state === "missing"
-              || (candidateWindow.state === "early" && Number(candidateWindow.remainingMs || 0) - config.liveTimeMaxMs < sideJobBudgetMs);
-            if (candidateOk && !candidate._filtered) {
-              console.log(
-                `Job #${currentJob.id}: running side job #${candidate.id} while waiting `
-                + `(${(sideJobBudgetMs / 1000).toFixed(1)}s budget)`,
-              );
-              await processJob(candidate);
-              nextCheckMs = 0;
-            }
-          }
-        } catch (error) {
-          console.warn(`First job preempt check failed: ${error.message}`);
-        }
-      }
       if (nowMs >= nextHeartbeatMs) {
         await report(currentJob.id, "waiting_time_window", JSON.stringify({
-          reason: allowFirstPreempt ? "early_time_window_first_preemptible" : "early_time_window",
+          reason: "early_time_window",
           wake_at_ms: wakeAtMs,
           remaining_ms: wakeAtMs - nowMs,
         })).catch((error) => console.warn(`Job #${currentJob.id}: lease heartbeat failed: ${error.message}`));

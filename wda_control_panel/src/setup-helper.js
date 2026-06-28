@@ -269,6 +269,10 @@ async function scanCoreDevices() {
       const props = entry.deviceProperties || {};
       const conn = entry.connectionProperties || {};
       const pairing = conn.pairingState || "unknown";
+      const tunnelState = conn.tunnelState || "unknown";
+      const status = tunnelState === "unavailable"
+        ? "unavailable"
+        : (pairing === "paired" ? "connected" : pairing);
       return {
         udid: hw.udid || entry.identifier || "",
         identifier: entry.identifier || "",
@@ -277,7 +281,8 @@ async function scanCoreDevices() {
         productType: hw.productType || "",
         developerMode: props.developerModeStatus || "unknown",
         pairing,
-        status: pairing === "paired" ? "connected" : pairing,
+        tunnelState,
+        status,
       };
     })
     .filter((entry) => entry.udid);

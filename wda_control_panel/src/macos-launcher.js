@@ -18,7 +18,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const { resolveDerivedDataPath, resolveGoIosPath } = require("./paths");
 
 const STATE = Object.freeze({
@@ -32,6 +32,8 @@ const STATE = Object.freeze({
 const READY_TIMEOUT_MS = 180_000;
 const READY_POLL_INTERVAL_MS = 500;
 const FORWARD_READY_GRACE_MS = 700;
+const HEALTH_INTERVAL_MS = 5_000;
+const HEALTH_FAILS_BEFORE_RESTART = 3;
 const URL_REGEX = /ServerURLHere->(http:\/\/[^<\s]+)<-ServerURLHere/;
 const IMPORTANT_LOG_PATTERNS = [
   /ServerURLHere/i,
@@ -44,12 +46,42 @@ const IMPORTANT_LOG_PATTERNS = [
   /ApplicationVerificationFailed/i,
 ];
 
+const DESTINATION_NOT_READY_MESSAGE = [
+  "iPhone is not available to Xcode yet.",
+  "Unplug/replug USB, unlock the phone, tap Trust This Computer if prompted, then Scan USB again.",
+].join(" ");
+
 function nowLabel() {
   return new Date().toLocaleTimeString("sv-SE", { hour12: false });
 }
 
 function trimSlash(value) {
   return String(value || "").replace(/\/+$/, "");
+}
+
+function xctraceDeviceState(output, udid) {
+  const target = String(udid || "").trim();
+  if (!target) return "missing";
+  let section = "";
+  for (const rawLine of String(output || "").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (line.startsWith("== Devices Offline ==")) {
+      section = "offline";
+      continue;
+    }
+    if (line.startsWith("== Devices ==")) {
+      section = "online";
+      continue;
+    }
+    if (line.startsWith("== Simulators ==")) {
+      section = "simulator";
+      continue;
+    }
+    if (!line.includes(target)) continue;
+    return section === "offline" ? "offline" : "online";
+  }
+  return "missing";
 }
 
 class MacosLauncher {
@@ -67,6 +99,10 @@ class MacosLauncher {
     this.discoveredUrl = "";
     this.derivedDataPath = this.resolveDerivedDataDir();
     this.logBuffer = "";
+    this.wdaUrlOverride = "";
+    this.healthTimer = null;
+    this.unhealthyCount = 0;
+    this.recovering = false;
   }
 
   resolveDerivedDataDir() {
@@ -109,6 +145,7 @@ class MacosLauncher {
   }
 
   wdaUrl() {
+    if (this.wdaUrlOverride) return this.wdaUrlOverride;
     return this.device.port ? `http://127.0.0.1:${this.device.port}` : "";
   }
 
@@ -141,6 +178,7 @@ class MacosLauncher {
     this.state = STATE.STARTING;
     this.lastError = "";
     this.discoveredUrl = "";
+    this.wdaUrlOverride = "";
     this.logBuffer = "";
     this.emit();
 
@@ -151,17 +189,30 @@ class MacosLauncher {
         this.state = STATE.RUNNING;
         this.emit();
         this.log(`WDA already healthy on ${warmUrl}`);
+        this.startHealthWatchdog();
         return this.snapshot();
       }
+      this.ensureDeviceReadyForXcode();
       await this.ensureBuilt();
       this.spawnXcodebuild();
       await this.waitForDiscoveredUrl();
-      await this.spawnPortForwardWithRetry();
+      try {
+        await this.spawnPortForwardWithRetry();
+      } catch (error) {
+        if (!String(error.message || "").includes("Device not found")) throw error;
+        const directUrl = this.discoverCoreDeviceWdaUrl();
+        if (!directUrl) throw error;
+        this.log(`forward: go-ios cannot see device; trying CoreDevice tunnel ${directUrl}`);
+        if (!await this.isWdaHealthy(directUrl, 2500)) throw error;
+        this.wdaUrlOverride = directUrl;
+        this.log(`forward: using CoreDevice tunnel URL ${directUrl}`);
+      }
       await this.waitUntilWdaReady();
       this.startedAt = new Date().toISOString();
       this.state = STATE.RUNNING;
       this.emit();
       this.log(`WDA ready on ${this.wdaUrl()}`);
+      this.startHealthWatchdog();
       return this.snapshot();
     } catch (error) {
       this.lastError = error.message;
@@ -173,9 +224,100 @@ class MacosLauncher {
     }
   }
 
+  startHealthWatchdog() {
+    this.stopHealthWatchdog();
+    const tick = async () => {
+      if (this.state !== STATE.RUNNING || this.recovering) return;
+      const healthy = await this.isWdaHealthy(this.wdaUrl(), 1500);
+      if (healthy) {
+        this.unhealthyCount = 0;
+      } else {
+        this.unhealthyCount += 1;
+        this.log(`health: WDA not reachable (${this.unhealthyCount}/${HEALTH_FAILS_BEFORE_RESTART})`);
+        if (this.unhealthyCount >= HEALTH_FAILS_BEFORE_RESTART) {
+          await this.recover("WDA health check failed");
+          return;
+        }
+      }
+      if (this.state === STATE.RUNNING) {
+        this.healthTimer = setTimeout(tick, HEALTH_INTERVAL_MS);
+      }
+    };
+    this.healthTimer = setTimeout(tick, HEALTH_INTERVAL_MS);
+  }
+
+  stopHealthWatchdog() {
+    if (this.healthTimer) clearTimeout(this.healthTimer);
+    this.healthTimer = null;
+    this.unhealthyCount = 0;
+  }
+
+  async recover(reason) {
+    if (this.recovering) return;
+    this.recovering = true;
+    this.log(`health: restarting WDA (${reason})`);
+    try {
+      await this.stop();
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      this.recovering = false;
+      await this.start();
+    } catch (error) {
+      this.recovering = false;
+      this.state = STATE.ERROR;
+      this.lastError = `Auto-restart failed: ${error.message}`;
+      this.emit();
+      this.log(this.lastError);
+    }
+  }
+
   buildBundleId() {
     return String(this.settings.wdaBundleId || "com.tungld.clicklive.WebDriverAgentRunner.xctrunner")
       .replace(/\.xctrunner$/, "");
+  }
+
+  ensureDeviceReadyForXcode() {
+    const result = spawnSync("xcrun", ["xctrace", "list", "devices"], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+    if (result.status !== 0) {
+      this.log(`device check: xctrace failed; continuing to xcodebuild (${String(result.stderr || "").trim()})`);
+      return;
+    }
+    const state = xctraceDeviceState(output, this.device.udid);
+    if (state === "offline") {
+      throw new Error(`${DESTINATION_NOT_READY_MESSAGE} (${this.device.udid} is listed under Devices Offline)`);
+    }
+    if (state === "missing") {
+      throw new Error(`${DESTINATION_NOT_READY_MESSAGE} (${this.device.udid} is not listed by xctrace)`);
+    }
+  }
+
+  discoverCoreDeviceWdaUrl() {
+    const outputPath = path.join(os.tmpdir(), `wda-devicectl-${process.pid}-${Date.now()}.json`);
+    try {
+      const result = spawnSync("xcrun", ["devicectl", "list", "devices", "--json-output", outputPath], {
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      if (result.status !== 0) return "";
+      const payload = JSON.parse(fs.readFileSync(outputPath, "utf8"));
+      const devices = payload?.result?.devices || [];
+      const found = devices.find((entry) => (
+        entry?.hardwareProperties?.udid === this.device.udid
+        || entry?.identifier === this.device.udid
+        || (entry?.connectionProperties?.localHostnames || []).some((name) => String(name).startsWith(`${this.device.udid}.`))
+      ));
+      const address = found?.connectionProperties?.tunnelIPAddress;
+      const devicePort = this.discoveredDevicePort();
+      if (!address || !devicePort) return "";
+      return `http://[${address}]:${devicePort}`;
+    } catch {
+      return "";
+    } finally {
+      try { fs.unlinkSync(outputPath); } catch {}
+    }
   }
 
   buildFingerprint() {
@@ -421,6 +563,7 @@ class MacosLauncher {
   }
 
   async stop() {
+    this.stopHealthWatchdog();
     if (this.state === STATE.IDLE && !this.process) return this.snapshot();
     this.state = STATE.STOPPING;
     this.emit();
@@ -434,6 +577,7 @@ class MacosLauncher {
     }
     this.process = null;
     this.forwardProcess = null;
+    this.wdaUrlOverride = "";
     this.state = STATE.IDLE;
     this.startedAt = null;
     this.lastError = "";
