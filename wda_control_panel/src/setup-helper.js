@@ -89,16 +89,69 @@ async function installWdaIpa(device, config = {}) {
   if (!pathExists(ipaPath)) throw new Error(`WDA IPA is missing: ${ipaPath}`);
   const bin = resolveGoIosPath(config);
   const args = ["install", "--path", ipaPath, `--udid=${device.udid}`];
-  const result = await run(bin, args);
-  if (!result.ok) {
-    throw new Error(result.stderr || result.stdout || `ios install exited ${result.code}`);
+  const onProgress = config.onProgress || (() => {});
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { shell: process.platform === "win32" });
+    let lastStatus = "";
+    let errorText = "";
+
+    const handleLine = (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      const json = parseJson(trimmed, null);
+      if (!json) return;
+      if (json.status) {
+        lastStatus = json.status;
+        onProgress(json.status, json.percentComplete ?? "");
+      }
+      if (json.level === "ERROR" || json.err) {
+        errorText = json.err || json.msg || trimmed;
+      }
+    };
+
+    const buf = { out: "", err: "" };
+    child.stdout?.on("data", (chunk) => {
+      buf.out += chunk;
+      buf.out.split(/\r?\n/).slice(0, -1).forEach(handleLine);
+      buf.out = buf.out.split(/\r?\n/).slice(-1)[0];
+    });
+    child.stderr?.on("data", (chunk) => {
+      buf.err += chunk;
+      buf.err.split(/\r?\n/).slice(0, -1).forEach(handleLine);
+      buf.err = buf.err.split(/\r?\n/).slice(-1)[0];
+    });
+    child.on("error", (err) => reject(err));
+    child.on("close", (code) => {
+      [buf.out, buf.err].forEach(handleLine);
+      if (code === 0) {
+        resolve({ ok: true, udid: device.udid, ipaPath });
+        return;
+      }
+      const msg = classifyInstallError(errorText || lastStatus);
+      reject(new Error(msg));
+    });
+  });
+}
+
+function classifyInstallError(raw) {
+  if (!raw) return "ios install failed (no output)";
+  if (/ApplicationVerificationFailed|provisioning profile|not properly signed/i.test(raw)) {
+    return (
+      "Provisioning profile mismatch — this IPA was not signed for this device.\n" +
+      "Ask the developer to add this device UDID to their Apple Developer account and rebuild the IPA."
+    );
   }
-  return {
-    ok: true,
-    udid: device.udid,
-    stdout: result.stdout,
-    stderr: result.stderr,
-  };
+  if (/DeviceLocked|device is locked/i.test(raw)) {
+    return "Device is locked — unlock the screen and try again.";
+  }
+  if (/not paired|pair.*device|trust/i.test(raw)) {
+    return "Device not trusted — tap 'Trust' on the iPhone when prompted.";
+  }
+  if (/DeveloperModeDisabled|developer mode/i.test(raw)) {
+    return "Developer Mode is off — enable it in Settings → Privacy & Security → Developer Mode.";
+  }
+  return raw.slice(0, 300);
 }
 
 async function listInstalledApps(device, config = {}) {

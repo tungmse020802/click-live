@@ -312,7 +312,13 @@ class FleetAgent {
       this.log(`[${deviceId}] WDA install ok via devicectl`);
       return result;
     }
-    const result = await installWdaIpa(device, config);
+    const result = await installWdaIpa(device, {
+      ...config,
+      onProgress: (status, pct) => {
+        const label = pct !== "" ? `${status} (${pct}%)` : status;
+        this.log(`[${deviceId}] install: ${label}`);
+      },
+    });
     this.log(`[${deviceId}] WDA install ok`);
     return result;
   }
