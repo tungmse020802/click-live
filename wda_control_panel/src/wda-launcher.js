@@ -24,7 +24,7 @@ const STATE = Object.freeze({
   ERROR: "error",
 });
 
-const DEFAULT_BUNDLE_ID = "com.tungld.clicklive.WebDriverAgentRunner.xctrunner";
+const DEFAULT_BUNDLE_ID = "com.clicklive.WebDriverAgentRunner.xctrunner";
 const DEFAULT_WDA_DEVICE_PORT = 8100;
 const READY_TIMEOUT_MS = 90_000;
 const READY_POLL_INTERVAL_MS = 500;

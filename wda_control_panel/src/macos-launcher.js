@@ -271,7 +271,7 @@ class MacosLauncher {
   }
 
   buildBundleId() {
-    return String(this.settings.wdaBundleId || "com.tungld.clicklive.WebDriverAgentRunner.xctrunner")
+    return String(this.settings.wdaBundleId || "com.clicklive.WebDriverAgentRunner.xctrunner")
       .replace(/\.xctrunner$/, "");
   }
 

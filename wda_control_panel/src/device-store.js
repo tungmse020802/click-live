@@ -14,7 +14,7 @@ const defaults = {
   launcherTool: process.platform === "darwin" ? "macos" : "go-ios",
   goIosPath: "",
   pymobiledevice3Path: "pymobiledevice3",
-  wdaBundleId: "com.tungld.clicklive.WebDriverAgentRunner.xctrunner",
+  wdaBundleId: "com.clicklive.WebDriverAgentRunner.xctrunner",
   wdaIpaPath: "",
   wdaProjectPath: "",
   derivedDataPath: "",
