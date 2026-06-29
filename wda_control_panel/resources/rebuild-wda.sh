@@ -42,9 +42,10 @@ fi
 if [[ -z "$DEVICE_UDID" ]]; then
   echo "==> No device UDID specified, searching for connected device..."
   DEVICE_UDID=$(xcrun xctrace list devices 2>/dev/null \
-    | grep -E '^[^-]+ \([0-9]+\.[0-9.]+\) \([0-9A-F]{8}-[0-9A-F]{16}\)' \
+    | grep -v '^=\|Simulator\|^$\| -- ' \
+    | grep '([0-9A-F-]*-[0-9A-F]*)' \
     | head -n 1 \
-    | sed -E 's/.*\(([0-9A-F]{8}-[0-9A-F]{16})\)/\1/') || true
+    | sed -E 's/.*\(([0-9A-F-]+)\)[^(]*$/\1/') || true
 
   if [[ -z "$DEVICE_UDID" ]]; then
     DEVICE_UDID=$(xcrun devicectl list devices --json 2>/dev/null \
