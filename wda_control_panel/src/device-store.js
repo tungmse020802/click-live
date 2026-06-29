@@ -70,6 +70,9 @@ class DeviceStore {
 
 function normalizeConfig(config) {
   const next = { ...defaults, ...config };
+  if (next.wdaBundleId === "com.tungld.clicklive.WebDriverAgentRunner.xctrunner") {
+    next.wdaBundleId = defaults.wdaBundleId;
+  }
   next.devices = normalizeDevices(next.devices);
 
   next.queuePollWaitSeconds = positiveNumber(next.queuePollWaitSeconds, defaults.queuePollWaitSeconds);
