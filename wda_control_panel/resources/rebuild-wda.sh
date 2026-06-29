@@ -111,8 +111,10 @@ xcodebuild \
   CODE_SIGN_STYLE=Automatic \
   DEVELOPMENT_TEAM="$TEAM_ID" \
   PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
-  build-for-testing \
-  | grep -E "^(error:|warning: |==>|Build succeeded|** BUILD|note: )" || true
+  build-for-testing 2>&1 \
+  | grep -v '^$' \
+  | grep -v '^    ' \
+  || true
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "" >&2
