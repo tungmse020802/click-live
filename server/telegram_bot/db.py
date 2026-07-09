@@ -119,8 +119,54 @@ class ChatDatabase:
 
                 CREATE INDEX IF NOT EXISTS idx_message_queue_message_id
                     ON message_queue(message_id);
+
+                CREATE TABLE IF NOT EXISTS broadcast_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(chat_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_broadcast_groups_enabled
+                    ON broadcast_groups(enabled, name);
+
+                CREATE TABLE IF NOT EXISTS watch_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(chat_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_watch_groups_enabled
+                    ON watch_groups(enabled, name);
                 """
             )
+            self._migrate_broadcast_groups(conn)
+
+    def _migrate_broadcast_groups(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(broadcast_groups)").fetchall()
+        }
+        if "approved" not in columns:
+            conn.execute(
+                """
+                ALTER TABLE broadcast_groups
+                ADD COLUMN approved INTEGER NOT NULL DEFAULT 0
+                """
+            )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_broadcast_groups_approved
+                ON broadcast_groups(approved, enabled, name)
+            """
+        )
 
     def upsert_chat_room(
         self,
@@ -222,6 +268,265 @@ class ChatDatabase:
                 return None
             return int(cursor.lastrowid)
 
+    def max_telegram_message_id_for_room(self, room_id: int) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT MAX(
+                    CAST(SUBSTR(platform_message_id, INSTR(platform_message_id, ':') + 1) AS INTEGER)
+                ) AS max_id
+                FROM chat_messages
+                WHERE room_id = ?
+                    AND platform_message_id IS NOT NULL
+                    AND INSTR(platform_message_id, ':') > 0
+                """,
+                (room_id,),
+            ).fetchone()
+        if row is None or row["max_id"] is None:
+            return 0
+        return int(row["max_id"])
+
+    def list_broadcast_groups(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, chat_id, enabled, approved, created_at, updated_at
+                FROM broadcast_groups
+                ORDER BY approved DESC, name ASC, id ASC
+                """
+            ).fetchall()
+        return [_row_to_broadcast_group(row) for row in rows]
+
+    def list_pending_broadcast_groups(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, chat_id, enabled, approved, created_at, updated_at
+                FROM broadcast_groups
+                WHERE approved = 0
+                ORDER BY updated_at DESC, name ASC, id ASC
+                """
+            ).fetchall()
+        return [_row_to_broadcast_group(row) for row in rows]
+
+    def list_approved_broadcast_groups(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, chat_id, enabled, approved, created_at, updated_at
+                FROM broadcast_groups
+                WHERE approved = 1
+                ORDER BY name ASC, id ASC
+                """
+            ).fetchall()
+        return [_row_to_broadcast_group(row) for row in rows]
+
+    def list_enabled_broadcast_groups(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, chat_id, enabled, approved, created_at, updated_at
+                FROM broadcast_groups
+                WHERE approved = 1 AND enabled = 1
+                ORDER BY name ASC, id ASC
+                """
+            ).fetchall()
+        return [_row_to_broadcast_group(row) for row in rows]
+
+    def upsert_pending_broadcast_group(self, chat_id: str, name: str) -> bool:
+        now = _now()
+        chat_id = str(chat_id).strip()
+        name = str(name or chat_id).strip() or chat_id
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, approved, name FROM broadcast_groups WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    """
+                    INSERT INTO broadcast_groups(
+                        name, chat_id, enabled, approved, created_at, updated_at
+                    )
+                    VALUES (?, ?, 1, 0, ?, ?)
+                    """,
+                    (name, chat_id, now, now),
+                )
+                return True
+
+            new_name = name if name != chat_id or row["name"] == chat_id else row["name"]
+            conn.execute(
+                """
+                UPDATE broadcast_groups
+                SET name = ?, updated_at = ?
+                WHERE chat_id = ?
+                """,
+                (new_name, now, chat_id),
+            )
+            return False
+
+    def approve_broadcast_group(self, group_id: int, name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        now = _now()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, name FROM broadcast_groups WHERE id = ?",
+                (group_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            final_name = str(name or row["name"]).strip() or row["name"]
+            conn.execute(
+                """
+                UPDATE broadcast_groups
+                SET approved = 1, enabled = 1, name = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (final_name, now, group_id),
+            )
+            updated = conn.execute(
+                """
+                SELECT id, name, chat_id, enabled, approved, created_at, updated_at
+                FROM broadcast_groups
+                WHERE id = ?
+                """,
+                (group_id,),
+            ).fetchone()
+        if updated is None:
+            return None
+        return _row_to_broadcast_group(updated)
+
+    def replace_approved_broadcast_groups(self, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        now = _now()
+        normalized = [_normalize_broadcast_group({**raw, "approved": True}, now) for raw in groups]
+        with self._connect() as conn:
+            conn.execute("DELETE FROM broadcast_groups WHERE approved = 1")
+            for group in normalized:
+                conn.execute(
+                    """
+                    INSERT INTO broadcast_groups(
+                        name, chat_id, enabled, approved, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        group["name"],
+                        group["chat_id"],
+                        1 if group.get("enabled", True) else 0,
+                        group.get("created_at", now),
+                        now,
+                    ),
+                )
+        return self.list_broadcast_groups()
+
+    def delete_broadcast_group(self, group_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM broadcast_groups WHERE id = ?",
+                (group_id,),
+            )
+            return cursor.rowcount > 0
+
+    def list_watch_groups(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, chat_id, enabled, created_at, updated_at
+                FROM watch_groups
+                ORDER BY name ASC, id ASC
+                """
+            ).fetchall()
+        return [_row_to_watch_group(row) for row in rows]
+
+    def list_enabled_watch_groups(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, chat_id, enabled, created_at, updated_at
+                FROM watch_groups
+                WHERE enabled = 1
+                ORDER BY name ASC, id ASC
+                """
+            ).fetchall()
+        return [_row_to_watch_group(row) for row in rows]
+
+    def replace_watch_groups(self, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        now = _now()
+        normalized = [_normalize_watch_group(raw, now) for raw in groups]
+        with self._connect() as conn:
+            conn.execute("DELETE FROM watch_groups")
+            for group in normalized:
+                conn.execute(
+                    """
+                    INSERT INTO watch_groups(name, chat_id, enabled, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        group["name"],
+                        group["chat_id"],
+                        1 if group.get("enabled", True) else 0,
+                        group.get("created_at", now),
+                        now,
+                    ),
+                )
+        return self.list_watch_groups()
+
+    def delete_watch_group(self, group_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM watch_groups WHERE id = ?",
+                (group_id,),
+            )
+            return cursor.rowcount > 0
+
+    def seed_watch_groups_if_empty(self, groups: List[Dict[str, Any]]) -> int:
+        if self.list_watch_groups():
+            return 0
+        if not groups:
+            return 0
+        self.replace_watch_groups(groups)
+        return len(groups)
+
+    def replace_broadcast_groups(self, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        now = _now()
+        normalized = [_normalize_broadcast_group(raw, now) for raw in groups]
+        with self._connect() as conn:
+            conn.execute("DELETE FROM broadcast_groups")
+            for group in normalized:
+                conn.execute(
+                    """
+                    INSERT INTO broadcast_groups(
+                        name, chat_id, enabled, approved, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        group["name"],
+                        group["chat_id"],
+                        1 if group.get("enabled", True) else 0,
+                        1 if group.get("approved", True) else 0,
+                        group.get("created_at", now),
+                        now,
+                    ),
+                )
+        return self.list_broadcast_groups()
+
+    def supersede_all_pending_for_room(self, room_id: int) -> int:
+        now = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE message_queue
+                SET status = 'done',
+                    last_error = 'superseded by newer message',
+                    completed_at = ?,
+                    updated_at = ?
+                WHERE status = 'pending'
+                    AND room_id = ?
+                """,
+                (now, now, room_id),
+            )
+            return int(cursor.rowcount)
+
     def enqueue_message(
         self,
         message_id: int,
@@ -303,6 +608,142 @@ class ChatDatabase:
             raise
         finally:
             conn.close()
+
+    def claim_next_fair(self, consumer_id: str, lease_seconds: int) -> Optional[QueueJob]:
+        """Claim newest pending job from the room waiting longest (fair across rooms)."""
+        now = _now()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            self._release_expired_jobs(conn, now)
+
+            row = conn.execute(
+                """
+                SELECT q.id
+                FROM message_queue q
+                INNER JOIN (
+                    SELECT room_id, MAX(created_at) AS room_latest
+                    FROM message_queue
+                    WHERE status = 'pending'
+                        AND available_at <= ?
+                    GROUP BY room_id
+                ) rooms ON rooms.room_id = q.room_id
+                WHERE q.status = 'pending'
+                    AND q.available_at <= ?
+                ORDER BY rooms.room_latest ASC, q.priority DESC, q.created_at DESC
+                LIMIT 1
+                """,
+                (now, now),
+            ).fetchone()
+            if not row:
+                conn.commit()
+                return None
+
+            job_id = int(row["id"])
+            locked_until = now + lease_seconds
+            conn.execute(
+                """
+                UPDATE message_queue
+                SET status = 'processing',
+                    locked_by = ?,
+                    locked_until = ?,
+                    attempts = attempts + 1,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (consumer_id, locked_until, now, job_id),
+            )
+
+            job_row = self._fetch_job_row(conn, job_id)
+            conn.commit()
+            return _row_to_job(job_row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def skip_older_pending_for_room(self, room_id: int, before_job_id: int) -> int:
+        now = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE message_queue
+                SET status = 'done',
+                    last_error = 'superseded by newer room message',
+                    completed_at = ?,
+                    updated_at = ?
+                WHERE status = 'pending'
+                    AND room_id = ?
+                    AND id < ?
+                """,
+                (now, now, room_id, before_job_id),
+            )
+            return int(cursor.rowcount)
+
+    def claim_next_newest(self, consumer_id: str, lease_seconds: int) -> Optional[QueueJob]:
+        now = _now()
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            self._release_expired_jobs(conn, now)
+
+            row = conn.execute(
+                """
+                SELECT id
+                FROM message_queue
+                WHERE status = 'pending'
+                    AND available_at <= ?
+                ORDER BY priority DESC, created_at DESC
+                LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if not row:
+                conn.commit()
+                return None
+
+            job_id = int(row["id"])
+            locked_until = now + lease_seconds
+            conn.execute(
+                """
+                UPDATE message_queue
+                SET status = 'processing',
+                    locked_by = ?,
+                    locked_until = ?,
+                    attempts = attempts + 1,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (consumer_id, locked_until, now, job_id),
+            )
+
+            job_row = self._fetch_job_row(conn, job_id)
+            conn.commit()
+            return _row_to_job(job_row)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def skip_stale_pending_jobs(self, max_age_seconds: float) -> int:
+        now = _now()
+        cutoff = now - max_age_seconds
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE message_queue
+                SET status = 'done',
+                    last_error = 'skipped stale pending',
+                    completed_at = ?,
+                    updated_at = ?
+                WHERE status = 'pending'
+                    AND created_at < ?
+                """,
+                (now, now, cutoff),
+            )
+            return int(cursor.rowcount)
 
     def claim_next_after(self, consumer_id: str, lease_seconds: int, after_id: int = 0) -> Optional[QueueJob]:
         now = _now()
@@ -761,6 +1202,66 @@ def _optional_float(value: Optional[Any]) -> Optional[float]:
 
 def _now() -> float:
     return time.time()
+
+
+def _row_to_watch_group(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "name": row["name"],
+        "chat_id": row["chat_id"],
+        "enabled": bool(row["enabled"]),
+        "created_at": float(row["created_at"]),
+        "updated_at": float(row["updated_at"]),
+    }
+
+
+def _normalize_watch_group(raw: Dict[str, Any], now: float) -> Dict[str, Any]:
+    from config import normalize_client_chat_ref
+
+    name = str(raw.get("name") or "").strip()
+    chat_id = normalize_client_chat_ref(str(raw.get("chat_id") or "").strip())
+    if not chat_id:
+        raise ValueError("watch group chat_id is required")
+    if not name:
+        name = chat_id
+    return {
+        "name": name,
+        "chat_id": chat_id,
+        "enabled": bool(raw.get("enabled", True)),
+        "created_at": float(raw.get("created_at") or now),
+    }
+
+
+def _row_to_broadcast_group(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "name": row["name"],
+        "chat_id": row["chat_id"],
+        "enabled": bool(row["enabled"]),
+        "approved": bool(row["approved"]) if "approved" in row.keys() else False,
+        "created_at": float(row["created_at"]),
+        "updated_at": float(row["updated_at"]),
+    }
+
+
+def _normalize_broadcast_group(raw: Dict[str, Any], now: float) -> Dict[str, Any]:
+    name = str(raw.get("name") or "").strip()
+    chat_id = str(raw.get("chat_id") or "").strip()
+    if not name:
+        raise ValueError("broadcast group name is required")
+    if not chat_id:
+        raise ValueError("broadcast group chat_id is required")
+    try:
+        int(chat_id)
+    except ValueError as exc:
+        raise ValueError(f"invalid broadcast group chat_id: {chat_id}") from exc
+    return {
+        "name": name,
+        "chat_id": chat_id,
+        "enabled": bool(raw.get("enabled", True)),
+        "approved": bool(raw.get("approved", True)),
+        "created_at": float(raw.get("created_at") or now),
+    }
 
 
 def _truncate(value: str, max_length: int) -> str:

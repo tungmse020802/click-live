@@ -1,7 +1,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -12,6 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent
 @dataclass(frozen=True)
 class BotConfig:
     token: str
+    bot_tokens: Tuple[str, ...]
     mode: str
     log_level: str
     allowed_user_ids: FrozenSet[int]
@@ -87,6 +88,7 @@ class TelegramClientConfig:
     filter_enabled: bool
     filter_config_path: str
     filter_reload_seconds: float
+    broadcast_enabled: bool
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,10 @@ class QueueUiConfig:
     queue_lease_seconds: int
     queue_retry_delay_seconds: int
     filter_config_path: str
+    auth_enabled: bool
+    auth_username: str
+    auth_password: str
+    auth_secret: str
 
 
 def _parse_user_ids(raw_value: str) -> FrozenSet[int]:
@@ -213,6 +219,19 @@ def _parse_csv(raw_value: str) -> Tuple[str, ...]:
     return tuple(value.strip() for value in raw_value.split(",") if value.strip())
 
 
+def _parse_bot_tokens(primary_token: str, raw_tokens: str) -> Tuple[str, ...]:
+    tokens: List[str] = []
+    if primary_token:
+        tokens.append(primary_token)
+
+    for token in raw_tokens.replace("\n", ",").replace(";", ",").split(","):
+        token = token.strip()
+        if token and token not in tokens:
+            tokens.append(token)
+
+    return tuple(tokens)
+
+
 def _room_key_from_url(url: str) -> str:
     if "#" not in url:
         return ""
@@ -265,17 +284,48 @@ def _telegram_client_entity_ref(chat_ref: str) -> str:
     return value
 
 
+def normalize_client_chat_ref(chat_ref: str) -> str:
+    value = chat_ref.strip()
+    if value.startswith("https://") and "#" in value:
+        value = value.split("#", 1)[1].strip()
+    if value.startswith("#"):
+        value = value[1:].strip()
+    return value
+
+
+def client_target_from_watch_group(group: Dict[str, Any]) -> TelegramClientTarget:
+    label = str(group.get("name") or group.get("chat_id") or "").strip()
+    chat_ref = normalize_client_chat_ref(str(group.get("chat_id") or "").strip())
+    entity_ref = _telegram_client_entity_ref(chat_ref)
+    room_key = chat_ref or entity_ref
+    return TelegramClientTarget(
+        label=label or room_key,
+        chat_ref=chat_ref,
+        room_key=room_key,
+        entity_ref=entity_ref,
+    )
+
+
+def client_targets_from_watch_groups(groups: List[Dict[str, Any]]) -> List[TelegramClientTarget]:
+    return [client_target_from_watch_group(group) for group in groups]
+
+
 def load_config() -> BotConfig:
     load_dotenv(BASE_DIR / ".env")
 
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("Set TELEGRAM_BOT_TOKEN environment variable in .env")
+    primary_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    bot_tokens = _parse_bot_tokens(primary_token, os.environ.get("TELEGRAM_BOT_TOKENS", ""))
+    if not bot_tokens:
+        raise RuntimeError(
+            "Set TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKENS environment variable in .env"
+        )
+    token = primary_token or bot_tokens[0]
 
     mode = (os.environ.get("BOT_MODE") or os.environ.get("MODE") or "polling").strip().lower()
 
     return BotConfig(
         token=token,
+        bot_tokens=bot_tokens,
         mode=mode,
         log_level=os.environ.get("BOT_LOG_LEVEL", "INFO").strip().upper(),
         allowed_user_ids=_parse_user_ids(os.environ.get("BOT_ALLOWED_USER_IDS", "")),
@@ -414,6 +464,7 @@ def load_telegram_client_config() -> TelegramClientConfig:
             os.environ.get("TELEGRAM_WEB_FILTER_CONFIG_PATH", "data/message_filters.json"),
         ),
         filter_reload_seconds=_parse_float("TELEGRAM_CLIENT_FILTER_RELOAD_SECONDS", 1.0, 0.1),
+        broadcast_enabled=_parse_bool(os.environ.get("BOT_BROADCAST_ENABLED", ""), True),
     )
 
 
@@ -437,6 +488,13 @@ def load_queue_json_config() -> QueueJsonConfig:
 def load_queue_ui_config() -> QueueUiConfig:
     load_dotenv(BASE_DIR / ".env")
 
+    from ui_auth import load_or_create_auth_secret
+
+    auth_password = os.environ.get("QUEUE_UI_PASSWORD", "").strip()
+    auth_username = (os.environ.get("QUEUE_UI_USERNAME", "admin").strip() or "admin")
+    auth_enabled = bool(auth_password)
+    auth_secret = load_or_create_auth_secret(BASE_DIR, auth_enabled)
+
     return QueueUiConfig(
         log_level=os.environ.get("BOT_LOG_LEVEL", "INFO").strip().upper(),
         db_path=_resolve_path(os.environ.get("BOT_DB_PATH", ""), "data/chatbot.sqlite3"),
@@ -451,4 +509,8 @@ def load_queue_ui_config() -> QueueUiConfig:
             os.environ.get("TELEGRAM_WEB_FILTER_CONFIG_PATH", ""),
             "data/message_filters.json",
         ),
+        auth_enabled=auth_enabled,
+        auth_username=auth_username,
+        auth_password=auth_password,
+        auth_secret=auth_secret,
     )

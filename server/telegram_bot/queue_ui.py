@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 import shutil
 import socket
@@ -9,10 +10,25 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
-from config import QueueUiConfig, load_queue_ui_config
+from bot_broadcast import discover_all_bot_groups, list_configured_bots, register_discovered_groups
+from config import QueueUiConfig, _parse_client_targets, load_config, load_queue_ui_config
 from db import ChatDatabase, QueueJob
+from deeplink_resolve import resolve_live_url
+from dotenv import load_dotenv
+from telegram import Bot
+from ui_auth import (
+    LOGIN_HTML,
+    LOGOUT_SCRIPT,
+    PUBLIC_PATHS,
+    SESSION_COOKIE,
+    SESSION_TTL_SECONDS,
+    create_session_token,
+    is_authenticated,
+    parse_cookie_header,
+    verify_credentials,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -22,11 +38,11 @@ PHONE_SCREENSHOT_MAX_BYTES = 15 * 1024 * 1024
 
 
 HTML = r"""<!doctype html>
-<html lang="en">
+<html lang="vi">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Message Queue Monitor</title>
+  <title>Giám sát hàng đợi tin nhắn</title>
   <style>
     :root {
       --bg: #f5f6f8;
@@ -436,29 +452,32 @@ HTML = r"""<!doctype html>
   <div class="shell">
     <header class="topbar">
       <div class="brand">
-        <h1>Queue Monitor</h1>
+        <h1>Giám sát hàng đợi</h1>
         <span id="dbPath"></span>
       </div>
       <div class="toolbar">
-        <select id="statusFilter" class="control" aria-label="Status">
-          <option value="">All status</option>
-          <option value="pending">Pending</option>
-          <option value="processing">Processing</option>
-          <option value="done">Done</option>
-          <option value="dead,failed">Dead/Failed</option>
+        <select id="statusFilter" class="control" aria-label="Trạng thái">
+          <option value="">Tất cả trạng thái</option>
+          <option value="pending">Chờ xử lý</option>
+          <option value="processing">Đang xử lý</option>
+          <option value="done">Hoàn thành</option>
+          <option value="dead,failed">Lỗi / thất bại</option>
         </select>
-        <select id="limitFilter" class="control" aria-label="Limit">
+        <select id="limitFilter" class="control" aria-label="Số dòng">
           <option value="25">25</option>
           <option value="50">50</option>
           <option value="100" selected>100</option>
           <option value="200">200</option>
         </select>
-        <label class="checkbox"><input id="autoRefresh" type="checkbox" checked> Auto</label>
-        <button id="reloadBtn" class="button" title="Reload" aria-label="Reload">R</button>
-        <button id="filtersBtn" class="button" title="Filters" aria-label="Filters">Filters</button>
-        <button id="phoneBtn" class="button" title="Phone Monitor" aria-label="Phone Monitor">Phone</button>
-        <button id="nextPhoneBtn" class="button primary" title="Send newest pending job to phone" aria-label="Next queue message">Next queue message</button>
-        <span id="liveStatus" class="live-status">Starting...</span>
+        <label class="checkbox"><input id="autoRefresh" type="checkbox" checked> Tự động</label>
+        <button id="reloadBtn" class="button" title="Tải lại" aria-label="Tải lại">↻</button>
+        <button id="filtersBtn" class="button" title="Bộ lọc" aria-label="Bộ lọc">Bộ lọc</button>
+        <button id="watchBtn" class="button" title="Nhóm theo dõi" aria-label="Nhóm theo dõi">Theo dõi</button>
+        <button id="broadcastBtn" class="button" title="Nhóm phát tin" aria-label="Nhóm phát tin">Phát tin</button>
+        <button id="phoneBtn" class="button" title="Giám sát điện thoại" aria-label="Giám sát điện thoại">Điện thoại</button>
+        <button id="nextPhoneBtn" class="button primary" title="Gửi tin chờ mới nhất sang điện thoại" aria-label="Gửi tin chờ mới nhất">Tin chờ mới nhất</button>
+        <button id="logoutBtn" class="button" title="Đăng xuất" aria-label="Đăng xuất">Đăng xuất</button>
+        <span id="liveStatus" class="live-status">Đang khởi động...</span>
       </div>
     </header>
 
@@ -470,29 +489,29 @@ HTML = r"""<!doctype html>
           <thead>
             <tr>
               <th class="col-id">ID</th>
-              <th class="col-status">Status</th>
-              <th class="col-priority">Priority</th>
-              <th class="col-room">Room</th>
-              <th class="col-attempts">Attempts</th>
-              <th class="col-created">Created</th>
-              <th class="col-message">Message</th>
+              <th class="col-status">Trạng thái</th>
+              <th class="col-priority">Ưu tiên</th>
+              <th class="col-room">Phòng</th>
+              <th class="col-attempts">Lần thử</th>
+              <th class="col-created">Tạo lúc</th>
+              <th class="col-message">Tin nhắn</th>
             </tr>
           </thead>
           <tbody id="queueRows"></tbody>
         </table>
-        <div id="emptyState" class="empty" hidden>No queue items</div>
+        <div id="emptyState" class="empty" hidden>Chưa có job trong hàng đợi</div>
       </section>
 
       <aside class="detail" id="detail">
-        <h2>Job Detail</h2>
-        <div class="muted">No row selected</div>
+        <h2>Chi tiết job</h2>
+        <div class="muted">Chưa chọn dòng nào</div>
       </aside>
     </main>
     <div id="contextMenu" class="context-menu" role="menu">
-      <button id="ctxOpenPhoneBtn">Open link on phone</button>
-      <button id="ctxOpenAdbBtn">Run with USB/ADB</button>
-      <button id="ctxPhonePageBtn">Phone Monitor</button>
-      <div id="ctxHint" class="muted-line">Right-click a queue row</div>
+      <button id="ctxOpenPhoneBtn">Mở link trên điện thoại</button>
+      <button id="ctxOpenAdbBtn">Chạy qua USB/ADB</button>
+      <button id="ctxPhonePageBtn">Giám sát điện thoại</button>
+      <div id="ctxHint" class="muted-line">Nhấn chuột phải vào một dòng</div>
     </div>
   </div>
 
@@ -556,6 +575,10 @@ HTML = r"""<!doctype html>
         cache: 'no-store',
         signal: state.controller.signal
       });
+      if (res.status === 401) {
+        location.href = '/login?next=' + encodeURIComponent(location.pathname);
+        return;
+      }
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       state.items = data.items || [];
@@ -571,13 +594,23 @@ HTML = r"""<!doctype html>
     }
 
     function renderStats(stats, data) {
+      const labels = {
+        pending: 'Chờ xử lý',
+        processing: 'Đang xử lý',
+        done: 'Hoàn thành',
+        dead: 'Chết',
+        failed: 'Thất bại',
+        total: 'Tổng',
+        latest: 'Mới nhất',
+        refresh: 'Tải lại'
+      };
       const order = ['pending', 'processing', 'done', 'dead', 'failed', 'total', 'latest', 'refresh'];
       const total = Object.values(stats).reduce((sum, value) => sum + Number(value || 0), 0);
       const latest = data.latest_id || state.items[0]?.id || 0;
       const merged = {...stats, total, latest, refresh: `${state.refreshSeconds}s`};
       els.stats.innerHTML = order.map((key) => `
         <div class="stat">
-          <div class="label">${esc(key)}</div>
+          <div class="label">${esc(labels[key] || key)}</div>
           <div class="value">${key === 'refresh' ? esc(merged[key]) : Number(merged[key] || 0).toLocaleString()}</div>
         </div>
       `).join('');
@@ -586,7 +619,7 @@ HTML = r"""<!doctype html>
     function renderLiveStatus(data) {
       const generated = data.generated_at ? new Date(data.generated_at) : new Date();
       const latest = data.latest_id || state.items[0]?.id || 0;
-      els.liveStatus.textContent = `Updated ${generated.toLocaleTimeString()} | latest #${latest} | ${state.items.length} rows`;
+      els.liveStatus.textContent = `Cập nhật ${generated.toLocaleTimeString()} | mới nhất #${latest} | ${state.items.length} dòng`;
     }
 
     function renderRows() {
@@ -679,14 +712,14 @@ HTML = r"""<!doctype html>
       const pending = state.items.filter((item) => item.status === 'pending').sort((a,b) => Number(b.id || 0) - Number(a.id || 0));
       const item = pending[0];
       if (!item) {
-        els.liveStatus.textContent = 'No pending queue message';
+        els.liveStatus.textContent = 'Không có tin chờ xử lý';
         return;
       }
       state.selectedId = item.id;
       renderRows();
       renderDetail();
       await sendSelectedToPhone();
-      els.liveStatus.textContent = `Sent newest pending job #${item.id} to phone`;
+      els.liveStatus.textContent = `Đã gửi tin chờ mới nhất #${item.id} sang điện thoại`;
     }
 
     async function sendSelectedToPhone() {
@@ -694,7 +727,7 @@ HTML = r"""<!doctype html>
       if (!item) return;
       const link = findLink(item);
       if (!link) {
-        els.liveStatus.textContent = `Job #${item.id} has no link/deeplink`;
+        els.liveStatus.textContent = `Job #${item.id} không có link/deeplink`;
         return;
       }
       const base = (localStorage.getItem('phoneMonitorBaseUrl') || '').replace(/\/$/, '');
@@ -713,7 +746,7 @@ HTML = r"""<!doctype html>
       const res = await fetch(base + '/actions/deeplink', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
       const text = await res.text();
       if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
-      els.liveStatus.textContent = `Sent job #${item.id} link to phone`;
+      els.liveStatus.textContent = `Đã gửi job #${item.id} sang điện thoại`;
     }
 
     async function sendSelectedToAdb() {
@@ -721,7 +754,7 @@ HTML = r"""<!doctype html>
       if (!item) return;
       const link = findLink(item);
       if (!link) {
-        els.liveStatus.textContent = `Job #${item.id} has no link/deeplink`;
+        els.liveStatus.textContent = `Job #${item.id} không có link/deeplink`;
         return;
       }
       const timeMeta = findTimeMeta(item);
@@ -733,13 +766,13 @@ HTML = r"""<!doctype html>
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      els.liveStatus.textContent = `ADB opened job #${item.id} on ${data.device || 'phone'}`;
+      els.liveStatus.textContent = `ADB đã mở job #${item.id} trên ${data.device || 'điện thoại'}`;
     }
 
     function showContextMenu(x, y) {
       const item = state.items.find((value) => value.id === state.selectedId);
       const link = findLink(item);
-      els.ctxHint.textContent = item ? `Job #${item.id}${link ? '' : ' | no link detected'}` : 'No job selected';
+      els.ctxHint.textContent = item ? `Job #${item.id}${link ? '' : ' | không phát hiện link'}` : 'Chưa chọn job';
       els.contextMenu.style.left = `${Math.min(x, window.innerWidth - 230)}px`;
       els.contextMenu.style.top = `${Math.min(y, window.innerHeight - 150)}px`;
       els.contextMenu.classList.add('open');
@@ -752,7 +785,7 @@ HTML = r"""<!doctype html>
     function renderDetail() {
       const item = state.items.find((value) => value.id === state.selectedId);
       if (!item) {
-        els.detail.innerHTML = '<h2>Job Detail</h2><div class="muted">No row selected</div>';
+        els.detail.innerHTML = '<h2>Chi tiết job</h2><div class="muted">Chưa chọn dòng nào</div>';
         return;
       }
 
@@ -764,48 +797,48 @@ HTML = r"""<!doctype html>
       els.detail.innerHTML = `
         <h2>Job #${item.id}</h2>
         <div class="detail-actions">
-          <button id="sendPhoneBtn" class="button" ${link ? '' : 'disabled'}>Open on phone</button>
-          <button id="phonePageBtn" class="button secondary">Phone Monitor</button>
+          <button id="sendPhoneBtn" class="button" ${link ? '' : 'disabled'}>Mở trên điện thoại</button>
+          <button id="phonePageBtn" class="button secondary">Giám sát điện thoại</button>
         </div>
         <div class="kv">
-          <div class="key">Link</div><div class="value">${link ? `<a href="${esc(link)}" target="_blank" rel="noopener">${esc(link)}</a>` : '<span class="muted">No link detected</span>'}</div>
-          <div class="key">TIME</div><div class="value">${timeMeta.label ? `${esc(timeMeta.label)} | click after ${(timeMeta.click_after_ms / 1000).toFixed(0)}s` : '<span class="muted">No TIME detected</span>'}</div>
-          <div class="key">Status</div><div class="value">${badge(item.status)} ${item.lease_expired ? '<span class="badge dead">expired</span>' : ''}</div>
-          <div class="key">Priority</div><div class="value">${item.priority}</div>
-          <div class="key">Attempts</div><div class="value">${item.attempts}/${item.max_attempts}</div>
-          <div class="key">Locked By</div><div class="value">${esc(item.locked_by || '')}</div>
-          <div class="key">Created</div><div class="value">${esc(timeText(item.created_at))}</div>
-          <div class="key">Updated</div><div class="value">${esc(timeText(item.updated_at))}</div>
-          <div class="key">Available</div><div class="value">${esc(timeText(item.available_at))}</div>
+          <div class="key">Link</div><div class="value">${link ? `<a href="${esc(link)}" target="_blank" rel="noopener">${esc(link)}</a>` : '<span class="muted">Không phát hiện link</span>'}</div>
+          <div class="key">TIME</div><div class="value">${timeMeta.label ? `${esc(timeMeta.label)} | click sau ${(timeMeta.click_after_ms / 1000).toFixed(0)}s` : '<span class="muted">Không phát hiện TIME</span>'}</div>
+          <div class="key">Trạng thái</div><div class="value">${badge(item.status)} ${item.lease_expired ? '<span class="badge dead">hết hạn</span>' : ''}</div>
+          <div class="key">Ưu tiên</div><div class="value">${item.priority}</div>
+          <div class="key">Lần thử</div><div class="value">${item.attempts}/${item.max_attempts}</div>
+          <div class="key">Đang khóa bởi</div><div class="value">${esc(item.locked_by || '')}</div>
+          <div class="key">Tạo lúc</div><div class="value">${esc(timeText(item.created_at))}</div>
+          <div class="key">Cập nhật</div><div class="value">${esc(timeText(item.updated_at))}</div>
+          <div class="key">Sẵn sàng lúc</div><div class="value">${esc(timeText(item.available_at))}</div>
         </div>
         <div class="kv">
-          <div class="key">Room</div><div class="value">${esc(room.title || room.chat_id || '')}</div>
-          <div class="key">Platform</div><div class="value">${esc(room.platform || '')}</div>
+          <div class="key">Phòng</div><div class="value">${esc(room.title || room.chat_id || '')}</div>
+          <div class="key">Nền tảng</div><div class="value">${esc(room.platform || '')}</div>
           <div class="key">Chat ID</div><div class="value">${esc(room.chat_id || '')}</div>
-          <div class="key">User</div><div class="value">${esc(user.username || user.platform_user_id || '')}</div>
-          <div class="key">Message ID</div><div class="value">${esc(message.platform_message_id || message.id || '')}</div>
+          <div class="key">Người dùng</div><div class="value">${esc(user.username || user.platform_user_id || '')}</div>
+          <div class="key">ID tin nhắn</div><div class="value">${esc(message.platform_message_id || message.id || '')}</div>
         </div>
         <div class="kv">
-          <div class="key">Message</div>
+          <div class="key">Tin nhắn</div>
           <div class="value"><div class="message-box">${esc(message.text || '')}</div></div>
           <div class="key">Payload</div>
           <div class="value"><pre>${esc(JSON.stringify(item.payload || {}, null, 2))}</pre></div>
-          <div class="key">Error</div>
+          <div class="key">Lỗi</div>
           <div class="value">${esc(item.last_error || '')}</div>
         </div>
       `;
-      document.getElementById('sendPhoneBtn')?.addEventListener('click', () => sendSelectedToPhone().catch((err) => { els.liveStatus.textContent = `Phone error: ${err.message}`; }));
+      document.getElementById('sendPhoneBtn')?.addEventListener('click', () => sendSelectedToPhone().catch((err) => { els.liveStatus.textContent = `Lỗi điện thoại: ${err.message}`; }));
       document.getElementById('phonePageBtn')?.addEventListener('click', () => { window.location.href = '/phone-monitor'; });
     }
 
     function bindContextMenu() {
       document.getElementById('ctxOpenPhoneBtn').addEventListener('click', () => {
         hideContextMenu();
-        sendSelectedToPhone().catch((err) => { els.liveStatus.textContent = `Phone error: ${err.message}`; });
+        sendSelectedToPhone().catch((err) => { els.liveStatus.textContent = `Lỗi điện thoại: ${err.message}`; });
       });
       document.getElementById('ctxOpenAdbBtn').addEventListener('click', () => {
         hideContextMenu();
-        sendSelectedToAdb().catch((err) => { els.liveStatus.textContent = `ADB error: ${err.message}`; });
+        sendSelectedToAdb().catch((err) => { els.liveStatus.textContent = `Lỗi ADB: ${err.message}`; });
       });
       document.getElementById('ctxPhonePageBtn').addEventListener('click', () => { window.location.href = '/phone-monitor'; });
       document.addEventListener('click', hideContextMenu);
@@ -819,7 +852,7 @@ HTML = r"""<!doctype html>
         state.timer = setInterval(() => {
           loadQueue().catch((err) => {
             if (err.name !== 'AbortError') {
-              els.liveStatus.textContent = `Error: ${err.message}`;
+              els.liveStatus.textContent = `Lỗi: ${err.message}`;
             }
           });
         }, state.refreshSeconds * 1000);
@@ -834,11 +867,17 @@ HTML = r"""<!doctype html>
     document.getElementById('filtersBtn').addEventListener('click', () => {
       window.location.href = '/filters';
     });
+    document.getElementById('watchBtn').addEventListener('click', () => {
+      window.location.href = '/watch';
+    });
+    document.getElementById('broadcastBtn').addEventListener('click', () => {
+      window.location.href = '/broadcast';
+    });
     document.getElementById('phoneBtn').addEventListener('click', () => {
       window.location.href = '/phone-monitor';
     });
     document.getElementById('nextPhoneBtn').addEventListener('click', () => {
-      sendNewestToPhone().catch((err) => { els.liveStatus.textContent = `Next error: ${err.message}`; });
+      sendNewestToPhone().catch((err) => { els.liveStatus.textContent = `Lỗi gửi tin: ${err.message}`; });
     });
     els.auto.addEventListener('change', schedule);
     els.status.addEventListener('change', loadQueue);
@@ -846,20 +885,22 @@ HTML = r"""<!doctype html>
 
     bindContextMenu();
     loadQueue().then(schedule).catch((err) => {
-      els.detail.innerHTML = `<h2>Job Detail</h2><div class="message-box">${esc(err.message)}</div>`;
+      els.detail.innerHTML = `<h2>Chi tiết job</h2><div class="message-box">${esc(err.message)}</div>`;
     });
   </script>
+  <script>
+""" + LOGOUT_SCRIPT + r"""
 </body>
 </html>
 """
 
 
 FILTERS_HTML = r"""<!doctype html>
-<html lang="en">
+<html lang="vi">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Message Filters</title>
+  <title>Bộ lọc tin nhắn</title>
   <style>
     :root { --bg:#f5f6f8; --surface:#fff; --border:#d7dce2; --text:#20242a; --muted:#66707b; --blue:#1d5fd0; --green:#17803d; --red:#b42318; }
     * { box-sizing: border-box; }
@@ -922,47 +963,48 @@ FILTERS_HTML = r"""<!doctype html>
 <body>
   <div class="shell">
     <header class="topbar">
-      <div class="brand"><h1>Filters</h1><span id="filterPath"></span></div>
+      <div class="brand"><h1>Bộ lọc tin nhắn</h1><span id="filterPath"></span></div>
       <div class="toolbar">
-        <button id="queueBtn" class="button">Queue</button>
-        <button id="reloadBtn" class="button">Reload</button>
-        <button id="saveBtn" class="button primary">Save</button>
+        <button id="queueBtn" class="button">Hàng đợi</button>
+        <button id="reloadBtn" class="button">Tải lại</button>
+        <button id="saveBtn" class="button primary">Lưu</button>
+        <button id="logoutBtn" class="button">Đăng xuất</button>
       </div>
     </header>
     <main class="main">
       <section class="list-pane">
         <div class="list-head">
-          <button id="addBtn" class="button primary">Add</button>
-          <button id="copyBtn" class="button">Duplicate</button>
-          <button id="deleteBtn" class="button danger">Delete</button>
+          <button id="addBtn" class="button primary">Thêm</button>
+          <button id="copyBtn" class="button">Nhân bản</button>
+          <button id="deleteBtn" class="button danger">Xóa</button>
         </div>
         <ul id="filterList" class="filter-list"></ul>
       </section>
       <section class="editor">
-        <div class="editor-head"><h2 id="editorTitle">Filter</h2><div id="status" class="status">Ready</div></div>
+        <div class="editor-head"><h2 id="editorTitle">Bộ lọc</h2><div id="status" class="status">Sẵn sàng</div></div>
         <div class="form-grid">
-          <div class="field wide"><label for="nameInput">Name</label><input id="nameInput" autocomplete="off"></div>
-          <div class="field"><label for="priorityInput">Priority</label><input id="priorityInput" type="number" min="0" step="1"></div>
-          <div class="field"><label class="checkline"><input id="enabledInput" type="checkbox"> Enabled</label></div>
+          <div class="field wide"><label for="nameInput">Tên</label><input id="nameInput" autocomplete="off"></div>
+          <div class="field"><label for="priorityInput">Ưu tiên</label><input id="priorityInput" type="number" min="0" step="1"></div>
+          <div class="field"><label class="checkline"><input id="enabledInput" type="checkbox"> Bật</label></div>
           <div class="field wide"><label for="boxesInput">BOX Min</label><input id="boxesInput" autocomplete="off" placeholder="100/25"><div class="hint">Nhập 100/25 nghĩa là lấy BOX có giá trị 1 &gt;= 100 và giá trị 2 &gt;= 25.</div></div>
           <div class="field wide">
-            <label for="countryComboButton">Countries</label>
+            <label for="countryComboButton">Quốc gia</label>
             <div id="countryCombo" class="combo">
               <button id="countryComboButton" class="combo-button" type="button" aria-haspopup="listbox" aria-expanded="false">
-                <span id="countriesSummary" class="combo-summary">Any country</span>
+                <span id="countriesSummary" class="combo-summary">Mọi quốc gia</span>
                 <span class="combo-caret">v</span>
               </button>
               <div id="countryMenu" class="combo-menu">
-                <input id="countrySearchInput" class="combo-search" autocomplete="off" placeholder="Search country or code">
+                <input id="countrySearchInput" class="combo-search" autocomplete="off" placeholder="Tìm quốc gia hoặc mã">
                 <label class="country-row"><input id="allCountriesInput" type="checkbox"><span class="country-code">ALL</span><span class="country-name">Tất cả quốc gia</span></label>
                 <div id="countryList" class="country-list" role="listbox" aria-multiselectable="true"></div>
               </div>
             </div>
           </div>
-          <div class="field wide"><label for="badgesInput">Badges</label><input id="badgesInput" autocomplete="off" placeholder="💎,🏅"></div>
-          <div class="field"><label for="minRateInput">Min Rate</label><input id="minRateInput" type="number" min="0" step="0.01"><div class="hint">Lấy Rate &gt;= giá trị nhập.</div></div>
-          <div class="field"><label for="minViewsInput">Min Views</label><input id="minViewsInput" type="number" min="0" step="1"><div class="hint">Lấy Views &gt;= giá trị nhập.</div></div>
-          <div class="field wide"><label for="noteInput">Note Contains</label><textarea id="noteInput" placeholder='"Rương treo", "ABC", "CDE"'></textarea><div class="hint">Có thể nhập nhiều từ khoá: "ABC", "CDE". So sánh không phân biệt hoa/thường.</div></div>
+          <div class="field wide"><label for="badgesInput">Huy hiệu</label><input id="badgesInput" autocomplete="off" placeholder="💎,🏅"></div>
+          <div class="field"><label for="minRateInput">Rate tối thiểu</label><input id="minRateInput" type="number" min="0" step="0.01"><div class="hint">Lấy Rate &gt;= giá trị nhập.</div></div>
+          <div class="field"><label for="minViewsInput">Views tối thiểu</label><input id="minViewsInput" type="number" min="0" step="1"><div class="hint">Lấy Views &gt;= giá trị nhập.</div></div>
+          <div class="field wide"><label for="noteInput">Ghi chú chứa</label><textarea id="noteInput" placeholder='"Rương treo", "ABC", "CDE"'></textarea><div class="hint">Có thể nhập nhiều từ khoá: "ABC", "CDE". So sánh không phân biệt hoa/thường.</div></div>
           <div class="sample">Mẫu tin nhắn:
 🎁 BOX: 100/25 💎 🏅 🇰🇷
 📈 Rate : 5.5
@@ -1036,19 +1078,19 @@ Form trên sẽ hiểu: BOX value 1 = 100, BOX value 2 = 25, country = KR, badge
         const selected = index === state.selected ? 'selected' : '';
         const enabled = filter.enabled !== false;
         const boxMin = filter.min_box1 !== undefined || filter.min_box2 !== undefined ? `box>=${filter.min_box1 ?? 0}/${filter.min_box2 ?? 0}` : toCsv(filter.boxes);
-        const meta = [boxMin, toCsv(filter.countries) || 'all countries', filter.min_rate !== undefined ? `rate>=${filter.min_rate}` : '', filter.min_views !== undefined ? `views>=${filter.min_views}` : '', filter.priority !== undefined ? `p${filter.priority}` : ''].filter(Boolean).join(' | ');
-        return `<li class="filter-row ${selected}" data-index="${index}"><div><div class="filter-name">${esc(filter.name || `filter_${index + 1}`)}</div><div class="filter-meta">${esc(meta || 'empty')}</div></div><span class="pill ${enabled ? 'on' : 'off'}">${enabled ? 'on' : 'off'}</span></li>`;
+        const meta = [boxMin, toCsv(filter.countries) || 'mọi quốc gia', filter.min_rate !== undefined ? `rate>=${filter.min_rate}` : '', filter.min_views !== undefined ? `views>=${filter.min_views}` : '', filter.priority !== undefined ? `p${filter.priority}` : ''].filter(Boolean).join(' | ');
+        return `<li class="filter-row ${selected}" data-index="${index}"><div><div class="filter-name">${esc(filter.name || `filter_${index + 1}`)}</div><div class="filter-meta">${esc(meta || 'trống')}</div></div><span class="pill ${enabled ? 'on' : 'off'}">${enabled ? 'bật' : 'tắt'}</span></li>`;
       }).join('');
       els.list.querySelectorAll('.filter-row').forEach((row) => row.addEventListener('click', () => { syncFormToFilter(); state.selected = Number(row.dataset.index); render(); }));
     }
     function updateCountrySummary(filter) {
       if (!filter) {
-        els.countrySummary.textContent = 'No filter selected';
+        els.countrySummary.textContent = 'Chưa chọn bộ lọc';
         return;
       }
       const selected = sortCountries(filter.countries);
       if (!selected.length) {
-        els.countrySummary.textContent = 'All countries';
+        els.countrySummary.textContent = 'Mọi quốc gia';
         return;
       }
       const preview = selected.slice(0, 6).join(', ');
@@ -1059,7 +1101,7 @@ Form trên sẽ hiểu: BOX value 1 = 100, BOX value 2 = 25, country = KR, badge
       const query = els.countrySearch.value.trim().toLowerCase();
       const options = COUNTRY_OPTIONS.filter((item) => !query || item.code.toLowerCase().includes(query) || item.name.toLowerCase().includes(query));
       if (!options.length) {
-        els.countryList.innerHTML = '<div class="country-empty">No countries found</div>';
+        els.countryList.innerHTML = '<div class="country-empty">Không tìm thấy quốc gia</div>';
         return;
       }
       els.countryList.innerHTML = options.map((item) => {
@@ -1083,7 +1125,7 @@ Form trên sẽ hiểu: BOX value 1 = 100, BOX value 2 = 25, country = KR, badge
     function renderForm() {
       const filter = currentFilter();
       document.querySelectorAll('input, textarea').forEach((node) => node.disabled = !filter);
-      els.title.textContent = filter ? (filter.name || `Filter #${state.selected + 1}`) : 'Filter';
+      els.title.textContent = filter ? (filter.name || `Bộ lọc #${state.selected + 1}`) : 'Bộ lọc';
       els.name.value = filter?.name || ''; els.priority.value = filter?.priority ?? ''; els.enabled.checked = filter ? filter.enabled !== false : false;
       els.boxes.value = filter?.min_box1 !== undefined || filter?.min_box2 !== undefined ? `${filter.min_box1 ?? 0}/${filter.min_box2 ?? 0}` : (Array.isArray(filter?.boxes) ? (filter.boxes[0] || '') : String(filter?.boxes || '')); els.badges.value = toCsv(filter?.badges);
       els.minRate.value = filter?.min_rate ?? ''; els.minViews.value = filter?.min_views ?? '';
@@ -1097,20 +1139,20 @@ Form trên sẽ hiểu: BOX value 1 = 100, BOX value 2 = 25, country = KR, badge
       const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       state.path = data.path || ''; state.filters = Array.isArray(data.filters) ? data.filters : [];
       state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1));
-      els.path.textContent = state.path; els.status.textContent = `Loaded ${state.filters.length}`; render();
+      els.path.textContent = state.path; els.status.textContent = `Đã tải ${state.filters.length} bộ lọc`; render();
     }
     async function saveFilters() {
       syncFormToFilter();
       const res = await fetch('/api/filters', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ filters:state.filters }) });
-      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Save failed');
-      state.filters = data.filters || []; state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1)); els.status.textContent = `Saved ${state.filters.length}`; render();
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Lưu thất bại');
+      state.filters = data.filters || []; state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1)); els.status.textContent = `Đã lưu ${state.filters.length} bộ lọc`; render();
     }
     $('queueBtn').addEventListener('click', () => window.location.href = '/');
     $('reloadBtn').addEventListener('click', () => loadFilters().catch((err) => els.status.textContent = err.message));
     $('saveBtn').addEventListener('click', () => saveFilters().catch((err) => els.status.textContent = err.message));
-    $('addBtn').addEventListener('click', () => { syncFormToFilter(); state.filters.push(newFilter()); state.selected = state.filters.length - 1; render(); els.status.textContent = 'Added'; });
-    $('copyBtn').addEventListener('click', () => { syncFormToFilter(); const filter = currentFilter(); if (!filter) return; const copy = JSON.parse(JSON.stringify(filter)); copy.name = `${copy.name || 'filter'}_copy`; state.filters.splice(state.selected + 1, 0, copy); state.selected += 1; render(); els.status.textContent = 'Duplicated'; });
-    $('deleteBtn').addEventListener('click', () => { if (!currentFilter()) return; state.filters.splice(state.selected, 1); state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1)); render(); els.status.textContent = 'Deleted'; });
+    $('addBtn').addEventListener('click', () => { syncFormToFilter(); state.filters.push(newFilter()); state.selected = state.filters.length - 1; render(); els.status.textContent = 'Đã thêm'; });
+    $('copyBtn').addEventListener('click', () => { syncFormToFilter(); const filter = currentFilter(); if (!filter) return; const copy = JSON.parse(JSON.stringify(filter)); copy.name = `${copy.name || 'filter'}_copy`; state.filters.splice(state.selected + 1, 0, copy); state.selected += 1; render(); els.status.textContent = 'Đã nhân bản'; });
+    $('deleteBtn').addEventListener('click', () => { if (!currentFilter()) return; state.filters.splice(state.selected, 1); state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1)); render(); els.status.textContent = 'Đã xóa'; });
     els.countryButton.addEventListener('click', () => {
       if (!currentFilter()) return;
       const open = !els.countryCombo.classList.contains('open');
@@ -1138,22 +1180,444 @@ Form trên sẽ hiểu: BOX value 1 = 100, BOX value 2 = 25, country = KR, badge
       els.countryCombo.classList.remove('open');
       els.countryButton.setAttribute('aria-expanded', 'false');
     });
-    document.querySelectorAll('input, textarea').forEach((node) => { node.addEventListener('input', () => { syncFormToFilter(); renderList(); els.title.textContent = currentFilter()?.name || 'Filter'; }); node.addEventListener('change', () => { syncFormToFilter(); renderList(); }); });
+    document.querySelectorAll('input, textarea').forEach((node) => { node.addEventListener('input', () => { syncFormToFilter(); renderList(); els.title.textContent = currentFilter()?.name || 'Bộ lọc'; }); node.addEventListener('change', () => { syncFormToFilter(); renderList(); }); });
     loadFilters().catch((err) => els.status.textContent = err.message);
   </script>
+  <script>
+""" + LOGOUT_SCRIPT + r"""
+</body>
+</html>
+"""
+
+BROADCAST_HTML = r"""<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nhóm nhận Bot broadcast</title>
+  <style>
+    :root { --bg:#f5f6f8; --surface:#fff; --border:#d7dce2; --text:#20242a; --muted:#66707b; --blue:#1d5fd0; --green:#17803d; --amber:#9a6500; --red:#b42318; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    button,input,textarea { font:inherit; }
+    .shell { min-height:100vh; display:grid; grid-template-rows:auto auto 1fr; }
+    .topbar,.subbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 20px; background:#151922; color:#f9fafb; }
+    .topbar { min-height:58px; }
+    .subbar { min-height:46px; background:#1d2430; border-top:1px solid #252b36; }
+    h1 { margin:0; font-size:18px; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; }
+    .button { height:34px; display:inline-flex; align-items:center; justify-content:center; border:1px solid #394252; background:#263040; color:#f9fafb; border-radius:6px; padding:0 12px; cursor:pointer; }
+    .button.primary { background:var(--blue); border-color:#3170df; }
+    .button.danger { background:#4a2530; border-color:#6d3342; }
+    .tabs { display:flex; gap:8px; }
+    .tab { height:30px; border:1px solid #394252; background:#263040; color:#f9fafb; border-radius:999px; padding:0 12px; cursor:pointer; }
+    .tab.active { background:var(--blue); border-color:#3170df; }
+    .main { display:grid; grid-template-columns:360px minmax(0,1fr); min-height:0; background:var(--surface); }
+    .list-pane { border-right:1px solid var(--border); overflow:auto; background:#fbfcfd; }
+    .list-head { padding:12px; border-bottom:1px solid var(--border); background:#eef1f4; position:sticky; top:0; }
+    .group-list { list-style:none; margin:0; padding:0; }
+    .group-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:12px; border-bottom:1px solid #edf0f3; cursor:pointer; }
+    .group-row.selected { background:#edf4ff; box-shadow:inset 3px 0 0 var(--blue); }
+    .group-name { font-weight:700; font-size:13px; }
+    .group-meta { color:var(--muted); font-size:12px; margin-top:4px; word-break:break-all; }
+    .pill { display:inline-flex; align-items:center; height:22px; padding:0 8px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap; }
+    .pill.pending { color:var(--amber); background:#fff7e8; border:1px solid #f0d199; }
+    .pill.approved { color:var(--green); background:#eaf7ee; border:1px solid #a8dfba; }
+    .pill.off { color:var(--red); background:#fff0ee; border:1px solid #f5b6ad; }
+    .editor { padding:18px; overflow:auto; }
+    .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    .field { display:flex; flex-direction:column; gap:6px; }
+    .field.full { grid-column:1 / -1; }
+    label { color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }
+    input,textarea { width:100%; border:1px solid var(--border); border-radius:6px; padding:9px 10px; }
+    textarea { min-height:100px; resize:vertical; }
+    .status,.hint { margin-top:12px; padding:10px; border:1px solid var(--border); border-radius:6px; background:#fbfcfd; color:var(--muted); font-size:13px; line-height:1.45; white-space:pre-wrap; }
+    .hint { margin-top:0; margin-bottom:12px; background:#fffdf5; border-color:#f0d199; }
+    .bot-panel { margin-bottom:12px; padding:12px; border:1px solid var(--border); border-radius:8px; background:#f8fbff; }
+    .bot-panel h2 { margin:0 0 10px; font-size:14px; }
+    .bot-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; }
+    .bot-card { border:1px solid var(--border); border-radius:8px; padding:10px; background:#fff; }
+    .bot-title { font-weight:700; font-size:13px; }
+    .bot-meta { color:var(--muted); font-size:12px; margin-top:4px; line-height:1.45; word-break:break-all; }
+    .pill.ok { color:var(--green); background:#eaf7ee; border:1px solid #a8dfba; }
+    .pill.err { color:var(--red); background:#fff0ee; border:1px solid #f5b6ad; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <h1>Nhóm nhận Bot broadcast</h1>
+      <div class="toolbar">
+        <button id="queueBtn" class="button">Hàng đợi</button>
+        <button id="watchBtn" class="button">Nhóm theo dõi</button>
+        <button id="discoverBtn" class="button primary">Quét nhóm bot vừa được add</button>
+        <button id="reloadBtn" class="button">Tải lại</button>
+        <button id="logoutBtn" class="button">Đăng xuất</button>
+      </div>
+    </header>
+    <div class="subbar">
+      <div class="tabs">
+        <button id="tabPending" class="tab active">Chờ duyệt</button>
+        <button id="tabApproved" class="tab">Đã duyệt</button>
+      </div>
+      <div id="summary" class="hint" style="margin:0;border:0;background:transparent;color:#aeb6c3;padding:0;">Sẵn sàng</div>
+    </div>
+    <main class="main">
+      <section class="list-pane">
+        <div class="list-head" id="listTitle">Nhóm chờ duyệt</div>
+        <ul id="groupList" class="group-list"></ul>
+      </section>
+      <section class="editor">
+        <div id="botPanel" class="bot-panel">
+          <h2>Bot broadcast đang cấu hình</h2>
+          <div id="botGrid" class="bot-grid"><div class="bot-card"><div class="bot-title">Đang tải bot...</div></div></div>
+        </div>
+        <div id="botHint" class="hint">
+          <b>Telethon session</b> chỉ dùng để đọc tin từ nhóm nguồn.<br>
+          Các bot bên trên gửi tin tới nhóm đã add bot và được <b>duyệt trên web</b>.
+        </div>
+        <div class="form-grid">
+          <div class="field"><label for="nameInput">Tên nhóm</label><input id="nameInput"></div>
+          <div class="field"><label for="chatIdInput">Chat ID</label><input id="chatIdInput" readonly></div>
+          <div class="field"><label class="checkline"><input id="enabledInput" type="checkbox"> Bật</label></div>
+          <div class="field full">
+            <button id="approveBtn" class="button primary">Duyệt nhóm này</button>
+            <button id="saveBtn" class="button">Lưu nhóm đã duyệt</button>
+            <button id="deleteBtn" class="button danger">Xóa</button>
+          </div>
+          <div class="field full"><label for="testTextInput">Tin test</label><textarea id="testTextInput" placeholder="Nội dung tin test broadcast..."></textarea></div>
+          <div class="field"><button id="testOneBtn" class="button">Test nhóm đang chọn</button></div>
+          <div class="field"><button id="testAllBtn" class="button primary">Test tất cả nhóm đã duyệt</button></div>
+        </div>
+        <div id="status" class="status">Sẵn sàng</div>
+      </section>
+    </main>
+  </div>
+  <script>
+    const state = { tab:'pending', pending:[], approved:[], selected:0, bots:[] };
+    const $ = (id) => document.getElementById(id);
+    const els = { list:$('groupList'), status:$('status'), summary:$('summary'), listTitle:$('listTitle'), name:$('nameInput'), chatId:$('chatIdInput'), enabled:$('enabledInput'), testText:$('testTextInput'), approveBtn:$('approveBtn'), saveBtn:$('saveBtn'), botGrid:$('botGrid') };
+    function esc(v){ return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function groups(){ return state.tab === 'pending' ? state.pending : state.approved; }
+    function current(){ return groups()[state.selected] || null; }
+    function syncForm(){
+      const g = current(); if (!g) return;
+      g.name = els.name.value.trim() || g.name;
+      g.enabled = els.enabled.checked;
+    }
+    function renderList(){
+      const items = groups();
+      els.listTitle.textContent = state.tab === 'pending' ? 'Nhóm chờ duyệt' : 'Nhóm đã duyệt';
+      els.list.innerHTML = items.length ? items.map((g,i) => {
+        const pill = state.tab === 'pending' ? 'pending' : (g.enabled !== false ? 'approved' : 'off');
+        const pillText = state.tab === 'pending' ? 'chờ' : (g.enabled !== false ? 'bật' : 'tắt');
+        return `<li class="group-row ${i===state.selected?'selected':''}" data-index="${i}"><div><div class="group-name">${esc(g.name)}</div><div class="group-meta">${esc(g.chat_id)}</div></div><span class="pill ${pill}">${pillText}</span></li>`;
+      }).join('') : `<li class="group-row"><div><div class="group-name">Không có nhóm</div><div class="group-meta">Add bot vào nhóm rồi bấm Quét</div></div></li>`;
+      els.list.querySelectorAll('.group-row[data-index]').forEach((row) => row.addEventListener('click', () => { syncForm(); state.selected = Number(row.dataset.index); renderForm(); renderList(); }));
+      els.summary.textContent = `Bot ${state.bots.length} | Chờ duyệt ${state.pending.length} | Đã duyệt ${state.approved.length}`;
+    }
+    function renderBots(){
+      const bots = state.bots || [];
+      els.botGrid.innerHTML = bots.length ? bots.map((bot) => {
+        const pill = bot.ok ? 'ok' : 'err';
+        const pillText = bot.ok ? 'OK' : 'Lỗi';
+        const title = esc(bot.display_name || bot.first_name || `Bot ${bot.index}`);
+        const mention = bot.mention ? `<div class="bot-meta">${esc(bot.mention)}</div>` : '';
+        const meta = bot.ok
+          ? `<div class="bot-meta">ID: ${esc(bot.id)}</div><div class="bot-meta">Token: ${esc(bot.token_hint)}</div>`
+          : `<div class="bot-meta">${esc(bot.error || 'Không kết nối được Bot API')}</div>`;
+        return `<div class="bot-card"><div style="display:flex;justify-content:space-between;gap:8px;align-items:start;"><div><div class="bot-title">#${bot.index} ${title}</div>${mention}${meta}</div><span class="pill ${pill}">${pillText}</span></div></div>`;
+      }).join('') : `<div class="bot-card"><div class="bot-title">Chưa cấu hình bot</div><div class="bot-meta">Thêm TELEGRAM_BOT_TOKEN hoặc TELEGRAM_BOT_TOKENS trong .env</div></div>`;
+    }
+    function renderForm(){
+      const g = current();
+      const approvedTab = state.tab === 'approved';
+      els.name.disabled = !g;
+      els.enabled.disabled = !g || !approvedTab;
+      els.approveBtn.style.display = state.tab === 'pending' && g ? 'inline-flex' : 'none';
+      els.saveBtn.style.display = approvedTab ? 'inline-flex' : 'none';
+      els.name.value = g?.name || '';
+      els.chatId.value = g?.chat_id || '';
+      els.enabled.checked = g ? g.enabled !== false : false;
+      ['testOneBtn','testAllBtn','deleteBtn'].forEach((id) => { $(id).disabled = !g; });
+    }
+    function setTab(tab){
+      state.tab = tab;
+      state.selected = 0;
+      $('tabPending').classList.toggle('active', tab === 'pending');
+      $('tabApproved').classList.toggle('active', tab === 'approved');
+      renderList(); renderForm();
+    }
+    async function loadBots(){
+      const res = await fetch('/api/broadcast-bots?_=' + Date.now(), { cache:'no-store' });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      state.bots = data.bots || [];
+      renderBots();
+      renderList();
+    }
+    async function loadGroups(){
+      const res = await fetch('/api/broadcast-groups?_=' + Date.now(), { cache:'no-store' });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      state.pending = data.pending || [];
+      state.approved = data.approved || [];
+      state.selected = Math.min(state.selected, Math.max(0, groups().length - 1));
+      renderList(); renderForm();
+    }
+    async function discoverGroups(){
+      const res = await fetch('/api/broadcast-groups/discover', { method:'POST' });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Discover failed');
+      state.pending = data.pending || [];
+      state.approved = data.approved || [];
+      state.tab = 'pending';
+      setTab('pending');
+      els.status.textContent = `Quét xong: thêm ${data.added || 0}, cập nhật ${data.updated || 0}, bot quét ${(data.scans || []).length}`;
+    }
+    async function approveCurrent(){
+      const g = current(); if (!g?.id) throw new Error('Chọn nhóm pending');
+      syncForm();
+      const res = await fetch('/api/broadcast-groups/approve', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id:g.id, name:els.name.value.trim() || g.name }) });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Approve failed');
+      state.pending = data.pending || [];
+      state.approved = data.approved || [];
+      state.tab = 'approved';
+      state.selected = Math.max(0, state.approved.length - 1);
+      setTab('approved');
+      els.status.textContent = `Đã duyệt ${g.name}`;
+    }
+    async function saveApproved(){
+      syncForm();
+      const res = await fetch('/api/broadcast-groups', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ groups: state.approved }) });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Save failed');
+      state.pending = data.pending || [];
+      state.approved = data.approved || [];
+      els.status.textContent = `Đã lưu ${state.approved.length} nhóm đã duyệt`;
+      renderList(); renderForm();
+    }
+    async function deleteCurrent(){
+      const g = current(); if (!g?.id) return;
+      const res = await fetch('/api/broadcast-groups/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id:g.id }) });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Delete failed');
+      state.pending = data.pending || [];
+      state.approved = data.approved || [];
+      state.selected = Math.min(state.selected, Math.max(0, groups().length - 1));
+      renderList(); renderForm();
+    }
+    async function testSend(all){
+      const text = els.testText.value.trim();
+      if (!text) throw new Error('Nhập nội dung tin test');
+      const body = { text, all };
+      if (!all) {
+        const g = current(); if (!g?.chat_id) throw new Error('Chọn nhóm');
+        body.chat_id = g.chat_id;
+      }
+      const res = await fetch('/api/broadcast-groups/test', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Test failed');
+      els.status.textContent = JSON.stringify(data, null, 2);
+    }
+    $('queueBtn').onclick = () => location.href = '/';
+    $('watchBtn').onclick = () => location.href = '/watch';
+    $('reloadBtn').onclick = () => Promise.all([loadBots(), loadGroups()]).catch((e) => els.status.textContent = e.message);
+    $('discoverBtn').onclick = () => discoverGroups().catch((e) => els.status.textContent = e.message);
+    $('tabPending').onclick = () => setTab('pending');
+    $('tabApproved').onclick = () => setTab('approved');
+    $('approveBtn').onclick = () => approveCurrent().catch((e) => els.status.textContent = e.message);
+    $('saveBtn').onclick = () => saveApproved().catch((e) => els.status.textContent = e.message);
+    $('deleteBtn').onclick = () => deleteCurrent().catch((e) => els.status.textContent = e.message);
+    $('testOneBtn').onclick = () => testSend(false).catch((e) => els.status.textContent = e.message);
+    $('testAllBtn').onclick = () => testSend(true).catch((e) => els.status.textContent = e.message);
+    ['nameInput','enabledInput'].forEach((id) => { $(id).addEventListener('input', () => { syncForm(); renderList(); }); $(id).addEventListener('change', () => { syncForm(); renderList(); }); });
+    Promise.all([loadBots(), loadGroups()]).catch((e) => els.status.textContent = e.message);
+  </script>
+  <script>
+""" + LOGOUT_SCRIPT + r"""
+</body>
+</html>
+"""
+
+WATCH_HTML = r"""<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nhóm theo dõi Telethon</title>
+  <style>
+    :root { --bg:#f5f6f8; --surface:#fff; --border:#d7dce2; --text:#20242a; --muted:#66707b; --blue:#1d5fd0; --green:#17803d; --red:#b42318; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    button,input,textarea { font:inherit; }
+    .shell { min-height:100vh; display:grid; grid-template-rows:auto auto 1fr; }
+    .topbar,.subbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 20px; background:#151922; color:#f9fafb; }
+    .topbar { min-height:58px; }
+    .subbar { min-height:46px; background:#1d2430; border-top:1px solid #252b36; }
+    h1 { margin:0; font-size:18px; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; }
+    .button { height:34px; display:inline-flex; align-items:center; justify-content:center; border:1px solid #394252; background:#263040; color:#f9fafb; border-radius:6px; padding:0 12px; cursor:pointer; }
+    .button.primary { background:var(--blue); border-color:#3170df; }
+    .button.danger { background:#4a2530; border-color:#6d3342; }
+    .main { display:grid; grid-template-columns:360px minmax(0,1fr); min-height:0; background:var(--surface); }
+    .list-pane { border-right:1px solid var(--border); overflow:auto; background:#fbfcfd; }
+    .list-head { padding:12px; border-bottom:1px solid var(--border); background:#eef1f4; position:sticky; top:0; }
+    .group-list { list-style:none; margin:0; padding:0; }
+    .group-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:12px; border-bottom:1px solid #edf0f3; cursor:pointer; }
+    .group-row.selected { background:#edf4ff; box-shadow:inset 3px 0 0 var(--blue); }
+    .group-name { font-weight:700; font-size:13px; }
+    .group-meta { color:var(--muted); font-size:12px; margin-top:4px; word-break:break-all; }
+    .pill { display:inline-flex; align-items:center; height:22px; padding:0 8px; border-radius:999px; font-size:12px; font-weight:700; white-space:nowrap; }
+    .pill.on { color:var(--green); background:#eaf7ee; border:1px solid #a8dfba; }
+    .pill.off { color:var(--red); background:#fff0ee; border:1px solid #f5b6ad; }
+    .editor { padding:18px; overflow:auto; }
+    .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+    .field { display:flex; flex-direction:column; gap:6px; }
+    .field.full { grid-column:1 / -1; }
+    label { color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }
+    input,textarea { width:100%; border:1px solid var(--border); border-radius:6px; padding:9px 10px; }
+    .status,.hint { margin-top:12px; padding:10px; border:1px solid var(--border); border-radius:6px; background:#fbfcfd; color:var(--muted); font-size:13px; line-height:1.45; white-space:pre-wrap; }
+    .hint { margin-top:0; margin-bottom:12px; background:#fffdf5; border-color:#f0d199; }
+    .checkline { display:flex; align-items:center; gap:8px; min-height:38px; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <h1>Nhóm theo dõi (Telethon)</h1>
+      <div class="toolbar">
+        <button id="queueBtn" class="button">Hàng đợi</button>
+        <button id="broadcastBtn" class="button">Phát tin</button>
+        <button id="importEnvBtn" class="button">Import từ .env</button>
+        <button id="reloadBtn" class="button">Tải lại</button>
+        <button id="logoutBtn" class="button">Đăng xuất</button>
+      </div>
+    </header>
+    <div class="subbar">
+      <div id="summary" class="hint" style="margin:0;border:0;background:transparent;color:#aeb6c3;padding:0;">Sẵn sàng</div>
+    </div>
+    <main class="main">
+      <section class="list-pane">
+        <div class="list-head">Nhóm nguồn đang theo dõi</div>
+        <ul id="groupList" class="group-list"></ul>
+      </section>
+      <section class="editor">
+        <div class="hint">
+          <b>Telethon session</b> (tài khoản của bạn) đọc tin từ các nhóm này.<br>
+          Tin khớp filter sẽ vào queue và bot gửi tới các nhóm đã duyệt ở trang <b>Broadcast</b>.<br>
+          Chat ID: <code>-1003431776950</code>, <code>@channel</code>, hoặc <code>#-100...</code>. Session phải là thành viên nhóm.
+        </div>
+        <div class="form-grid">
+          <div class="field"><label for="nameInput">Tên nhóm</label><input id="nameInput" placeholder="Moon v7.81"></div>
+          <div class="field"><label for="chatIdInput">Chat ID / @username</label><input id="chatIdInput" placeholder="-1003431776950"></div>
+          <div class="field"><label class="checkline"><input id="enabledInput" type="checkbox" checked> Bật</label></div>
+          <div class="field full">
+            <button id="addBtn" class="button primary">Thêm nhóm</button>
+            <button id="saveBtn" class="button">Lưu thay đổi</button>
+            <button id="deleteBtn" class="button danger">Xóa nhóm đang chọn</button>
+          </div>
+        </div>
+        <div id="status" class="status">Sẵn sàng</div>
+      </section>
+    </main>
+  </div>
+  <script>
+    const state = { groups:[], selected:0 };
+    const $ = (id) => document.getElementById(id);
+    const els = { list:$('groupList'), status:$('status'), summary:$('summary'), name:$('nameInput'), chatId:$('chatIdInput'), enabled:$('enabledInput') };
+    function esc(v){ return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function current(){ return state.groups[state.selected] || null; }
+    function syncForm(){
+      const g = current(); if (!g) return;
+      g.name = els.name.value.trim() || g.name;
+      g.enabled = els.enabled.checked;
+    }
+    function renderList(){
+      els.list.innerHTML = state.groups.length ? state.groups.map((g,i) => {
+        const pill = g.enabled !== false ? 'on' : 'off';
+        const pillText = g.enabled !== false ? 'bật' : 'tắt';
+        return `<li class="group-row ${i===state.selected?'selected':''}" data-index="${i}"><div><div class="group-name">${esc(g.name)}</div><div class="group-meta">${esc(g.chat_id)}</div></div><span class="pill ${pill}">${pillText}</span></li>`;
+      }).join('') : `<li class="group-row"><div><div class="group-name">Chưa có nhóm</div><div class="group-meta">Thêm Chat ID bên phải</div></div></li>`;
+      els.list.querySelectorAll('.group-row[data-index]').forEach((row) => row.addEventListener('click', () => { syncForm(); state.selected = Number(row.dataset.index); renderForm(); renderList(); }));
+      els.summary.textContent = `${state.groups.length} nhóm | ${state.groups.filter((g) => g.enabled !== false).length} đang bật`;
+    }
+    function renderForm(){
+      const g = current();
+      els.name.disabled = !g;
+      els.enabled.disabled = !g;
+      els.name.value = g?.name || '';
+      els.chatId.value = g?.chat_id || '';
+      els.enabled.checked = g ? g.enabled !== false : true;
+      $('deleteBtn').disabled = !g;
+      $('saveBtn').disabled = !g;
+    }
+    async function loadGroups(){
+      const res = await fetch('/api/watch-groups?_=' + Date.now(), { cache:'no-store' });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      state.groups = data.groups || [];
+      state.selected = Math.min(state.selected, Math.max(0, state.groups.length - 1));
+      renderList(); renderForm();
+    }
+    async function saveGroups(){
+      syncForm();
+      const res = await fetch('/api/watch-groups', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ groups: state.groups }) });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Save failed');
+      state.groups = data.groups || [];
+      els.status.textContent = `Đã lưu ${state.groups.length} nhóm. Telethon reader sẽ tự reload trong ~30s.`;
+      renderList(); renderForm();
+    }
+    function addGroup(){
+      const name = els.name.value.trim();
+      const chatId = els.chatId.value.trim();
+      if (!chatId) throw new Error('Nhập Chat ID hoặc @username');
+      if (state.groups.some((g) => g.chat_id === chatId)) throw new Error('Chat ID đã tồn tại');
+      state.groups.push({ name: name || chatId, chat_id: chatId, enabled: els.enabled.checked });
+      state.selected = state.groups.length - 1;
+      renderList(); renderForm();
+      els.status.textContent = 'Đã thêm vào danh sách — bấm Lưu để áp dụng';
+    }
+    async function deleteCurrent(){
+      const g = current(); if (!g) return;
+      if (g.id) {
+        const res = await fetch('/api/watch-groups/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id:g.id }) });
+        const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Delete failed');
+        state.groups = data.groups || [];
+      } else {
+        state.groups.splice(state.selected, 1);
+      }
+      state.selected = Math.min(state.selected, Math.max(0, state.groups.length - 1));
+      renderList(); renderForm();
+      els.status.textContent = 'Đã xóa nhóm';
+    }
+    async function importEnv(){
+      const res = await fetch('/api/watch-groups/import-env', { method:'POST' });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Import failed');
+      state.groups = data.groups || [];
+      state.selected = 0;
+      renderList(); renderForm();
+      els.status.textContent = data.imported ? `Import ${data.imported} nhóm từ .env` : 'Không có nhóm mới từ .env';
+    }
+    $('queueBtn').onclick = () => location.href = '/';
+    $('broadcastBtn').onclick = () => location.href = '/broadcast';
+    $('reloadBtn').onclick = () => loadGroups().catch((e) => els.status.textContent = e.message);
+    $('importEnvBtn').onclick = () => importEnv().catch((e) => els.status.textContent = e.message);
+    $('addBtn').onclick = () => { try { addGroup(); } catch (e) { els.status.textContent = e.message; } };
+    $('saveBtn').onclick = () => saveGroups().catch((e) => els.status.textContent = e.message);
+    $('deleteBtn').onclick = () => deleteCurrent().catch((e) => els.status.textContent = e.message);
+    ['nameInput','enabledInput'].forEach((id) => { $(id).addEventListener('input', () => { syncForm(); renderList(); }); $(id).addEventListener('change', () => { syncForm(); renderList(); }); });
+    loadGroups().catch((e) => els.status.textContent = e.message);
+  </script>
+  <script>
+""" + LOGOUT_SCRIPT + r"""
 </body>
 </html>
 """
 
 PHONE_MONITOR_HTML = r"""<!doctype html>
-<html lang="en">
+<html lang="vi">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Phone Monitor</title>
+  <title>Giám sát điện thoại</title>
   <style>
     body { margin:0; background:#f5f6f8; color:#20242a; font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
     .topbar { min-height:58px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 20px; background:#151922; color:#f9fafb; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; }
     h1 { margin:0; font-size:18px; }
     .button { min-height:34px; border:1px solid #394252; background:#263040; color:#f9fafb; border-radius:6px; padding:0 12px; cursor:pointer; }
     .main { max-width:980px; margin:0 auto; padding:18px; }
@@ -1169,61 +1633,63 @@ PHONE_MONITOR_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <header class="topbar"><h1>Phone Monitor</h1><button id="queueBtn" class="button">Queue</button></header>
+  <header class="topbar"><h1>Giám sát điện thoại</h1><div class="toolbar"><button id="queueBtn" class="button">Hàng đợi</button><button id="logoutBtn" class="button">Đăng xuất</button></div></header>
   <main class="main">
     <section class="card">
-      <h2>Connect Android app</h2>
-      <p>Install APK from <code>phone_monitor_app</code>, enable Accessibility + Overlay, then enter the phone IP shown in the app. Default port is 8791.</p>
-      <label>Phone base URL</label><input id="baseUrl" placeholder="http://192.168.1.23:8791">
-      <div class="actions"><button id="saveBtn" class="button primary">Save URL</button><button id="logsBtn" class="button light">Load Logs</button><button id="openPendingBtn" class="button primary">Open pending queue link</button></div>
+      <h2>Kết nối app Android</h2>
+      <p>Cài APK từ <code>phone_monitor_app</code>, bật Accessibility + Overlay, rồi nhập IP điện thoại hiển thị trong app. Cổng mặc định là 8791.</p>
+      <label>URL điện thoại</label><input id="baseUrl" placeholder="http://192.168.1.23:8791">
+      <div class="actions"><button id="saveBtn" class="button primary">Lưu URL</button><button id="logsBtn" class="button light">Tải log</button><button id="openPendingBtn" class="button primary">Mở link tin chờ</button></div>
     </section>
     <section class="card">
       <h2>USB Type-C / ADB</h2>
-      <p>Dùng khi điện thoại đang cắm dây Type-C và đã bật USB debugging. Có thể cài APK monitor hoặc mở deeplink trực tiếp qua ADB.</p>
-      <label>ADB device</label><select id="adbDevice"><option value="">Auto select</option></select>
-      <label>APK path</label><input id="apkPath" value="phone_monitor_app/app/build/outputs/apk/debug/app-debug.apk" placeholder="phone_monitor_app/app/build/outputs/apk/debug/app-debug.apk">
-      <label>Default click point after TIME</label><div class="row"><input id="clickX" type="number" placeholder="click x" value="540"><input id="clickY" type="number" placeholder="click y" value="1800"><input id="clickDelay" type="number" placeholder="manual delay ms"><button id="saveClickPointBtn" class="button light">Save click point</button></div>
-      <div class="actions"><button id="adbRefreshBtn" class="button light">Refresh devices</button><button id="adbInstallBtn" class="button primary">Install APK via Type-C</button><button id="adbOpenBtn" class="button primary">Open deeplink via ADB</button></div>
+      <p>Dùng khi điện thoại cắm dây Type-C và đã bật USB debugging. Có thể cài APK monitor hoặc mở deeplink trực tiếp qua ADB.</p>
+      <label>Thiết bị ADB</label><select id="adbDevice"><option value="">Tự chọn</option></select>
+      <label>Đường dẫn APK</label><input id="apkPath" value="phone_monitor_app/app/build/outputs/apk/debug/app-debug.apk" placeholder="phone_monitor_app/app/build/outputs/apk/debug/app-debug.apk">
+      <label>Điểm click mặc định sau TIME</label><div class="row"><input id="clickX" type="number" placeholder="x" value="540"><input id="clickY" type="number" placeholder="y" value="1800"><input id="clickDelay" type="number" placeholder="delay ms"><button id="saveClickPointBtn" class="button light">Lưu điểm click</button></div>
+      <div class="actions"><button id="adbRefreshBtn" class="button light">Làm mới thiết bị</button><button id="adbInstallBtn" class="button primary">Cài APK qua Type-C</button><button id="adbOpenBtn" class="button primary">Mở deeplink qua ADB</button></div>
     </section>
     <section class="card">
-      <h2>Direct actions</h2>
-      <label>Deeplink</label><input id="deeplink" placeholder="tiktok://... or https://...">
+      <h2>Thao tác trực tiếp</h2>
+      <label>Deeplink</label><input id="deeplink" placeholder="tiktok://... hoặc https://...">
       <div class="row"><input id="x" type="number" placeholder="x"><input id="y" type="number" placeholder="y"><input id="x2" type="number" placeholder="x2"><input id="y2" type="number" placeholder="y2"></div>
-      <div class="actions"><button id="tapBtn" class="button primary">Tap x,y</button><button id="swipeBtn" class="button primary">Swipe x,y → x2,y2</button><button id="deepBtn" class="button primary">Open Deeplink</button></div>
+      <div class="actions"><button id="tapBtn" class="button primary">Tap x,y</button><button id="swipeBtn" class="button primary">Vuốt x,y → x2,y2</button><button id="deepBtn" class="button primary">Mở Deeplink</button></div>
     </section>
-    <section class="card"><h2>Logs</h2><pre id="logs">Ready.</pre></section>
+    <section class="card"><h2>Log</h2><pre id="logs">Sẵn sàng.</pre></section>
   </main>
 <script>
   const $ = id => document.getElementById(id);
   const base = $('baseUrl');
   base.value = localStorage.getItem('phoneMonitorBaseUrl') || '';
-  function url(path){ const root = base.value.trim().replace(/\/$/, ''); if(!root) throw new Error('Enter phone base URL first'); return root + path; }
+  function url(path){ const root = base.value.trim().replace(/\/$/, ''); if(!root) throw new Error('Nhập URL điện thoại trước'); return root + path; }
   async function post(path, data){ const body = new URLSearchParams(data); const res = await fetch(url(path), {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body}); const text = await res.text(); if(!res.ok) throw new Error(text); $('logs').textContent = text; }
   function pendingLink(){ return localStorage.getItem('pendingQueueLink') || ''; }
   function clickPoint(){ return {x:Number($('clickX').value || localStorage.getItem('phoneClickX') || 540), y:Number($('clickY').value || localStorage.getItem('phoneClickY') || 1800)}; }
   function initClickPoint(){ $('clickX').value = localStorage.getItem('phoneClickX') || '540'; $('clickY').value = localStorage.getItem('phoneClickY') || '1800'; }
-  function renderPending(){ const link = pendingLink(); $('openPendingBtn').disabled = !link; if(link) { $('deeplink').value = link; $('logs').textContent = `Pending queue #${localStorage.getItem('pendingQueueJobId') || ''}: ${link}`; } }
+  function renderPending(){ const link = pendingLink(); $('openPendingBtn').disabled = !link; if(link) { $('deeplink').value = link; $('logs').textContent = `Tin chờ #${localStorage.getItem('pendingQueueJobId') || ''}: ${link}`; } }
   async function openPending(){ const link = pendingLink(); if(!link) return; const point = clickPoint(); await post('/actions/deeplink', {url:link, source:'queue', queue_id:localStorage.getItem('pendingQueueJobId') || '', time:localStorage.getItem('pendingQueueTime') || '', click_after_ms:localStorage.getItem('pendingQueueClickAfterMs') || '0', click_x:point.x, click_y:point.y}); localStorage.removeItem('pendingQueueLink'); localStorage.removeItem('pendingQueueJobId'); localStorage.removeItem('pendingQueueTime'); localStorage.removeItem('pendingQueueClickAfterMs'); renderPending(); }
   initClickPoint();
   renderPending();
   function selectedAdbDevice(){ return $('adbDevice').value || ''; }
   async function jsonPost(path, data){ const res = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data || {})}); const payload = await res.json(); if(!res.ok) throw new Error(payload.error || `HTTP ${res.status}`); $('logs').textContent = JSON.stringify(payload, null, 2); return payload; }
-  async function refreshAdbDevices(){ const res = await fetch('/api/phone/adb-devices?_=' + Date.now(), {cache:'no-store'}); const data = await res.json(); if(!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`); const devices = data.devices || []; $('adbDevice').innerHTML = '<option value="">Auto select</option>' + devices.map((d) => `<option value="${String(d.serial).replace(/&/g,'&amp;').replace(/"/g,'&quot;')}">${d.serial} (${d.state})</option>`).join(''); $('logs').textContent = devices.length ? JSON.stringify(data, null, 2) : 'No ADB devices. Plug phone by Type-C, enable USB debugging, accept RSA prompt.'; }
+  async function refreshAdbDevices(){ const res = await fetch('/api/phone/adb-devices?_=' + Date.now(), {cache:'no-store'}); const data = await res.json(); if(!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`); const devices = data.devices || []; $('adbDevice').innerHTML = '<option value="">Tự chọn</option>' + devices.map((d) => `<option value="${String(d.serial).replace(/&/g,'&amp;').replace(/"/g,'&quot;')}">${d.serial} (${d.state})</option>`).join(''); $('logs').textContent = devices.length ? JSON.stringify(data, null, 2) : 'Không thấy thiết bị ADB. Cắm Type-C, bật USB debugging, chấp nhận RSA.'; }
   async function installViaAdb(){ await jsonPost('/api/phone/adb-install', {device_id:selectedAdbDevice(), apk_path:$('apkPath').value.trim()}); }
-  async function openViaAdb(){ const link = $('deeplink').value.trim() || pendingLink(); if(!link) throw new Error('Enter deeplink or choose queue pending link first'); const point = clickPoint(); await jsonPost('/api/phone/adb-open', {device_id:selectedAdbDevice(), url:link, click_after_ms:Number($('clickDelay').value || 0), click_x:point.x, click_y:point.y}); }
+  async function openViaAdb(){ const link = $('deeplink').value.trim() || pendingLink(); if(!link) throw new Error('Nhập deeplink hoặc chọn tin chờ trước'); const point = clickPoint(); await jsonPost('/api/phone/adb-open', {device_id:selectedAdbDevice(), url:link, click_after_ms:Number($('clickDelay').value || 0), click_x:point.x, click_y:point.y}); }
   $('adbRefreshBtn').onclick = () => refreshAdbDevices().catch(e => $('logs').textContent = e.message);
   $('adbInstallBtn').onclick = () => installViaAdb().catch(e => $('logs').textContent = e.message);
   $('adbOpenBtn').onclick = () => openViaAdb().catch(e => $('logs').textContent = e.message);
-  $('saveClickPointBtn').onclick = () => { const point = clickPoint(); localStorage.setItem('phoneClickX', String(point.x)); localStorage.setItem('phoneClickY', String(point.y)); $('logs').textContent = `Saved click point ${point.x},${point.y}`; };
+  $('saveClickPointBtn').onclick = () => { const point = clickPoint(); localStorage.setItem('phoneClickX', String(point.x)); localStorage.setItem('phoneClickY', String(point.y)); $('logs').textContent = `Đã lưu điểm click ${point.x},${point.y}`; };
   refreshAdbDevices().catch(() => {});
   $('queueBtn').onclick = () => location.href = '/';
-  $('saveBtn').onclick = () => { localStorage.setItem('phoneMonitorBaseUrl', base.value.trim()); $('logs').textContent = 'Saved ' + base.value.trim(); if(pendingLink()) openPending().catch(e => $('logs').textContent = e.message); };
+  $('saveBtn').onclick = () => { localStorage.setItem('phoneMonitorBaseUrl', base.value.trim()); $('logs').textContent = 'Đã lưu ' + base.value.trim(); if(pendingLink()) openPending().catch(e => $('logs').textContent = e.message); };
   $('logsBtn').onclick = async () => { try { const res = await fetch(url('/logs')); $('logs').textContent = await res.text(); } catch(e) { $('logs').textContent = e.message; } };
   $('openPendingBtn').onclick = () => openPending().catch(e => $('logs').textContent = e.message);
   $('tapBtn').onclick = () => post('/actions/tap', {x:$('x').value, y:$('y').value}).catch(e => $('logs').textContent = e.message);
   $('swipeBtn').onclick = () => post('/actions/swipe', {x1:$('x').value, y1:$('y').value, x2:$('x2').value, y2:$('y2').value, duration_ms:450}).catch(e => $('logs').textContent = e.message);
   $('deepBtn').onclick = () => post('/actions/deeplink', {url:$('deeplink').value}).catch(e => $('logs').textContent = e.message);
 </script>
+<script>
+""" + LOGOUT_SCRIPT + r"""
 </body>
 </html>
 """
@@ -1232,14 +1698,112 @@ class QueueUiHandler(BaseHTTPRequestHandler):
     db: ChatDatabase
     config: QueueUiConfig
 
-    def do_HEAD(self) -> None:
+    def _session_cookie_value(self) -> Optional[str]:
+        return parse_cookie_header(self.headers.get("Cookie", ""), SESSION_COOKIE)
+
+    def _is_user_authenticated(self) -> bool:
+        return is_authenticated(self._session_cookie_value(), self.config)
+
+    def _auth_is_public(self, path: str) -> bool:
+        return path in PUBLIC_PATHS or path.startswith("/api/auth/")
+
+    def _ensure_auth(self) -> bool:
         parsed = urlparse(self.path)
+        path = parsed.path or "/"
+        if self._auth_is_public(path):
+            if path == "/login" and self._is_user_authenticated():
+                self._redirect("/")
+                return False
+            return True
+        if self._is_user_authenticated():
+            return True
+        if path.startswith("/api/"):
+            self._send_json({"error": "Chưa đăng nhập", "login_url": "/login"}, status=401)
+        else:
+            self._redirect(f"/login?next={quote(self.path)}")
+        return False
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.end_headers()
+
+    def _set_session_cookie_header(self) -> None:
+        token = create_session_token(self.config.auth_secret)
+        self.send_header(
+            "Set-Cookie",
+            f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}",
+        )
+
+    def _clear_session_cookie_header(self) -> None:
+        self.send_header(
+            "Set-Cookie",
+            f"{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        )
+
+    def _auth_status(self) -> None:
+        self._send_json(
+            {
+                "auth_enabled": self.config.auth_enabled,
+                "authenticated": self._is_user_authenticated(),
+                "username": self.config.auth_username if self._is_user_authenticated() else None,
+            }
+        )
+
+    def _auth_login(self) -> None:
+        try:
+            payload = self._read_json_body()
+            username = str(payload.get("username") or "").strip()
+            password = str(payload.get("password") or "")
+            if not verify_credentials(username, password, self.config):
+                raise ValueError("Sai tên đăng nhập hoặc mật khẩu")
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=401)
+            return
+
+        body = json.dumps(
+            {"ok": True, "username": self.config.auth_username},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        if self.config.auth_enabled:
+            self._set_session_cookie_header()
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _auth_logout(self) -> None:
+        body = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self._clear_session_cookie_header()
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_HEAD(self) -> None:
+        if not self._ensure_auth():
+            return
+        parsed = urlparse(self.path)
+        if parsed.path == "/login":
+            self._send_headers("text/html; charset=utf-8", len(LOGIN_HTML.encode("utf-8")))
+            return
+
         if parsed.path == "/":
             self._send_headers("text/html; charset=utf-8", len(HTML.encode("utf-8")))
             return
 
         if parsed.path == "/filters":
             self._send_headers("text/html; charset=utf-8", len(FILTERS_HTML.encode("utf-8")))
+            return
+
+        if parsed.path == "/broadcast":
+            self._send_headers("text/html; charset=utf-8", len(BROADCAST_HTML.encode("utf-8")))
+            return
+
+        if parsed.path == "/watch":
+            self._send_headers("text/html; charset=utf-8", len(WATCH_HTML.encode("utf-8")))
             return
 
         if parsed.path == "/phone-monitor":
@@ -1255,6 +1819,18 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/filters":
+            self._send_headers("application/json; charset=utf-8", 0)
+            return
+
+        if parsed.path == "/api/broadcast-groups":
+            self._send_headers("application/json; charset=utf-8", 0)
+            return
+
+        if parsed.path == "/api/broadcast-bots":
+            self._send_headers("application/json; charset=utf-8", 0)
+            return
+
+        if parsed.path == "/api/watch-groups":
             self._send_headers("application/json; charset=utf-8", 0)
             return
 
@@ -1277,13 +1853,31 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_GET(self) -> None:
+        if not self._ensure_auth():
+            return
         parsed = urlparse(self.path)
+        if parsed.path == "/login":
+            self._send_html(LOGIN_HTML)
+            return
+
+        if parsed.path == "/api/auth/status":
+            self._auth_status()
+            return
+
         if parsed.path == "/":
             self._send_html(HTML)
             return
 
         if parsed.path == "/filters":
             self._send_html(FILTERS_HTML)
+            return
+
+        if parsed.path == "/broadcast":
+            self._send_html(BROADCAST_HTML)
+            return
+
+        if parsed.path == "/watch":
+            self._send_html(WATCH_HTML)
             return
 
         if parsed.path == "/phone-monitor":
@@ -1300,6 +1894,18 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/filters":
             self._send_json(self._filters_snapshot())
+            return
+
+        if parsed.path == "/api/broadcast-groups":
+            self._send_json(self._broadcast_groups_snapshot())
+            return
+
+        if parsed.path == "/api/broadcast-bots":
+            self._send_json(self._broadcast_bots_snapshot())
+            return
+
+        if parsed.path == "/api/watch-groups":
+            self._send_json(self._watch_groups_snapshot())
             return
 
         if parsed.path == "/api/phone/config":
@@ -1322,8 +1928,51 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/auth/login":
+            self._auth_login()
+            return
+
+        if parsed.path == "/api/auth/logout":
+            self._auth_logout()
+            return
+
+        if not self._ensure_auth():
+            return
+
         if parsed.path == "/api/filters":
             self._save_filters()
+            return
+
+        if parsed.path == "/api/broadcast-groups":
+            self._save_broadcast_groups()
+            return
+
+        if parsed.path == "/api/broadcast-groups/discover":
+            self._discover_broadcast_groups()
+            return
+
+        if parsed.path == "/api/broadcast-groups/approve":
+            self._approve_broadcast_group()
+            return
+
+        if parsed.path == "/api/broadcast-groups/delete":
+            self._delete_broadcast_group()
+            return
+
+        if parsed.path == "/api/broadcast-groups/test":
+            self._broadcast_groups_test()
+            return
+
+        if parsed.path == "/api/watch-groups":
+            self._save_watch_groups()
+            return
+
+        if parsed.path == "/api/watch-groups/delete":
+            self._delete_watch_group()
+            return
+
+        if parsed.path == "/api/watch-groups/import-env":
+            self._import_watch_groups_from_env()
             return
 
         if parsed.path == "/api/phone/job-result":
@@ -1577,6 +2226,232 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             "filters": _load_filter_rules(path),
         }
 
+    def _broadcast_groups_snapshot(self) -> Dict[str, object]:
+        pending = self.db.list_pending_broadcast_groups()
+        approved = self.db.list_approved_broadcast_groups()
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "pending": pending,
+            "approved": approved,
+            "groups": pending + approved,
+        }
+
+    def _broadcast_bots_snapshot(self) -> Dict[str, object]:
+        tokens = _bot_tokens()
+        bots = list_configured_bots(tokens)
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "count": len(tokens),
+            "active_count": sum(1 for bot in bots if bot.get("ok")),
+            "bots": bots,
+        }
+
+    def _save_broadcast_groups(self) -> None:
+        try:
+            payload = self._read_json_body()
+            raw_groups = payload.get("groups", payload)
+            if not isinstance(raw_groups, list):
+                raise ValueError("groups must be a list")
+            normalized = []
+            for raw in raw_groups:
+                if not isinstance(raw, dict):
+                    continue
+                normalized.append(
+                    {
+                        **raw,
+                        "approved": True,
+                        "enabled": bool(raw.get("enabled", True)),
+                    }
+                )
+            groups = self.db.replace_approved_broadcast_groups(normalized)
+        except Exception as exc:
+            logger.exception("Failed to save broadcast groups")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        self._send_json(self._broadcast_groups_snapshot())
+
+    def _watch_groups_snapshot(self) -> Dict[str, object]:
+        groups = self.db.list_watch_groups()
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "groups": groups,
+        }
+
+    def _save_watch_groups(self) -> None:
+        try:
+            payload = self._read_json_body()
+            raw_groups = payload.get("groups")
+            if not isinstance(raw_groups, list):
+                raise ValueError("groups must be a list")
+
+            normalized = []
+            for raw in raw_groups:
+                if not isinstance(raw, dict):
+                    raise ValueError("each watch group must be an object")
+                normalized.append(
+                    {
+                        "id": raw.get("id"),
+                        "name": str(raw.get("name") or "").strip(),
+                        "chat_id": str(raw.get("chat_id") or "").strip(),
+                        "enabled": bool(raw.get("enabled", True)),
+                        "created_at": raw.get("created_at"),
+                    }
+                )
+
+            groups = self.db.replace_watch_groups(normalized)
+        except Exception as exc:
+            logger.exception("Failed to save watch groups")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        self._send_json(self._watch_groups_snapshot())
+
+    def _delete_watch_group(self) -> None:
+        try:
+            payload = self._read_json_body()
+            group_id = int(payload.get("id"))
+            if not self.db.delete_watch_group(group_id):
+                raise ValueError(f"watch group not found: {group_id}")
+        except Exception as exc:
+            logger.exception("Failed to delete watch group")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        self._send_json(self._watch_groups_snapshot())
+
+    def _import_watch_groups_from_env(self) -> None:
+        try:
+            load_dotenv(Path(__file__).resolve().parent / ".env")
+            raw_value = os.environ.get("TELEGRAM_CLIENT_TARGETS", "").strip()
+            if not raw_value:
+                raise ValueError("TELEGRAM_CLIENT_TARGETS is empty in .env")
+
+            targets = _parse_client_targets(raw_value, "")
+            if not targets:
+                raise ValueError("No targets parsed from TELEGRAM_CLIENT_TARGETS")
+
+            existing = {group["chat_id"] for group in self.db.list_watch_groups()}
+            merged = list(self.db.list_watch_groups())
+            imported = 0
+            for target in targets:
+                chat_id = target.chat_ref or target.entity_ref
+                if chat_id in existing:
+                    continue
+                merged.append(
+                    {
+                        "name": target.label,
+                        "chat_id": chat_id,
+                        "enabled": True,
+                    }
+                )
+                existing.add(chat_id)
+                imported += 1
+
+            if imported:
+                self.db.replace_watch_groups(merged)
+        except Exception as exc:
+            logger.exception("Failed to import watch groups from env")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        snapshot = self._watch_groups_snapshot()
+        snapshot["imported"] = imported
+        self._send_json(snapshot)
+
+    def _discover_broadcast_groups(self) -> None:
+        try:
+            tokens = _bot_tokens()
+            discovered = discover_all_bot_groups(tokens)
+            result = register_discovered_groups(self.db, discovered["discovered"])
+            result["discovered"] = discovered["discovered"]
+            result["scans"] = discovered["scans"]
+        except Exception as exc:
+            logger.exception("Failed to discover broadcast groups")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        self._send_json(
+            {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                **result,
+            }
+        )
+
+    def _approve_broadcast_group(self) -> None:
+        try:
+            payload = self._read_json_body()
+            group_id = int(payload.get("id"))
+            name = str(payload.get("name") or "").strip() or None
+            group = self.db.approve_broadcast_group(group_id, name=name)
+            if group is None:
+                raise ValueError(f"broadcast group not found: {group_id}")
+        except Exception as exc:
+            logger.exception("Failed to approve broadcast group")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        self._send_json(self._broadcast_groups_snapshot())
+
+    def _delete_broadcast_group(self) -> None:
+        try:
+            payload = self._read_json_body()
+            group_id = int(payload.get("id"))
+            if not self.db.delete_broadcast_group(group_id):
+                raise ValueError(f"broadcast group not found: {group_id}")
+        except Exception as exc:
+            logger.exception("Failed to delete broadcast group")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        self._send_json(self._broadcast_groups_snapshot())
+
+    def _broadcast_groups_test(self) -> None:
+        try:
+            payload = self._read_json_body()
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                raise ValueError("text is required")
+
+            token = _bot_token()
+            bot = Bot(token)
+            send_all = bool(payload.get("all"))
+            if send_all:
+                targets = self.db.list_enabled_broadcast_groups()
+            else:
+                chat_id = str(payload.get("chat_id") or "").strip()
+                if not chat_id:
+                    raise ValueError("chat_id is required when all=false")
+                targets = [{"name": chat_id, "chat_id": chat_id}]
+
+            if not targets:
+                raise ValueError("No broadcast targets configured")
+
+            sent = []
+            errors = []
+            for group in targets:
+                chat_id = int(group["chat_id"])
+                name = str(group.get("name") or chat_id)
+                try:
+                    message = bot.send_message(chat_id=chat_id, text=text)
+                    sent.append({"name": name, "chat_id": chat_id, "message_id": message.message_id})
+                except Exception as exc:
+                    errors.append({"name": name, "chat_id": chat_id, "error": str(exc)})
+
+            if not sent:
+                raise ValueError("; ".join(item["error"] for item in errors) or "Send failed")
+
+            self._send_json(
+                {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "sent": sent,
+                    "errors": errors,
+                }
+            )
+        except Exception as exc:
+            logger.exception("Failed to test broadcast groups")
+            self._send_json({"error": str(exc)}, status=400)
+
     def _read_json_body(self, max_size: int = 1024 * 1024) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         if length <= 0 or length > max_size:
@@ -1727,14 +2602,18 @@ def _latest_phone_job_id(db: ChatDatabase, limit: int) -> int:
 def _extract_link_from_item(item: Dict[str, Any]) -> str:
     payload = item.get("payload") or {}
     message = item.get("message") or {}
+    deeplink = str(payload.get("deeplink") or payload.get("deep_link") or "").strip()
+    if deeplink:
+        return deeplink
+
     candidates = [
-        payload.get("url"), payload.get("link"), payload.get("deeplink"), payload.get("deep_link"),
+        payload.get("url"), payload.get("link"),
         payload.get("live_url"), payload.get("room_url"), message.get("text"),
     ]
     for value in candidates:
-        match = re.search(r"(?:https?://|tiktok://)[^\s<>'\"]+", str(value or ""), re.I)
+        match = re.search(r"(?:https?://|tiktok://|snssdk1180://)[^\s<>'\"]+", str(value or ""), re.I)
         if match:
-            return match.group(0)
+            return resolve_live_url(match.group(0))
     return ""
 
 
@@ -1919,6 +2798,17 @@ def _load_filter_rules(path: Path) -> List[Dict[str, Any]]:
     return _normalize_filter_rules(raw_filters)
 
 
+def _bot_tokens() -> List[str]:
+    return list(load_config().bot_tokens)
+
+
+def _bot_token() -> str:
+    tokens = _bot_tokens()
+    if not tokens:
+        raise RuntimeError("Set TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKENS in .env for Bot API broadcast")
+    return tokens[0]
+
+
 def _write_filter_rules(path: Path, filters: List[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"filters": filters}
@@ -2002,9 +2892,36 @@ def setup_logging(log_level: str) -> None:
     )
 
 
+def _seed_watch_groups_from_env(db: ChatDatabase) -> None:
+    if db.list_watch_groups():
+        return
+
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+    raw_value = os.environ.get("TELEGRAM_CLIENT_TARGETS", "").strip()
+    if not raw_value:
+        return
+
+    targets = _parse_client_targets(raw_value, "")
+    if not targets:
+        return
+
+    groups = [
+        {
+            "name": target.label,
+            "chat_id": target.chat_ref or target.entity_ref,
+            "enabled": True,
+        }
+        for target in targets
+    ]
+    imported = db.seed_watch_groups_if_empty(groups)
+    if imported:
+        logger.info("Seeded %s watch groups from TELEGRAM_CLIENT_TARGETS", imported)
+
+
 def create_server(config: QueueUiConfig) -> ThreadingHTTPServer:
     db = ChatDatabase(config.db_path)
     db.init_schema()
+    _seed_watch_groups_from_env(db)
 
     class Handler(QueueUiHandler):
         pass
@@ -2031,6 +2948,12 @@ def main() -> None:
     server = create_server(config)
     host, port = server.server_address
     logger.info("Queue UI running at http://%s:%s", host, port)
+    if config.auth_enabled:
+        logger.info("Queue UI login enabled for user=%s", config.auth_username)
+    else:
+        logger.warning(
+            "Queue UI login disabled. Set QUEUE_UI_PASSWORD in .env to require authentication."
+        )
     server.serve_forever()
 
 

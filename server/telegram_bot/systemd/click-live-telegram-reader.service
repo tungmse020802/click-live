@@ -1,0 +1,17 @@
+[Unit]
+Description=Click Live Telegram Client Reader (Telethon)
+After=network-online.target click-live-queue.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/click-live/server/telegram_bot
+EnvironmentFile=/root/click-live/server/telegram_bot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/click-live/server/telegram_bot/.venv/bin/python /root/click-live/server/telegram_bot/telethon_reader.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

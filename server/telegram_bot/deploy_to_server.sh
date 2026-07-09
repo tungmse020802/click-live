@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Deploy telegram_bot panel lên VPS.
+# Usage:
+#   cd server/telegram_bot
+#   bash deploy_to_server.sh
+#
+# Tuỳ chọn env:
+#   SERVER_HOST=103.38.237.7 SERVER_USER=root SERVER_PASS='...' bash deploy_to_server.sh
+
+set -euo pipefail
+
+cd "$(dirname "$0")"
+ROOT_DIR="$(pwd)"
+REMOTE_DIR="${REMOTE_DIR:-/root/click-live/server/telegram_bot}"
+
+SERVER_HOST="${SERVER_HOST:-103.38.237.7}"
+SERVER_USER="${SERVER_USER:-root}"
+SERVER_PASS="${SERVER_PASS:-}"
+
+QUEUE_UI_USERNAME="${QUEUE_UI_USERNAME:-admin}"
+QUEUE_UI_PASSWORD="${QUEUE_UI_PASSWORD:-Admin123@}"
+
+if ! command -v sshpass >/dev/null 2>&1; then
+  echo "Cần sshpass. macOS: brew install sshpass" >&2
+  exit 1
+fi
+
+if [[ -z "$SERVER_PASS" ]]; then
+  read -r -s -p "SSH password for ${SERVER_USER}@${SERVER_HOST}: " SERVER_PASS
+  echo
+fi
+
+SSH=(sshpass -p "$SERVER_PASS" ssh -o StrictHostKeyChecking=no "${SERVER_USER}@${SERVER_HOST}")
+RSYNC_SSH="sshpass -p ${SERVER_PASS} ssh -o StrictHostKeyChecking=no"
+
+echo "==> Rsync code -> ${SERVER_USER}@${SERVER_HOST}:${REMOTE_DIR}"
+rsync -az --delete \
+  --exclude '.venv/' \
+  --exclude '__pycache__/' \
+  --exclude '*.pyc' \
+  --exclude 'data/' \
+  --exclude '.env' \
+  --exclude 'data.zip' \
+  -e "$RSYNC_SSH" \
+  "$ROOT_DIR/" "${SERVER_USER}@${SERVER_HOST}:${REMOTE_DIR}/"
+
+if [[ ! -f "$ROOT_DIR/.env" ]]; then
+  echo "Missing local .env" >&2
+  exit 1
+fi
+
+echo "==> Upload .env (giữ session/sqlite trên server)"
+TMP_ENV="$(mktemp)"
+trap 'rm -f "$TMP_ENV"' EXIT
+cp "$ROOT_DIR/.env" "$TMP_ENV"
+
+upsert_env() {
+  local key="$1"
+  local value="$2"
+  python3 - "$key" "$value" "$TMP_ENV" <<'PY'
+import sys
+from pathlib import Path
+
+key, value, path = sys.argv[1:4]
+lines = Path(path).read_text(encoding="utf-8").splitlines()
+out = []
+found = False
+for line in lines:
+    if not line or line.lstrip().startswith("#") or "=" not in line:
+        out.append(line)
+        continue
+    k = line.split("=", 1)[0].strip()
+    if k == key:
+        out.append(f"{key}={value}")
+        found = True
+    else:
+        out.append(line)
+if not found:
+    out.append(f"{key}={value}")
+Path(path).write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+PY
+}
+
+upsert_env "QUEUE_UI_HOST" "0.0.0.0"
+upsert_env "QUEUE_UI_USERNAME" "$QUEUE_UI_USERNAME"
+upsert_env "QUEUE_UI_PASSWORD" "$QUEUE_UI_PASSWORD"
+upsert_env "BOT_BROADCAST_ENABLED" "true"
+upsert_env "TELEGRAM_CLIENT_SESSION" "data/telegram_client.session"
+upsert_env "TELEGRAM_CLIENT_HISTORY_POLL_SECONDS" "1"
+upsert_env "BOT_QUEUE_POLL_INTERVAL_SECONDS" "0.05"
+
+sshpass -p "$SERVER_PASS" scp -o StrictHostKeyChecking=no "$TMP_ENV" \
+  "${SERVER_USER}@${SERVER_HOST}:${REMOTE_DIR}/.env"
+
+echo "==> Setup venv + systemd on server"
+"${SSH[@]}" bash -s <<REMOTE
+set -euo pipefail
+REMOTE_DIR="$REMOTE_DIR"
+cd "\$REMOTE_DIR"
+mkdir -p data/logs
+
+if [[ ! -d .venv ]]; then
+  python3 -m venv .venv
+fi
+source .venv/bin/activate
+pip install -q --upgrade pip
+pip install -q -r requirements.txt
+
+install -m 644 systemd/click-live-queue.service /etc/systemd/system/
+install -m 644 systemd/click-live-telegram-reader.service /etc/systemd/system/
+install -m 644 systemd/click-live-broadcast.service /etc/systemd/system/
+systemctl daemon-reload
+
+# Dừng process cũ chạy ngoài systemd
+pkill -f "python3 queue_ui.py" 2>/dev/null || true
+pkill -f "python3 telethon_reader.py" 2>/dev/null || true
+pkill -f "python3 broadcast_worker.py" 2>/dev/null || true
+sleep 1
+
+systemctl enable click-live-queue.service click-live-telegram-reader.service click-live-broadcast.service
+systemctl restart click-live-queue.service
+systemctl restart click-live-telegram-reader.service
+systemctl restart click-live-broadcast.service
+
+echo
+echo "=== Service status ==="
+systemctl is-active click-live-queue.service click-live-telegram-reader.service click-live-broadcast.service
+ss -lntp | grep 8787 || true
+REMOTE
+
+echo
+echo "Deploy xong."
+echo "Panel: http://${SERVER_HOST}:8787/login"
+echo "User:  ${QUEUE_UI_USERNAME}"
+echo "Pass:  ${QUEUE_UI_PASSWORD}"
+echo
+echo "Login lại Telethon session trên server:"
+echo "  bash login_telethon_remote.sh"

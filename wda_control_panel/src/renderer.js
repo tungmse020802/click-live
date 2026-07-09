@@ -394,8 +394,25 @@ async function refreshMacStatus() {
     $("xcodeDetail").textContent = status.xcode.detail || "—";
     setDot($("wdaProjectDot"), status.wdaProject.ok);
     $("wdaProjectDetail").textContent = status.wdaProject.detail || status.wdaProject.path;
-    setDot($("signingDot"), Boolean(status.signing?.identities?.length));
-    populateSigningSelect(status.signing?.identities || []);
+    const identities = status.signing?.identities || [];
+    setDot($("signingDot"), Boolean(identities.length));
+    populateSigningSelect(identities);
+    const currentTeamId = ($("appleTeamId")?.value || $("appleTeamIdSettings")?.value || "").trim();
+    if (!currentTeamId && identities.length > 0) {
+      const first = identities.find((id) => id.teamId);
+      if (first) {
+        const teamId = first.teamId;
+        if ($("signingSelect")) $("signingSelect").value = first.teamId;
+        if ($("appleTeamId")) $("appleTeamId").value = teamId;
+        if ($("appleTeamIdSettings")) $("appleTeamIdSettings").value = teamId;
+        try {
+          await window.wdaPanel.saveConfig({ appleTeamId: teamId });
+          appendLog(`Tự động chọn Apple Team ID: ${teamId} (${first.name})`);
+        } catch (error) {
+          appendLog(`Lưu Team ID tự động thất bại: ${error.message}`);
+        }
+      }
+    }
   } catch (error) {
     appendLog(`macOS setup status failed: ${error.message}`);
   }

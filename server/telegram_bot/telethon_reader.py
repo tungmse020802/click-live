@@ -5,11 +5,19 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from telethon import TelegramClient, events
+from telethon.errors import AuthKeyDuplicatedError
 from telethon.tl.custom.message import Message
 
-from config import TelegramClientConfig, TelegramClientTarget, load_telegram_client_config
+from config import (
+    TelegramClientConfig,
+    TelegramClientTarget,
+    client_targets_from_watch_groups,
+    load_telegram_client_config,
+)
 from db import ChatDatabase
 from message_filter import MessageFilterEngine, parse_box_signal
+from deeplink_resolve import enrich_payload_with_deeplink
+from message_format import telethon_message_to_html
 
 
 logger = logging.getLogger(__name__)
@@ -26,6 +34,7 @@ class TelethonReader:
         self.entity_to_target: Dict[int, TelegramClientTarget] = {}
         self._unknown_chat_ids_logged: Set[int] = set()
         self._last_prune_at = 0.0
+        self._last_message_ids: Dict[str, int] = {}
         self.filter_engine = MessageFilterEngine(
             enabled=config.filter_enabled,
             config_path=config.filter_config_path,
@@ -42,6 +51,18 @@ class TelethonReader:
                 await self._run_once()
             except asyncio.CancelledError:
                 raise
+            except AuthKeyDuplicatedError:
+                logger.error(
+                    "Telegram session revoked (used on another IP). "
+                    "Stop server reader or use a separate TELEGRAM_CLIENT_SESSION for local."
+                )
+                await asyncio.sleep(300)
+            except RuntimeError as exc:
+                if "not authorized" in str(exc).lower():
+                    logger.error("Waiting 5 minutes before rechecking Telegram session")
+                    await asyncio.sleep(300)
+                else:
+                    raise
             except Exception:
                 logger.exception("Telegram client reader crashed; reconnecting soon")
 
@@ -49,23 +70,39 @@ class TelethonReader:
             await asyncio.sleep(5)
 
     async def _run_once(self) -> None:
+        self.entity_to_target.clear()
+        self.room_ids.clear()
+        self._unknown_chat_ids_logged.clear()
+        self._last_message_ids.clear()
+
+        targets = self._resolve_targets()
+        if not targets:
+            raise RuntimeError("No Telegram watch groups configured")
+
+        target_signature = self._target_signature(targets)
+
         client = TelegramClient(
             self.config.session_path,
             self.config.api_id,
             self.config.api_hash,
+            connection_retries=None,
+            retry_delay=5,
+            auto_reconnect=True,
         )
 
         await client.connect()
         try:
             if not await client.is_user_authorized():
-                if not self.config.phone:
-                    raise RuntimeError("Set TELEGRAM_PHONE in .env for first login")
-                logger.info("Starting Telegram login phone=%s", _mask_phone(self.config.phone))
-                await client.start(phone=self.config.phone)
+                logger.error(
+                    "Telegram session chưa login hoặc đã hết hạn. "
+                    "Chạy thủ công: RESET_SESSION=1 bash login_telethon_server.sh "
+                    "(không tự gửi OTP để tránh FloodWait/chết session)."
+                )
+                raise RuntimeError("Telegram session not authorized")
 
             entities = []
             watch_targets: List[Tuple[TelegramClientTarget, Any, int]] = []
-            for target in self.config.targets:
+            for target in targets:
                 entity = await client.get_entity(_entity_ref_value(target.entity_ref))
                 peer_id = _marked_peer_id(entity)
                 if peer_id in self.entity_to_target:
@@ -88,18 +125,26 @@ class TelethonReader:
                     chat_type="client",
                     title=title,
                 )
+                room_id = self.room_ids[target.room_key]
+                if self.config.skip_existing_on_start:
+                    self._last_message_ids[target.room_key] = (
+                        self.db.max_telegram_message_id_for_room(room_id)
+                    )
+                else:
+                    self._last_message_ids[target.room_key] = 0
                 logger.info(
-                    "Watching Telegram target label=%s room=%s entity=%s title=%r",
+                    "Watching Telegram target label=%s room=%s entity=%s title=%r last_message_id=%s",
                     target.label,
                     target.room_key,
                     peer_id,
                     title,
+                    self._last_message_ids[target.room_key],
                 )
 
             if not entities:
                 raise RuntimeError("No Telegram client targets configured")
 
-            @client.on(events.NewMessage())
+            @client.on(events.NewMessage(chats=entities))
             async def on_new_message(event) -> None:
                 try:
                     await self._handle_message(event.message, event.chat_id)
@@ -107,7 +152,9 @@ class TelethonReader:
                     logger.exception("Failed to handle Telegram client message chat_id=%s", event.chat_id)
 
             logger.info("Telegram client reader ready targets=%s", len(entities))
-            heartbeat_task = asyncio.create_task(self._heartbeat(client, len(entities)))
+            heartbeat_task = asyncio.create_task(
+                self._heartbeat(client, len(entities), target_signature)
+            )
             history_poll_task = asyncio.create_task(self._poll_history(client, watch_targets))
             try:
                 await client.run_until_disconnected()
@@ -125,14 +172,33 @@ class TelethonReader:
         finally:
             await client.disconnect()
 
-    async def _heartbeat(self, client: TelegramClient, target_count: int) -> None:
+    def _resolve_targets(self) -> List[TelegramClientTarget]:
+        groups = self.db.list_enabled_watch_groups()
+        if groups:
+            return client_targets_from_watch_groups(groups)
+        return list(self.config.targets)
+
+    def _target_signature(self, targets: List[TelegramClientTarget]) -> str:
+        return "|".join(sorted(f"{target.room_key}:{target.entity_ref}" for target in targets))
+
+    async def _heartbeat(
+        self,
+        client: TelegramClient,
+        target_count: int,
+        target_signature: str,
+    ) -> None:
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
             logger.info(
                 "Telegram client reader heartbeat connected=%s targets=%s",
                 client.is_connected(),
                 target_count,
             )
+            current_signature = self._target_signature(self._resolve_targets())
+            if current_signature != target_signature:
+                logger.info("Watch groups changed on web; reconnecting Telethon reader")
+                await client.disconnect()
+                return
 
     async def _poll_history(
         self,
@@ -142,10 +208,12 @@ class TelethonReader:
         while True:
             for target, entity, peer_id in watch_targets:
                 try:
+                    min_id = self._last_message_ids.get(target.room_key, 0)
                     messages = []
                     async for message in client.iter_messages(
                         entity,
                         limit=self.config.history_poll_limit,
+                        min_id=min_id,
                     ):
                         messages.append(message)
                     for message in reversed(messages):
@@ -155,9 +223,10 @@ class TelethonReader:
             await asyncio.sleep(self.config.history_poll_seconds)
 
     async def _handle_message(self, message: Message, event_chat_id: Optional[int]) -> None:
-        text = (message.raw_text or "").strip()
+        text = (message.message or message.raw_text or "").strip()
         if not text:
             return
+        telegram_html = telethon_message_to_html(message)
 
         target = self._target_for_message(message, event_chat_id)
         if target is None:
@@ -167,75 +236,83 @@ class TelethonReader:
                     logger.info("Skipping Telegram message for unknown chat_id=%s", raw_id)
             return
 
-        if message.out and not self.config.include_outgoing:
-            logger.info(
-                "Skipping outgoing Telegram client message room=%s message=%s include_outgoing=false",
-                target.room_key,
-                message.id,
-            )
+        last_seen = self._last_message_ids.get(target.room_key, 0)
+        if message.id <= last_seen:
             return
 
-        timestamp_ms = _message_timestamp_ms(message.date)
-        if not _is_recent_message(timestamp_ms, self.config.queue_max_age_seconds):
-            logger.info(
-                "Skipped stale Telegram client message room=%s message=%s timestamp_ms=%s",
-                target.room_key,
-                message.id,
-                timestamp_ms,
-            )
-            return
+        try:
+            if message.out and not self.config.include_outgoing:
+                logger.info(
+                    "Skipping outgoing Telegram client message room=%s message=%s include_outgoing=false",
+                    target.room_key,
+                    message.id,
+                )
+                return
 
-        signal = parse_box_signal(text)
-        filter_result = self.filter_engine.evaluate(text, signal)
-        if not filter_result.matched:
-            logger.debug(
-                "Skipped Telegram client message room=%s message=%s reason=%s",
-                target.room_key,
-                message.id,
-                filter_result.reason,
-            )
-            return
+            timestamp_ms = _message_timestamp_ms(message.date)
+            if not _is_recent_message(timestamp_ms, self.config.queue_max_age_seconds):
+                logger.info(
+                    "Skipped stale Telegram client message room=%s message=%s timestamp_ms=%s",
+                    target.room_key,
+                    message.id,
+                    timestamp_ms,
+                )
+                return
 
-        sender = await message.get_sender()
-        user_id = None
-        if sender is not None and not message.out:
-            sender_id = str(getattr(sender, "id", "") or "")
-            sender_name = _sender_name(sender)
-            user_id = self.db.upsert_chat_user(
-                platform=PLATFORM,
-                user_id=f"{target.room_key}:{sender_id or sender_name}",
-                username=getattr(sender, "username", None) or sender_name,
-                first_name=getattr(sender, "first_name", None) or sender_name,
-                last_name=getattr(sender, "last_name", None),
-            )
+            signal = parse_box_signal(text)
+            filter_result = self.filter_engine.evaluate(text, signal)
+            if not filter_result.matched:
+                logger.debug(
+                    "Skipped Telegram client message room=%s message=%s reason=%s",
+                    target.room_key,
+                    message.id,
+                    filter_result.reason,
+                )
+                return
 
-        room_id = self.room_ids[target.room_key]
-        direction = "outgoing" if message.out else "incoming"
-        platform_message_id = f"{target.room_key}:{message.id}"
-        chat_message_id = self.db.insert_chat_message_if_new(
-            room_id=room_id,
-            user_id=user_id,
-            platform_message_id=platform_message_id,
-            direction=direction,
-            text=text,
-        )
-        if chat_message_id is None:
-            return
+            sender_id = getattr(message, "sender_id", None)
+            user_id = None
+            if sender_id and not message.out:
+                user_id = self.db.upsert_chat_user(
+                    platform=PLATFORM,
+                    user_id=f"{target.room_key}:{sender_id}",
+                    username=str(sender_id),
+                    first_name=str(sender_id),
+                    last_name=None,
+                )
 
-        if direction == "incoming" and self.config.enqueue:
-            queue_priority = (
-                filter_result.priority
-                if filter_result.priority is not None
-                else self.config.queue_default_priority
-            )
-            queue_id = self.db.enqueue_message(
-                message_id=chat_message_id,
+            room_id = self.room_ids[target.room_key]
+            direction = "outgoing" if message.out else "incoming"
+            platform_message_id = f"{target.room_key}:{message.id}"
+            chat_message_id = self.db.insert_chat_message_if_new(
                 room_id=room_id,
-                priority=queue_priority,
-                payload={
+                user_id=user_id,
+                platform_message_id=platform_message_id,
+                direction=direction,
+                text=text,
+            )
+            if chat_message_id is None:
+                return
+
+            if direction == "incoming" and self.config.enqueue:
+                superseded = self.db.supersede_all_pending_for_room(room_id)
+                if superseded:
+                    logger.debug(
+                        "Superseded pending queue jobs room=%s count=%s before enqueue",
+                        target.room_key,
+                        superseded,
+                    )
+                queue_priority = (
+                    filter_result.priority
+                    if filter_result.priority is not None
+                    else self.config.queue_default_priority
+                )
+                queue_payload = {
                     "source": PLATFORM,
                     "source_transport": TRANSPORT,
-                    "reply_transport": "none",
+                    "reply_transport": (
+                        "bot_broadcast" if self.config.broadcast_enabled else "none"
+                    ),
                     "target_label": target.label,
                     "target_url": _target_web_url(target.room_key),
                     "message_key": platform_message_id,
@@ -253,16 +330,28 @@ class TelethonReader:
                         if filter_result.signal is not None
                         else None
                     ),
-                },
-                max_attempts=self.config.queue_max_attempts,
-            )
-            logger.info(
-                "Enqueued Telegram client message room=%s message=%s queue=%s",
-                target.room_key,
+                    **({"telegram_html": telegram_html} if telegram_html else {}),
+                }
+                queue_payload = enrich_payload_with_deeplink(text, queue_payload)
+                queue_id = self.db.enqueue_message(
+                    message_id=chat_message_id,
+                    room_id=room_id,
+                    priority=queue_priority,
+                    payload=queue_payload,
+                    max_attempts=self.config.queue_max_attempts,
+                )
+                logger.info(
+                    "Enqueued Telegram client message room=%s message=%s queue=%s",
+                    target.room_key,
+                    message.id,
+                    queue_id,
+                )
+                self._prune_queue()
+        finally:
+            self._last_message_ids[target.room_key] = max(
+                self._last_message_ids.get(target.room_key, 0),
                 message.id,
-                queue_id,
             )
-            self._prune_queue()
 
     def _target_for_message(
         self,

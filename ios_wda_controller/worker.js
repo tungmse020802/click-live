@@ -42,6 +42,8 @@ const config = {
   liveTimeMaxMs: numberEnv("LIVE_TIME_MAX_SECONDS", 30) * 1000,
   clockSource: process.env.CLOCK_SOURCE || "mac_local",
   allowClickAfterFallback: boolEnv("ALLOW_CLICK_AFTER_FALLBACK", true),
+  postOpenPreemptEnabled: boolEnv("POST_OPEN_PREEMPT_ENABLED", true),
+  postOpenPreemptDelayMs: numberEnv("POST_OPEN_PREEMPT_DELAY_MS", 3000),
   filterMaxViews: numberEnv("FILTER_MAX_VIEWS", 0),    // 0 = disabled (views <= this; 0 means accept all)
   filterRewardMode: normalizeRewardMode(process.env.FILTER_REWARD_MODE || "all"),
   filterMinBox1: numberEnv("FILTER_MIN_BOX1", 0),      // box value 1 >= this
@@ -52,6 +54,7 @@ const config = {
   treasureDetectEnabled: boolEnv("TREASURE_DETECT_ENABLED", true),
   treasureTemplatePath: process.env.TREASURE_TEMPLATE_PATH
     || path.join(__dirname, "templates", "treasure_yellow.png"),
+  treasureNoTimerTemplates: (process.env.TREASURE_NO_TIMER_TEMPLATES || "").split(",").map(s => s.trim()).filter(Boolean),
   treasureMaskPath: process.env.TREASURE_MASK_PATH || path.join(__dirname, "templates", "treasure_box_mask.png"),
   treasureThreshold: numberEnv("TREASURE_THRESHOLD", 0.54),
   treasureMinRedRatio: numberEnv("TREASURE_MIN_RED_RATIO", 0.06),
@@ -900,6 +903,11 @@ async function detectTreasure(imagePath) {
     if (debugMode.shouldWriteImages(config.treasureDebugMode)) {
       args.push("--debug-dir", config.treasureDebugDir);
     }
+    const noTimer = config.treasureNoTimerTemplates.some(t => templatePath.endsWith(t));
+    if (noTimer) {
+      args.push("--timer-penalty", "0");
+      args.push("--require-warm");
+    }
     try {
       await fs.access(config.treasureMaskPath);
       args.push("--mask", config.treasureMaskPath);
@@ -1554,6 +1562,17 @@ async function processJob(job, allowSessionRetry = true) {
     await dismissTikTokBlockingPrompts(jobUrl);
     await captureDebugStage(job.id, "after_deeplink_ready");
     await report(job.id, "opened");
+
+    if (config.postOpenPreemptEnabled) {
+      await sleep(config.postOpenPreemptDelayMs);
+      const newerJob = await latestPendingQueueJob().catch(() => null);
+      if (newerJob && Number(newerJob.id) > Number(job.id)) {
+        console.log(`[FLOW] Job #${job.id}: newer job #${newerJob.id} found after open delay — preempting`);
+        await report(job.id, "preempted_by_newer_job", JSON.stringify({ newer_job_id: newerJob.id })).catch(() => {});
+        return;
+      }
+    }
+
     const treasureSettleMs = adaptiveTreasureSettleMs(job);
     if (treasureSettleMs > 0) {
       console.log(`[FLOW] Job #${job.id}: adaptive treasure settle ${treasureSettleMs}ms`);

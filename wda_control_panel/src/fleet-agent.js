@@ -277,8 +277,13 @@ class FleetAgent {
   async buildIpa(options = {}) {
     if (process.platform !== "darwin") throw new Error("Build IPA chỉ chạy trên macOS");
     const settings = this.store.get();
-    const teamId = options.appleTeamId || settings.appleTeamId;
-    if (!teamId) throw new Error("Cần Apple Team ID. Chọn signing identity ở Setup → Mac.");
+    let teamId = options.appleTeamId || settings.appleTeamId;
+    if (!teamId) {
+      const signing = await detectSigningIdentities();
+      teamId = signing.identities?.find((id) => id.teamId)?.teamId || "";
+      if (!teamId) throw new Error("Cần Apple Team ID. Chọn signing identity ở Setup → Mac.");
+      this.log(`Auto-detected Apple Team ID: ${teamId}`);
+    }
     this.log(`Building WDA IPA for team ${teamId}...`);
     const result = await buildWdaIpa({
       ...settings,

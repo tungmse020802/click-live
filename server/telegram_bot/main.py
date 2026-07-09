@@ -1,6 +1,6 @@
 import logging
 
-from telegram import Update
+from telegram import Bot, Update
 from telegram.ext import CallbackContext, CommandHandler, Filters, MessageHandler, Updater
 
 from chatbot import ChatbotService
@@ -239,6 +239,7 @@ def main() -> None:
             db=updater.dispatcher.bot_data["db"],
             chatbot=updater.dispatcher.bot_data["chatbot"],
             bot=updater.bot,
+            bots=[Bot(token) for token in config.bot_tokens],
             lease_seconds=config.queue_lease_seconds,
             poll_interval_seconds=config.queue_poll_interval_seconds,
             retry_delay_seconds=config.queue_retry_delay_seconds,

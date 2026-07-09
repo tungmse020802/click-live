@@ -1,0 +1,17 @@
+[Unit]
+Description=Click Live Deeplink API (junb/thanhtai -> TikTok)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/click-live/profile_playwright
+Environment=PYTHONUNBUFFERED=1
+Environment=DEEPLINK_API_HOST=0.0.0.0
+Environment=DEEPLINK_API_PORT=8792
+ExecStart=/usr/bin/python3 /root/click-live/profile_playwright/api.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

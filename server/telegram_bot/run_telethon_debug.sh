@@ -24,7 +24,19 @@ if [ -f "$pid_path" ]; then
   fi
 fi
 
-nohup python3 telethon_reader.py >> "$log_path" 2>&1 &
+nohup /bin/zsh -lc '
+  cd "'"$PWD"'"
+  source .venv/bin/activate
+  export BOT_LOG_LEVEL="${BOT_LOG_LEVEL:-INFO}"
+  export PYTHONUNBUFFERED=1
+  while true; do
+    echo "$(date -Iseconds) telethon_reader starting"
+    python3 telethon_reader.py
+    code=$?
+    echo "$(date -Iseconds) telethon_reader exited code=$code; restarting in 5s"
+    sleep 5
+  done
+' >> "$log_path" 2>&1 &
 pid="$!"
 echo "$pid" > "$pid_path"
 

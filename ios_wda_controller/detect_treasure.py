@@ -21,6 +21,8 @@ def main() -> None:
     parser.add_argument("--scales", default="0.75,0.85,0.95,1.0,1.1,1.2,1.35", help="Comma-separated template scales")
     parser.add_argument("--roi", default="0,240,430,360", help="x,y,w,h in screenshot pixels")
     parser.add_argument("--debug-dir", default="", help="Optional directory to save ROI and detection crop")
+    parser.add_argument("--timer-penalty", type=float, default=0.12, help="Extra threshold penalty when timer label not visible (0 = no penalty)")
+    parser.add_argument("--require-warm", action="store_true", help="Require warm ratio (not just red) to pass color check — filters plain red icons")
     args = parser.parse_args()
 
     try:
@@ -133,26 +135,19 @@ def main() -> None:
     y = ry + int(best["loc"][1])
     candidate = image[y:y + th, x:x + tw]
     candidate_hsv = cv2.cvtColor(candidate, cv2.COLOR_BGR2HSV)
-    red_mask = (
-        ((candidate_hsv[:, :, 0] <= 12) | (candidate_hsv[:, :, 0] >= 170))
-        & (candidate_hsv[:, :, 1] >= 70)
-        & (candidate_hsv[:, :, 2] >= 80)
-    )
-    warm_mask = (
-        (
-            ((candidate_hsv[:, :, 0] >= 8) & (candidate_hsv[:, :, 0] <= 42))
-            | ((candidate_hsv[:, :, 0] >= 145) & (candidate_hsv[:, :, 0] <= 179))
-        )
-        & (candidate_hsv[:, :, 1] >= 35)
-        & (candidate_hsv[:, :, 2] >= 110)
-    )
-    red_ratio = float(red_mask.mean())
-    warm_ratio = float(warm_mask.mean())
-    color_valid = red_ratio >= args.min_red_ratio or warm_ratio >= args.min_warm_ratio
+    red_ratio, warm_ratio, purple_ratio = _color_ratios_full(cv2, candidate_hsv)
+    if args.require_warm:
+        color_valid = warm_ratio >= args.min_warm_ratio or purple_ratio >= 0.10
+    else:
+        color_valid = red_ratio >= args.min_red_ratio or warm_ratio >= args.min_warm_ratio or purple_ratio >= 0.10
     box = {"x": x, "y": y, "w": tw, "h": th}
     tap = {"x": x + tw // 2, "y": y + th // 2}
     label_debug = detect_timer_label(cv2, image, box)
-    found = score >= args.threshold and color_valid and label_debug["found"]
+    # Timer label is a strong signal but NOT required — rương sometimes has no
+    # visible countdown (already tapped state, partial load, or dimmed timer).
+    # Require higher score when timer is absent to reduce false positives.
+    score_threshold = args.threshold if label_debug["found"] else args.threshold + args.timer_penalty
+    found = score >= score_threshold and color_valid
     method = "template"
 
     color_candidate = detect_color_candidate(
@@ -167,21 +162,25 @@ def main() -> None:
     # TikTok load animations, template matching can lock onto a nearby gift or
     # a scaled transition frame while the real chest has the timer underneath.
     cc = color_candidate
-    if (cc and cc.get("found")
-            and cc.get("score", 0) >= args.threshold
-            and cc.get("timer_label", {}).get("found")
-            and (not found or cc.get("score", 0) >= score + 0.08)):
-        found = True
-        score = cc["score"]
-        method = "color_candidate"
-        cb = cc["box"]
-        box = {"x": cb["x"], "y": cb["y"], "w": cb["w"], "h": cb["h"]}
-        tap = cc["tap"]
-        ob = cc.get("object_box") or cb  # noqa: F841
-        red_ratio = cc.get("red_ratio", red_ratio)
-        warm_ratio = cc.get("warm_ratio", warm_ratio)
-        color_valid = True
-        label_debug = cc.get("timer_label", label_debug)
+    if cc and cc.get("found") and (not found or cc.get("score", 0) >= score + 0.04):
+        cc_warm = cc.get("warm_ratio", 0)
+        cc_purple = cc.get("purple_ratio", 0)
+        if args.require_warm and cc_warm < args.min_warm_ratio and cc_purple < 0.10:
+            cc = None  # color_candidate fails warm check
+        cc_threshold = args.threshold if (cc or {}).get("timer_label", {}).get("found") else args.threshold + args.timer_penalty
+        if cc and cc.get("score", 0) >= cc_threshold:
+            found = True
+            score = cc["score"]
+            method = "color_candidate"
+            cb = cc["box"]
+            box = {"x": cb["x"], "y": cb["y"], "w": cb["w"], "h": cb["h"]}
+            tap = cc["tap"]
+            ob = cc.get("object_box") or cb  # noqa: F841
+            red_ratio = cc.get("red_ratio", red_ratio)
+            warm_ratio = cc.get("warm_ratio", warm_ratio)
+            purple_ratio = cc.get("purple_ratio", purple_ratio)
+            color_valid = True
+            label_debug = cc.get("timer_label", label_debug)
 
     debug = {}
     reject_reasons = []
@@ -218,7 +217,7 @@ def main() -> None:
         cv2.drawMarker(marked, (tap["x"], tap["y"]), (0, 0, 255), markerType=cv2.MARKER_CROSS, markerSize=28, thickness=3)
         cv2.putText(
             marked,
-            f"found={found} score={score:.3f} red={red_ratio:.3f} warm={warm_ratio:.3f}",
+            f"found={found} score={score:.3f} red={red_ratio:.3f} warm={warm_ratio:.3f} purple={purple_ratio:.3f}",
             (12, max(24, ry - 12)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
@@ -252,6 +251,7 @@ def main() -> None:
         "min_red_ratio": args.min_red_ratio,
         "warm_ratio": round(warm_ratio, 4),
         "min_warm_ratio": args.min_warm_ratio,
+        "purple_ratio": round(purple_ratio, 4),
         "color_valid": color_valid,
         "method": method,
         "scale": best["scale"],
@@ -271,29 +271,60 @@ def main() -> None:
     print(json.dumps(result, ensure_ascii=False))
 
 
+def _color_ratios_full(cv2, hsv):
+    """Return (red_ratio, warm_ratio, purple_ratio) from an HSV image array."""
+    red_mask = (
+        ((hsv[:, :, 0] <= 12) | (hsv[:, :, 0] >= 170))
+        & (hsv[:, :, 1] >= 60)
+        & (hsv[:, :, 2] >= 70)
+    )
+    warm_mask = (
+        (
+            ((hsv[:, :, 0] >= 8) & (hsv[:, :, 0] <= 42))
+            | ((hsv[:, :, 0] >= 145) & (hsv[:, :, 0] <= 169))
+        )
+        & (hsv[:, :, 1] >= 30)
+        & (hsv[:, :, 2] >= 100)
+    )
+    purple_mask = (
+        ((hsv[:, :, 0] >= 120) & (hsv[:, :, 0] <= 155))
+        & (hsv[:, :, 1] >= 50)
+        & (hsv[:, :, 2] >= 60)
+    )
+    return float(red_mask.mean()), float(warm_mask.mean()), float(purple_mask.mean())
+
+
 def detect_timer_label(cv2, image, box):
     height, width = image.shape[:2]
     pad_x = max(10, int(box["w"] * 0.28))
     label_x = max(0, box["x"] - pad_x)
-    label_y = max(0, box["y"] + int(box["h"] * 0.58))
+    label_y = max(0, box["y"] + int(box["h"] * 0.52))
     label_w = min(width - label_x, box["w"] + pad_x * 2)
-    label_h = min(height - label_y, max(28, int(box["h"] * 0.58)))
+    label_h = min(height - label_y, max(32, int(box["h"] * 0.65)))
     if label_w <= 0 or label_h <= 0:
         return {"found": False, "box": None, "white_ratio": 0.0, "method": "invalid_roi"}
 
     label_roi = image[label_y:label_y + label_h, label_x:label_x + label_w]
     gray = cv2.cvtColor(label_roi, cv2.COLOR_BGR2GRAY)
-    white = gray >= 178
+
+    # Primary: white pixel heuristic (timer text is white on dark bg)
+    white = gray >= 170
     white_ratio = float(white.mean())
-    heuristic_found = white_ratio >= 0.025
+    heuristic_found = white_ratio >= 0.015
+
+    # Secondary: bright-region heuristic for slightly dim screens
+    bright = gray >= 140
+    bright_ratio = float(bright.mean())
+    bright_found = bright_ratio >= 0.04
+
     ocr = detect_timer_label_ocr(cv2, label_roi)
-    # Use OCR when available, but keep the white-pixel heuristic as a fallback.
-    found = bool(ocr["found"] or heuristic_found)
+    found = bool(ocr["found"] or heuristic_found or bright_found)
     return {
         "found": found,
         "box": {"x": label_x, "y": label_y, "w": label_w, "h": label_h},
         "white_ratio": round(white_ratio, 4),
-        "method": "ocr" if ocr["found"] else "heuristic",
+        "bright_ratio": round(bright_ratio, 4),
+        "method": "ocr" if ocr["found"] else ("heuristic" if heuristic_found else "bright_heuristic"),
         "ocr": ocr,
     }
 
@@ -337,18 +368,26 @@ def color_ratios(cv2, image):
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     red_mask = (
         ((hsv[:, :, 0] <= 12) | (hsv[:, :, 0] >= 170))
-        & (hsv[:, :, 1] >= 70)
-        & (hsv[:, :, 2] >= 80)
+        & (hsv[:, :, 1] >= 60)
+        & (hsv[:, :, 2] >= 70)
     )
     warm_mask = (
         (
             ((hsv[:, :, 0] >= 8) & (hsv[:, :, 0] <= 46))
-            | ((hsv[:, :, 0] >= 145) & (hsv[:, :, 0] <= 179))
+            | ((hsv[:, :, 0] >= 145) & (hsv[:, :, 0] <= 169))
         )
-        & (hsv[:, :, 1] >= 30)
-        & (hsv[:, :, 2] >= 105)
+        & (hsv[:, :, 1] >= 28)
+        & (hsv[:, :, 2] >= 95)
     )
     return float(red_mask.mean()), float(warm_mask.mean())
+
+
+def color_ratios_with_purple(cv2, image):
+    if image.size == 0:
+        return 0.0, 0.0, 0.0
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    r, w, p = _color_ratios_full(cv2, hsv)
+    return r, w, p
 
 
 def detect_color_candidate(cv2, image, roi_box, min_red_ratio, min_warm_ratio):
@@ -361,18 +400,23 @@ def detect_color_candidate(cv2, image, roi_box, min_red_ratio, min_warm_ratio):
     hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     red = (
         ((hsv[:, :, 0] <= 12) | (hsv[:, :, 0] >= 170))
-        & (hsv[:, :, 1] >= 70)
-        & (hsv[:, :, 2] >= 80)
+        & (hsv[:, :, 1] >= 60)
+        & (hsv[:, :, 2] >= 70)
     )
     warm = (
         (
             ((hsv[:, :, 0] >= 8) & (hsv[:, :, 0] <= 46))
-            | ((hsv[:, :, 0] >= 145) & (hsv[:, :, 0] <= 179))
+            | ((hsv[:, :, 0] >= 145) & (hsv[:, :, 0] <= 169))
         )
-        & (hsv[:, :, 1] >= 30)
-        & (hsv[:, :, 2] >= 105)
+        & (hsv[:, :, 1] >= 28)
+        & (hsv[:, :, 2] >= 95)
     )
-    mask = ((red | warm).astype("uint8")) * 255
+    purple = (
+        ((hsv[:, :, 0] >= 120) & (hsv[:, :, 0] <= 155))
+        & (hsv[:, :, 1] >= 45)
+        & (hsv[:, :, 2] >= 55)
+    )
+    mask = ((red | warm | purple).astype("uint8")) * 255
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
@@ -382,25 +426,25 @@ def detect_color_candidate(cv2, image, roi_box, min_red_ratio, min_warm_ratio):
     for contour in contours:
         cx, cy, cw, ch = cv2.boundingRect(contour)
         area = cw * ch
-        max_w = min(int(width * 0.42), int(rw * 0.70), 260)
-        max_h = min(int(height * 0.12), int(rh * 0.45), 145)
-        if cw < 48 or ch < 34 or cw > max_w or ch > max_h:
+        max_w = min(int(width * 0.55), int(rw * 0.90), 350)
+        max_h = min(int(height * 0.30), int(rh * 0.90), 320)
+        if cw < 35 or ch < 25 or cw > max_w or ch > max_h:
             continue
-        if area < 1600 or area > 26000:
+        if area < 900 or area > 90000:
             continue
         aspect = cw / max(1, ch)
-        if aspect < 0.75 or aspect > 2.6:
+        if aspect < 0.40 or aspect > 3.5:
             continue
         center_x = rx + cx + cw / 2
         center_y = ry + cy + ch / 2
-        if center_x > width * 0.52:
+        if center_x > width * 0.65:
             continue
-        if center_y < height * 0.18 or center_y > height * 0.58:
+        if center_y < height * 0.12 or center_y > height * 0.70:
             continue
 
         pad_x = max(10, int(cw * 0.28))
         pad_y_top = max(8, int(ch * 0.20))
-        pad_y_bottom = max(12, int(ch * 0.35))
+        pad_y_bottom = max(12, int(ch * 0.40))
         x = max(0, rx + cx - pad_x)
         y = max(0, ry + cy - pad_y_top)
         right = min(image.shape[1], rx + cx + cw + pad_x)
@@ -408,15 +452,20 @@ def detect_color_candidate(cv2, image, roi_box, min_red_ratio, min_warm_ratio):
         box = {"x": x, "y": y, "w": max(1, right - x), "h": max(1, bottom - y)}
         object_box = {"x": rx + cx, "y": ry + cy, "w": cw, "h": ch}
         candidate = image[box["y"]:box["y"] + box["h"], box["x"]:box["x"] + box["w"]]
-        red_ratio, warm_ratio = color_ratios(cv2, candidate)
+        red_ratio, warm_ratio, purple_ratio = color_ratios_with_purple(cv2, candidate)
         timer_label = detect_timer_label(cv2, image, object_box)
-        color_ok = red_ratio >= min_red_ratio or warm_ratio >= min_warm_ratio
-        if not color_ok or not timer_label["found"]:
+        color_ok = (
+            red_ratio >= min_red_ratio
+            or warm_ratio >= min_warm_ratio
+            or purple_ratio >= 0.10
+        )
+        if not color_ok:
             continue
 
         area_score = min(1.0, area / 9000)
-        label_score = 0.22
-        ratio_score = min(0.45, warm_ratio) + min(0.25, red_ratio * 1.5)
+        # Timer label is a bonus, not a hard requirement
+        label_score = 0.22 if timer_label["found"] else 0.0
+        ratio_score = min(0.45, warm_ratio + purple_ratio * 0.8) + min(0.25, red_ratio * 1.5)
         aspect_score = max(0.0, 0.18 - abs(aspect - 1.35) * 0.08)
         position_score = max(0.0, 0.14 - abs((center_x / width) - 0.22) * 0.22)
         score = 0.35 + area_score * 0.16 + ratio_score + label_score + aspect_score + position_score
@@ -426,6 +475,7 @@ def detect_color_candidate(cv2, image, roi_box, min_red_ratio, min_warm_ratio):
             "score": round(float(score), 4),
             "red_ratio": round(red_ratio, 4),
             "warm_ratio": round(warm_ratio, 4),
+            "purple_ratio": round(purple_ratio, 4),
             "box": box,
             "object_box": object_box,
             "tap": {

@@ -136,7 +136,7 @@ async function installWdaIpa(device, config = {}) {
 
 function classifyInstallError(raw) {
   if (!raw) return "ios install failed (no output)";
-  if (/ApplicationVerificationFailed|provisioning profile|not properly signed/i.test(raw)) {
+  if (/ApplicationVerificationFailed|provisioning profile|not properly signed|LibMISErrorNumber\s*=\s*-402620398/i.test(raw)) {
     return (
       "Provisioning profile mismatch — this IPA was not signed for this device.\n" +
       "Ask the developer to add this device UDID to their Apple Developer account and rebuild the IPA."
@@ -355,7 +355,23 @@ async function installViaDevicectl(device, ipaPath, options = {}) {
     ipaPath,
   ];
   const onProgress = options.onProgress || (() => {});
-  await runStreaming("xcrun", args, onProgress);
+  let allOutput = "";
+  await new Promise((resolve, reject) => {
+    const child = spawn("xcrun", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const handle = (chunk) => {
+      const text = String(chunk);
+      allOutput += text;
+      const lastLine = text.split(/\r?\n/).filter((line) => line.trim()).slice(-1)[0];
+      if (lastLine) onProgress("xcrun", lastLine);
+    };
+    child.stdout.on("data", handle);
+    child.stderr.on("data", handle);
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(classifyInstallError(allOutput)));
+    });
+  });
   return { ok: true, udid: device.udid, ipaPath };
 }
 
