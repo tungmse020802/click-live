@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions
+chcp 65001 >nul 2>&1
 cd /d "%~dp0.."
 
 echo.
@@ -12,6 +13,11 @@ if not errorlevel 1 (
   git -C "%~dp0..\.." pull --ff-only
   echo.
 )
+
+echo Stopping old desktop-tool (neu con chay nen)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$pat='click-live\\desktop-tool|click-live-desktop-tool'; Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match $pat -and ($_.Name -eq 'electron.exe' -or $_.Name -eq 'node.exe') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+timeout /t 1 /nobreak >nul
+echo.
 
 where node >nul 2>&1
 if errorlevel 1 (

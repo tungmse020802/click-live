@@ -33,6 +33,10 @@ function loadDotEnv() {
 
 loadDotEnv();
 
+if (process.platform === "win32") {
+  app.setAppUserModelId("com.clicklive.desktop-tool");
+}
+
 const PORT = Number(process.env.DESKTOP_TOOL_PORT) || DEFAULT_PORT;
 const QUEUE_URL = process.env.DESKTOP_TOOL_QUEUE_URL || "";
 const POLL_MS = Number(process.env.DESKTOP_TOOL_POLL_MS) || 2000;
@@ -48,7 +52,11 @@ let stopPoller = null;
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
-  console.error("Desktop-tool đã chạy — mở cửa sổ từ icon tray hoặc tắt process cũ trong Task Manager.");
+  console.error(
+    "Desktop-tool da chay (instance cu trong Task Manager).\n"
+    + "  Chay: scripts\\stop-windows.bat roi run-windows.bat lai.\n"
+    + "  Hoac mo cua so tu icon tray (gooc man hinh)."
+  );
   app.quit();
 } else {
   app.on("second-instance", () => {
