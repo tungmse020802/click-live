@@ -6,6 +6,13 @@ echo.
 echo Click Live desktop-tool
 echo.
 
+where git >nul 2>&1
+if not errorlevel 1 (
+  echo git pull ...
+  git -C "%~dp0..\.." pull --ff-only
+  echo.
+)
+
 where node >nul 2>&1
 if errorlevel 1 (
   echo [ERROR] Node.js not installed. Run scripts\install-windows.bat first.

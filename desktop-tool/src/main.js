@@ -13,7 +13,7 @@ const { loadSettings, saveSettings, adjustDelayOffset } = require("./settings");
 const { clickScreenPoint, warmUpWinClickHelper, shutdownWinClickHelper } = require("./desktop-click");
 const { pickPointOnScreen } = require("./pick-point");
 const { ensureAccessibility } = require("./accessibility");
-const { computeCountdownSchedule } = require("./junb-url");
+const { computeCountdownSchedule, computeClickFireDelayMs, waitUntilClickTarget } = require("./junb-url");
 
 function loadDotEnv() {
   const envPath = path.join(__dirname, "..", ".env");
@@ -102,39 +102,48 @@ function scheduleTabClose(entry, closeWaitMs) {
 async function scheduleDesktopClick({
   urlKey,
   url,
+  schedule: presetSchedule = null,
   clickAfterMs = 0,
   jobId = null,
   timeLabel = "",
 } = {}) {
   const settings = loadSettings();
-  if (!settings.autoClickEnabled) return null;
+  if (!settings.autoClickEnabled) return presetSchedule;
 
   cancelActiveClickTimer();
   activeTabKey = urlKey;
 
-  const schedule = await computeCountdownSchedule(url, {
+  const schedule = presetSchedule || await computeCountdownSchedule(url, {
     clickAfterMs,
     delayOffsetMs: settings.delayOffsetMs,
     defaultWaitMs: settings.defaultWaitMs,
     tabCloseAfterEndMs: TAB_CLOSE_AFTER_END_MS,
+    timeLabel,
   });
 
   if (schedule.clickWaitMs <= 0 && !schedule.endTimeMs) return schedule;
 
   const key = jobId != null ? String(jobId) : urlKey;
+  const offsetMs = Number(settings.delayOffsetMs) || 0;
+  const fireDelayMs = computeClickFireDelayMs(schedule, offsetMs);
+  const displaySec = schedule.endTimeMs
+    ? ((schedule.endTimeMs - Date.now() + offsetMs) / 1000).toFixed(2)
+    : null;
 
-  const sec = (schedule.clickWaitMs / 1000).toFixed(2);
+  const sec = (fireDelayMs / 1000).toFixed(2);
   const label = schedule.endTimeMs
-    ? `${schedule.source === "thanhtai_end_time" ? "thanhtai" : "junb"} 0.0s + offset (${sec}s)`
+    ? `${schedule.source === "thanhtai_end_time" ? "thanhtai" : schedule.source === "junb_end_time" ? "junb" : schedule.source} click @ ${displaySec}s (offset ${offsetMs >= 0 ? "+" : ""}${(offsetMs / 1000).toFixed(2)}s)`
     : (timeLabel || `${sec}s`);
 
   notifySchedule({
     type: "scheduled",
     jobId: key,
-    waitMs: schedule.clickWaitMs,
+    waitMs: fireDelayMs,
     closeWaitMs: schedule.closeWaitMs,
     timeLabel: label,
     endTimeMs: schedule.endTimeMs,
+    offsetMs,
+    displayRemainingMs: displaySec != null ? Math.round(Number(displaySec) * 1000) : null,
   });
 
   activeClickTimer = setTimeout(async () => {
@@ -144,8 +153,11 @@ async function scheduleDesktopClick({
       return;
     }
     try {
-      ensureAccessibility(true);
       const latest = loadSettings();
+      if (schedule.endTimeMs) {
+        await waitUntilClickTarget(schedule.endTimeMs, latest.delayOffsetMs);
+      }
+      if (process.platform === "darwin") ensureAccessibility(true);
       const result = await clickScreenPoint(latest.clickX, latest.clickY);
       notifySchedule({
         type: "clicked",
@@ -154,14 +166,14 @@ async function scheduleDesktopClick({
         y: result.y,
         method: result.method,
       });
-      console.log(`Desktop click job #${key} at ${result.x},${result.y} (${result.method})`);
+      console.log(`Desktop click job #${key} at ${result.x},${result.y} (${result.method}) offset=${latest.delayOffsetMs}ms`);
     } catch (err) {
       console.error("Desktop click failed:", err.message || err);
       notifySchedule({ type: "error", jobId: key, error: String(err.message || err) });
     }
-  }, schedule.clickWaitMs);
+  }, fireDelayMs);
 
-  console.log(`Click tab active (${urlKey}) in ${schedule.clickWaitMs}ms, close tab in ${schedule.closeWaitMs}ms (job ${key})`);
+  console.log(`Click tab active (${urlKey}) fire in ${fireDelayMs}ms (display≈${displaySec ?? "?"}s + offset ${offsetMs}ms, lead ${schedule.executionLeadMs ?? "?"}ms)`);
   return schedule;
 }
 
@@ -179,6 +191,7 @@ async function openCountdownTab({
     delayOffsetMs: settings.delayOffsetMs,
     defaultWaitMs: settings.defaultWaitMs,
     tabCloseAfterEndMs: TAB_CLOSE_AFTER_END_MS,
+    timeLabel,
   });
 
   const existing = openEntries.get(urlKey);
@@ -190,7 +203,14 @@ async function openCountdownTab({
     existing.jobId = jobId;
     activeTabKey = urlKey;
     scheduleTabClose(existing, schedule.closeWaitMs);
-    scheduleDesktopClick({ urlKey, url: cleanUrl, clickAfterMs, jobId, timeLabel }).catch((err) => {
+    scheduleDesktopClick({
+      urlKey,
+      url: cleanUrl,
+      schedule,
+      clickAfterMs,
+      jobId,
+      timeLabel,
+    }).catch((err) => {
       console.warn("Schedule click failed:", err.message || err);
     });
     return { tabId: urlKey, deduplicated: true, schedule };
@@ -211,7 +231,14 @@ async function openCountdownTab({
   activeTabKey = urlKey;
   scheduleTabClose(entry, schedule.closeWaitMs);
 
-  scheduleDesktopClick({ urlKey, url: cleanUrl, clickAfterMs, jobId, timeLabel }).catch((err) => {
+  scheduleDesktopClick({
+    urlKey,
+    url: cleanUrl,
+    schedule,
+    clickAfterMs,
+    jobId,
+    timeLabel,
+  }).catch((err) => {
     console.warn("Schedule click failed:", err.message || err);
   });
   console.log(`Opened countdown — tab active, close sau 0.0s nếu còn tab khác`);

@@ -6,7 +6,7 @@ const DEFAULTS = {
   autoClickEnabled: true,
   clickX: 960,
   clickY: 540,
-  /** Cộng thêm vào TIME trong tin (ms). Nút ±0.01s = ±10ms, ±0.05s = ±50ms */
+  /** Cộng vào mốc 0.0s (ms). Âm = click sớm (đồng hồ còn 0.09s…). Nút ±0.01s = ±10ms */
   delayOffsetMs: 0,
   /** Chờ mặc định nếu tin không có TIME */
   defaultWaitMs: 0,
