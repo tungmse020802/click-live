@@ -7,7 +7,7 @@
 #   RESET_SESSION=1 bash login_telethon_remote.sh   # xóa session cũ, login lại từ đầu
 #
 # Env:
-#   SERVER_HOST=103.38.237.7
+#   SERVER_HOST=160.30.19.215
 #   SERVER_USER=root
 #   SERVER_PASS=...        # nếu trống sẽ hỏi hoặc dùng SSH key
 
@@ -15,16 +15,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-SERVER_HOST="${SERVER_HOST:-103.38.237.7}"
+SERVER_HOST="${SERVER_HOST:-160.30.19.215}"
 SERVER_USER="${SERVER_USER:-root}"
 SERVER_PASS="${SERVER_PASS:-}"
 REMOTE_DIR="${REMOTE_DIR:-/root/click-live/server/telegram_bot}"
 RESET_SESSION="${RESET_SESSION:-0}"
 
+SSH_OPTS=(-o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no)
 if [[ -n "$SERVER_PASS" ]] && command -v sshpass >/dev/null 2>&1; then
-  SSH=(sshpass -p "$SERVER_PASS" ssh -tt -o StrictHostKeyChecking=no)
+  SSH=(sshpass -p "$SERVER_PASS" ssh -tt "${SSH_OPTS[@]}")
 else
-  SSH=(ssh -tt -o StrictHostKeyChecking=no)
+  SSH=(ssh -tt "${SSH_OPTS[@]}")
 fi
 
 echo "Kết nối ${SERVER_USER}@${SERVER_HOST} để login Telethon..."

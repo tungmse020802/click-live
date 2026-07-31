@@ -1,5 +1,7 @@
 import logging
+import time
 
+from logging_setup import setup_logging
 from telegram import Bot
 
 from chatbot import ChatbotService
@@ -11,14 +13,6 @@ from worker import QueueWorker
 logger = logging.getLogger(__name__)
 
 
-def setup_logging(log_level: str) -> None:
-    level = getattr(logging, log_level, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
-
-
 def main() -> None:
     config = load_config()
     setup_logging(config.log_level)
@@ -28,33 +22,51 @@ def main() -> None:
 
     db = ChatDatabase(config.db_path)
     db.init_schema()
+    db.seed_broadcast_bots_from_tokens(list(config.bot_tokens))
+    db.delete_broadcast_bots_without_tokens()
+    all_tokens = [token.strip() for token in config.bot_tokens if token.strip()]
+    if not all_tokens:
+        raise RuntimeError("No bot tokens in .env. Set TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKENS")
 
-    worker = QueueWorker(
-        db=db,
-        chatbot=ChatbotService(reply_prefix=config.reply_prefix),
-        bot=Bot(config.token),
-        bots=[Bot(token) for token in config.bot_tokens],
-        lease_seconds=max(config.queue_lease_seconds, 120),
-        poll_interval_seconds=min(config.queue_poll_interval_seconds, 0.02),
-        retry_delay_seconds=config.queue_retry_delay_seconds,
-        consumer_id="broadcast-worker",
-        prefer_fair=True,
-    )
+    primary_token = all_tokens[0]
+    bots = [Bot(token) for token in all_tokens]
+    chatbot = ChatbotService(reply_prefix=config.reply_prefix)
 
-    logger.info(
-        "Starting broadcast worker db=%s bot_count=%s",
+    # One logical queue per listening room: fair claim + N parallel workers.
+    # Default 4 matches typical watch-group count; override with BOT_BROADCAST_WORKERS.
+    worker_count = max(1, min(int(config.broadcast_workers), 16))
+    workers = []
+    for index in range(worker_count):
+        worker = QueueWorker(
+            db=db,
+            chatbot=chatbot,
+            bot=Bot(primary_token) if index == 0 else bots[index % len(bots)],
+            bots=bots,
+            lease_seconds=max(config.queue_lease_seconds, 120),
+            poll_interval_seconds=min(config.queue_poll_interval_seconds, 0.02),
+            retry_delay_seconds=config.queue_retry_delay_seconds,
+            consumer_id=f"broadcast-worker-{index + 1}",
+            prefer_fair=True,
+            prefer_newest=False,
+        )
+        workers.append(worker)
+
+    logger.warning(
+        "Starting broadcast workers count=%s mode=fair-per-room db=%s bot_count=%s",
+        worker_count,
         config.db_path,
-        len(config.bot_tokens),
+        len(all_tokens),
     )
-    worker.start()
+    for worker in workers:
+        worker.start()
     try:
-        import time
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        logger.info("Stopping broadcast worker")
+        logger.info("Stopping broadcast workers")
     finally:
-        worker.stop()
+        for worker in workers:
+            worker.stop()
 
 
 if __name__ == "__main__":

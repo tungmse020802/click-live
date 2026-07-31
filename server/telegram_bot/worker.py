@@ -12,6 +12,7 @@ from telegram.error import BadRequest, RetryAfter
 
 from chatbot import ChatMessage, ChatbotService
 from db import ChatDatabase, QueueJob
+from logging_setup import setup_logging
 from message_format import broadcast_text_from_payload
 
 
@@ -39,6 +40,7 @@ class QueueWorker:
         self.bots = bots or [bot]
         self._bot_index = 0
         self._bot_lock = threading.Lock()
+        self._bot_cache: dict[str, Bot] = {}
         self.lease_seconds = lease_seconds
         self.poll_interval_seconds = poll_interval_seconds
         self.retry_delay_seconds = retry_delay_seconds
@@ -66,18 +68,18 @@ class QueueWorker:
             self._thread.join(timeout=5)
 
     def _run(self) -> None:
-        logger.info("Queue worker started consumer_id=%s", self.consumer_id)
+        logger.warning("Queue worker started consumer_id=%s", self.consumer_id)
 
         while not self._stop_event.is_set():
             try:
                 released = self.db.release_expired_jobs()
                 if released:
-                    logger.info("Released expired queue jobs count=%s", released)
+                    logger.debug("Released expired queue jobs count=%s", released)
 
                 if self.stale_skip_seconds:
                     skipped = self.db.skip_stale_pending_jobs(self.stale_skip_seconds)
                     if skipped:
-                        logger.info("Skipped stale pending queue jobs count=%s", skipped)
+                        logger.debug("Skipped stale pending queue jobs count=%s", skipped)
 
                 if self.prefer_fair:
                     job = self.db.claim_next_fair(self.consumer_id, self.lease_seconds)
@@ -94,10 +96,10 @@ class QueueWorker:
                 logger.exception("Queue worker loop failed")
                 self._stop_event.wait(self.poll_interval_seconds)
 
-        logger.info("Queue worker stopped consumer_id=%s", self.consumer_id)
+        logger.warning("Queue worker stopped consumer_id=%s", self.consumer_id)
 
     def _process_job(self, job: QueueJob) -> None:
-        logger.info(
+        logger.debug(
             "Processing queue job id=%s priority=%s attempt=%s/%s",
             job.id,
             job.priority,
@@ -181,13 +183,34 @@ class QueueWorker:
             raise RuntimeError("Broadcast job has empty message text")
 
         send_text, parse_mode = broadcast_text_from_payload(text, job.payload)
-        sent_count, errors = self._send_broadcast(send_text, groups, parse_mode=parse_mode)
+        target_room = str(job.payload.get("target_room") or job.room_chat_id or "").strip()
+        has_bot_assignment = bool(self.db.get_bot_ids_for_watch_chat_id(target_room))
+        bot_records = self.db.list_enabled_bots_for_watch_chat_id(target_room)
+        active_bots = self._bots_from_records(bot_records, fallback=not has_bot_assignment)
+        if not active_bots:
+            raise RuntimeError(
+                f"No enabled bots for watch_room={target_room or '-'} "
+                f"(assigned={has_bot_assignment})"
+            )
+        logger.debug(
+            "Broadcast job id=%s watch_room=%s bots=%s destinations=%s",
+            job.id,
+            target_room or "-",
+            len(active_bots),
+            len(groups),
+        )
+        sent_count, errors = self._send_broadcast(
+            send_text,
+            groups,
+            parse_mode=parse_mode,
+            bots=active_bots,
+        )
         if sent_count == 0:
             raise RuntimeError("; ".join(errors) or "Broadcast failed for all groups")
 
         superseded = self.db.skip_older_pending_for_room(job.room_id, job.id)
         if superseded:
-            logger.info(
+            logger.debug(
                 "Superseded older pending jobs room_id=%s count=%s after job_id=%s",
                 job.room_id,
                 superseded,
@@ -204,15 +227,29 @@ class QueueWorker:
         text: str,
         groups: List[dict],
         parse_mode: Optional[str] = None,
+        bots: Optional[List[Bot]] = None,
     ) -> Tuple[int, List[str]]:
-        if len(groups) <= 1 or len(self.bots) <= 1:
-            return self._send_broadcast_sequential(text, groups, parse_mode=parse_mode)
+        active_bots = bots or self.bots
+        if len(groups) <= 1 or len(active_bots) <= 1:
+            return self._send_broadcast_sequential(
+                text,
+                groups,
+                parse_mode=parse_mode,
+                bots=active_bots,
+            )
 
         sent_count = 0
         errors: List[str] = []
-        with ThreadPoolExecutor(max_workers=min(len(groups), 4)) as pool:
+        max_workers = min(len(groups), len(active_bots), 12)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {
-                pool.submit(self._send_to_group, group, text, parse_mode): group
+                pool.submit(
+                    self._send_to_group,
+                    group,
+                    text,
+                    parse_mode,
+                    active_bots,
+                ): group
                 for group in groups
             }
             for future in as_completed(futures):
@@ -222,7 +259,7 @@ class QueueWorker:
                 try:
                     future.result()
                     sent_count += 1
-                    logger.info(
+                    logger.debug(
                         "Broadcast sent group=%s chat_id=%s chars=%s",
                         name,
                         chat_id,
@@ -244,11 +281,13 @@ class QueueWorker:
         group: dict,
         text: str,
         parse_mode: Optional[str] = None,
+        bots: Optional[List[Bot]] = None,
     ) -> None:
         chat_id = _safe_int(group.get("chat_id"))
+        active_bots = bots or self.bots
         last_exc: Optional[Exception] = None
-        for _ in range(len(self.bots)):
-            bot = self._next_bot()
+        for _ in range(len(active_bots)):
+            bot = self._next_bot(active_bots)
             try:
                 self._send_with_flood_retry(bot, chat_id, text, parse_mode=parse_mode)
                 return
@@ -260,27 +299,45 @@ class QueueWorker:
         if last_exc is not None:
             raise last_exc
 
-    def _next_bot(self) -> Bot:
+    def _next_bot(self, bots: Optional[List[Bot]] = None) -> Bot:
+        active_bots = bots or self.bots
         with self._bot_lock:
-            bot = self.bots[self._bot_index % len(self.bots)]
+            bot = active_bots[self._bot_index % len(active_bots)]
             self._bot_index += 1
             return bot
+
+    def _bots_from_records(self, records: List[dict], *, fallback: bool = True) -> List[Bot]:
+        bots: List[Bot] = []
+        for record in records:
+            token = str(record.get("token") or "").strip()
+            if not token:
+                continue
+            cached = self._bot_cache.get(token)
+            if cached is None:
+                cached = Bot(token)
+                self._bot_cache[token] = cached
+            bots.append(cached)
+        if bots:
+            return bots
+        return self.bots if fallback else []
 
     def _send_broadcast_sequential(
         self,
         text: str,
         groups: List[dict],
         parse_mode: Optional[str] = None,
+        bots: Optional[List[Bot]] = None,
     ) -> Tuple[int, List[str]]:
+        active_bots = bots or self.bots
         sent_count = 0
         errors: List[str] = []
         for group in groups:
             chat_id = _safe_int(group.get("chat_id"))
             name = str(group.get("name") or chat_id)
             try:
-                self._send_to_group(group, text, parse_mode=parse_mode)
+                self._send_to_group(group, text, parse_mode=parse_mode, bots=active_bots)
                 sent_count += 1
-                logger.info(
+                logger.debug(
                     "Broadcast sent group=%s chat_id=%s chars=%s",
                     name,
                     chat_id,

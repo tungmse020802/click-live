@@ -1,0 +1,3 @@
+# Place a signed WebDriverAgentRunner.ipa here.
+# Runtime installs it with: go-ios install --path=...
+# This folder is the only WDA artifact app-automation needs.

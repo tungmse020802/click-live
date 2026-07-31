@@ -9,13 +9,17 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 BOX_RE = re.compile(
-    r"(?:🎁\s*)?BOX\s*:\s*(?P<left>\d+)\s*/\s*(?P<right>\d+)(?P<tail>.*)",
+    r"(?:🎁\s*)?(?:BOX|BAG)\s*:\s*(?P<left>\d+)\s*/\s*(?P<right>\d+)(?P<tail>.*)",
     re.IGNORECASE | re.DOTALL,
 )
 RATE_RE = re.compile(r"📈\s*Rate\s*:\s*(?P<rate>\d+(?:\.\d+)?)", re.IGNORECASE)
+LEVEL_RE = re.compile(r"🎯\s*Level\s*:\s*(?P<level>\d+)", re.IGNORECASE)
 VIEWS_RE = re.compile(r"👀\s*(?P<views>\d+)")
 NOTE_RE = re.compile(r"📝\s*(?P<note>.+)$", re.DOTALL)
 FLAG_RE = re.compile(r"[\U0001F1E6-\U0001F1FF]{2}")
+COMMENT_LINE_RE = re.compile(r"^.*💬.*$", re.MULTILINE)
+# Watermark "mặt trời" thường gắn cuối / trong dòng bình luận 💬
+SUN_MARKER = "\u0489"  # COMBINING CYRILLIC MILLIONS SIGN (҉)
 
 
 @dataclass(frozen=True)
@@ -24,6 +28,7 @@ class BoxSignal:
     box_left: int
     box_right: int
     rate: Optional[float]
+    level: Optional[int]
     views: Optional[int]
     flags: Tuple[str, ...]
     country_codes: Tuple[str, ...]
@@ -36,6 +41,7 @@ class BoxSignal:
             "box_left": self.box_left,
             "box_right": self.box_right,
             "rate": self.rate,
+            "level": self.level,
             "views": self.views,
             "flags": list(self.flags),
             "country_codes": list(self.country_codes),
@@ -58,6 +64,8 @@ class MessageFilterRule:
     badges: Tuple[str, ...]
     min_rate: Optional[float]
     max_rate: Optional[float]
+    min_level: Optional[int]
+    max_level: Optional[int]
     min_views: Optional[int]
     max_views: Optional[int]
     note_contains: Tuple[str, ...]
@@ -73,6 +81,16 @@ class MessageFilterRule:
             "name": self.name,
             "priority": self.priority_or(default_priority),
         }
+
+
+@dataclass(frozen=True)
+class RejectFilterRule:
+    name: str
+    enabled: bool
+    text_contains: Tuple[str, ...]
+    comment_contains: Tuple[str, ...]
+    text_regex: Optional[str]
+    order: int
 
 
 @dataclass(frozen=True)
@@ -99,6 +117,7 @@ class MessageFilterEngine:
         self._last_loaded_at = 0.0
         self._last_mtime: Optional[float] = None
         self._rules: Tuple[MessageFilterRule, ...] = ()
+        self._reject_rules: Tuple[RejectFilterRule, ...] = ()
 
     def evaluate(
         self,
@@ -110,6 +129,14 @@ class MessageFilterEngine:
             return FilterResult(True, "disabled", signal, None, self.default_priority)
 
         self._reload_if_needed()
+
+        for reject in self._reject_rules:
+            if not reject.enabled:
+                continue
+            rejected, reason = _evaluate_reject_rule(text, reject)
+            if rejected:
+                return FilterResult(False, reason, signal, None, None)
+
         enabled_rules = [rule for rule in self._rules if rule.enabled]
         if not enabled_rules:
             return FilterResult(True, "no_enabled_filters", signal, None, self.default_priority)
@@ -147,9 +174,10 @@ class MessageFilterEngine:
         try:
             mtime = self.config_path.stat().st_mtime
         except FileNotFoundError:
-            if self._rules:
+            if self._rules or self._reject_rules:
                 logger.warning("Message filter config missing path=%s", self.config_path)
             self._rules = ()
+            self._reject_rules = ()
             self._last_mtime = None
             return
 
@@ -157,13 +185,14 @@ class MessageFilterEngine:
             return
 
         self._last_mtime = mtime
-        self._rules = tuple(_load_rules(self.config_path))
+        self._rules, self._reject_rules = _load_rules(self.config_path)
         enabled_count = sum(1 for rule in self._rules if rule.enabled)
+        reject_count = sum(1 for rule in self._reject_rules if rule.enabled)
         logger.info(
-            "Loaded message filters path=%s total=%s enabled=%s",
+            "Loaded message filters path=%s allow=%s reject=%s",
             self.config_path,
-            len(self._rules),
             enabled_count,
+            reject_count,
         )
 
 
@@ -178,6 +207,7 @@ def parse_box_signal(text: str) -> Optional[BoxSignal]:
     meta = tail.split("📈", 1)[0]
 
     rate_match = RATE_RE.search(text)
+    level_match = LEVEL_RE.search(text)
     views_match = VIEWS_RE.search(text)
     note_match = NOTE_RE.search(text)
     flags = tuple(FLAG_RE.findall(tail))
@@ -190,6 +220,7 @@ def parse_box_signal(text: str) -> Optional[BoxSignal]:
         box_left=left,
         box_right=right,
         rate=float(rate_match.group("rate")) if rate_match else None,
+        level=int(level_match.group("level")) if level_match else None,
         views=int(views_match.group("views")) if views_match else None,
         flags=flags,
         country_codes=country_codes,
@@ -198,15 +229,27 @@ def parse_box_signal(text: str) -> Optional[BoxSignal]:
     )
 
 
-def _load_rules(path: Path) -> List[MessageFilterRule]:
+def _load_rules(path: Path) -> Tuple[Tuple[MessageFilterRule, ...], Tuple[RejectFilterRule, ...]]:
     with path.open(encoding="utf-8") as file:
         raw_config = json.load(file)
 
-    raw_rules = raw_config.get("filters", raw_config) if isinstance(raw_config, dict) else raw_config
+    if isinstance(raw_config, dict):
+        raw_rules = raw_config.get("filters", [])
+        raw_reject = raw_config.get("reject", [])
+    else:
+        raw_rules = raw_config
+        raw_reject = []
+
     if not isinstance(raw_rules, list):
         raise RuntimeError("message filter config must be a list or object with filters=[]")
+    if not isinstance(raw_reject, list):
+        raise RuntimeError("message filter reject must be a list")
 
-    return [_parse_rule(raw_rule, index) for index, raw_rule in enumerate(raw_rules)]
+    allow = tuple(_parse_rule(raw_rule, index) for index, raw_rule in enumerate(raw_rules))
+    reject = tuple(
+        _parse_reject_rule(raw_rule, index) for index, raw_rule in enumerate(raw_reject)
+    )
+    return allow, reject
 
 
 def _parse_rule(raw_rule: Dict[str, Any], index: int) -> MessageFilterRule:
@@ -226,6 +269,8 @@ def _parse_rule(raw_rule: Dict[str, Any], index: int) -> MessageFilterRule:
         badges=_as_tuple(raw_rule.get("badges") or raw_rule.get("badge")),
         min_rate=_optional_float(raw_rule.get("min_rate")),
         max_rate=_optional_float(raw_rule.get("max_rate")),
+        min_level=_optional_int(raw_rule.get("min_level")),
+        max_level=_optional_int(raw_rule.get("max_level")),
         min_views=_optional_int(raw_rule.get("min_views")),
         max_views=_optional_int(raw_rule.get("max_views")),
         note_contains=_as_tuple(raw_rule.get("note_contains")),
@@ -237,6 +282,50 @@ def _parse_rule(raw_rule: Dict[str, Any], index: int) -> MessageFilterRule:
         ),
         order=index,
     )
+
+
+def _parse_reject_rule(raw_rule: Dict[str, Any], index: int) -> RejectFilterRule:
+    if not isinstance(raw_rule, dict):
+        raise RuntimeError(f"reject filter #{index + 1} must be an object")
+
+    return RejectFilterRule(
+        name=str(raw_rule.get("name") or f"reject_{index + 1}"),
+        enabled=bool(raw_rule.get("enabled", True)),
+        text_contains=_as_tuple(raw_rule.get("text_contains")),
+        comment_contains=_as_tuple(
+            raw_rule.get("comment_contains") or raw_rule.get("chat_contains")
+        ),
+        text_regex=(
+            str(raw_rule.get("text_regex")).strip()
+            if raw_rule.get("text_regex") not in (None, "")
+            else None
+        ),
+        order=index,
+    )
+
+
+def _evaluate_reject_rule(text: str, rule: RejectFilterRule) -> Tuple[bool, str]:
+    """Return (rejected, reason). rejected=True means do NOT forward."""
+    if rule.comment_contains:
+        comment = _comment_text(text)
+        hits = [value for value in rule.comment_contains if value and value in comment]
+        if hits:
+            return True, f"rejected:{rule.name}:comment"
+
+    if rule.text_contains:
+        hits = [value for value in rule.text_contains if value and value in text]
+        if hits:
+            return True, f"rejected:{rule.name}:text"
+
+    if rule.text_regex and re.search(rule.text_regex, text, re.IGNORECASE):
+        return True, f"rejected:{rule.name}:regex"
+
+    return False, "reject_not_matched"
+
+
+def _comment_text(text: str) -> str:
+    lines = [match.group(0) for match in COMMENT_LINE_RE.finditer(text or "")]
+    return "\n".join(lines)
 
 
 def _evaluate_rule(
@@ -276,6 +365,16 @@ def _evaluate_rule(
 
     if rule.max_rate is not None and (signal.rate is None or signal.rate > rule.max_rate):
         return False, "max_rate"
+
+    if rule.min_level is not None and (
+        signal.level is None or signal.level < rule.min_level
+    ):
+        return False, "min_level"
+
+    if rule.max_level is not None and (
+        signal.level is None or signal.level > rule.max_level
+    ):
+        return False, "max_level"
 
     if rule.min_views is not None and (
         signal.views is None or signal.views < rule.min_views

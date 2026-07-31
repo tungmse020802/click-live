@@ -1,0 +1,91 @@
+# Standalone app-automation — go-ios only (no Appium / Xcode / wda_control_panel).
+
+server:
+  host: 0.0.0.0
+  port: 8788
+
+device:
+  udid: ""
+  wda_port: 8100
+  # Empty = use bundled resources/bin/<os>/ios
+  go_ios_path: ""
+  wda_bundle_id: com.clicklive.WebDriverAgentRunner.xctrunner
+  wda_testrunner_bundle_id: com.clicklive.WebDriverAgentRunner.xctrunner
+  wda_xctestconfig: WebDriverAgentRunner.xctest
+  # Empty = resources/ipa/WebDriverAgentRunner.ipa
+  wda_ipa_path: ""
+  auto_start_wda: false
+  auto_start_tunnel: false
+  # iOS 17+ without sudo
+  tunnel_userspace: true
+  install_ipa_if_missing: true
+
+apps:
+  expressvpn_bundle_id: com.expressvpn.ExpressVPN
+  tiktok_bundle_id: com.zhiliaoapp.musically
+
+expressvpn:
+  connect_labels:
+    - Connect
+    - Kết nối
+    - "ON"
+  disconnect_labels:
+    - Disconnect
+    - Ngắt kết nối
+    - "OFF"
+  connected_texts:
+    - Connected
+    - Đã kết nối
+    - Protected
+  preferred_location: ""
+  location_search_labels:
+    - Choose Location
+    - Locations
+    - Chọn vị trí
+  connect_timeout_seconds: 90
+  settle_seconds: 2
+  power_button_x_ratio: 0.50
+  power_button_y_ratio: 0.55
+
+tiktok_signup:
+  method: email
+  birthday: "1998-05-12"
+  accounts:
+    - email: "you+test1@example.com"
+      password: "ChangeMe_123!"
+      username: ""
+  open_labels:
+    - Sign up
+    - Đăng ký
+    - Create account
+    - Tạo tài khoản
+  continue_labels:
+    - Continue
+    - Next
+    - Tiếp
+    - Tiếp tục
+    - Agree and continue
+  email_option_labels:
+    - Use phone or email
+    - Use email
+    - Email
+    - Số điện thoại hoặc email
+  phone_option_labels:
+    - Use phone or email
+    - Phone
+    - Số điện thoại
+  otp_wait_seconds: 300
+  step_delay_seconds: 1.2
+
+automation:
+  screenshot_dir: captures
+  job_timeout_seconds: 900
+  dismiss_alerts: true
+  alert_accept_labels:
+    - Allow
+    - OK
+    - Cho phép
+    - Đồng ý
+    - Continue
+    - Not Now
+    - Để sau

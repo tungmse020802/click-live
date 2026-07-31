@@ -1,0 +1,16 @@
+{
+  "name": "click-live-desktop-tool",
+  "version": "0.1.0",
+  "description": "Mở countdown link từ queue UI — mỗi click một tab, tự đóng sau 30s",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "check": "node --check src/main.js && node --check src/server.js"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^33.4.11"
+  }
+}

@@ -75,4 +75,34 @@ def ensure_device_cookie(context: BrowserContext, page: Page | None = None) -> N
 def read_device_cookie(context: BrowserContext) -> str | None:
     cookies = context.cookies("https://thanhtai.io")
     match = next((cookie for cookie in cookies if cookie["name"] == "device_id"), None)
-    return match["value"] if match else None
+    value = (match or {}).get("value") or ""
+    return value or None
+
+
+def ensure_device_cookie_if_missing(context: BrowserContext, page: Page | None = None) -> str | None:
+    """Add device_id only when absent. Never clears profile or other cookies."""
+    current = read_device_cookie(context)
+    if current:
+        return current
+    if not DEVICE_ID:
+        return None
+
+    if page is None:
+        page = context.pages[0] if context.pages else context.new_page()
+
+    device_cookie = {
+        "name": "device_id",
+        "value": DEVICE_ID,
+        "domain": "thanhtai.io",
+        "path": "/",
+        "secure": True,
+        "httpOnly": True,
+        "sameSite": "Lax",
+        "expires": int(time.time()) + 365 * 24 * 3600,
+    }
+    context.add_cookies([device_cookie])
+
+    client = context.new_cdp_session(page)
+    client.send("Network.enable")
+    client.send("Network.setCookie", device_cookie)
+    return read_device_cookie(context)

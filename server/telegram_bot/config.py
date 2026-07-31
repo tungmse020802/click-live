@@ -25,6 +25,7 @@ class BotConfig:
     queue_poll_interval_seconds: float
     queue_max_attempts: int
     queue_retry_delay_seconds: int
+    broadcast_workers: int
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,8 @@ class TelegramClientConfig:
     queue_max_age_seconds: int
     history_poll_seconds: float
     history_poll_limit: int
+    queue_only_newest: bool
+    supersede_pending: bool
     filter_enabled: bool
     filter_config_path: str
     filter_reload_seconds: float
@@ -118,6 +121,8 @@ class QueueUiConfig:
     auth_username: str
     auth_password: str
     auth_secret: str
+    desktop_pull_token: str
+    desktop_dedup_seconds: int
 
 
 def _parse_user_ids(raw_value: str) -> FrozenSet[int]:
@@ -338,6 +343,7 @@ def load_config() -> BotConfig:
         queue_poll_interval_seconds=_parse_float("BOT_QUEUE_POLL_INTERVAL_SECONDS", 0.1, 0.05),
         queue_max_attempts=_parse_int("BOT_QUEUE_MAX_ATTEMPTS", 5, 1),
         queue_retry_delay_seconds=_parse_int("BOT_QUEUE_RETRY_DELAY_SECONDS", 2, 0),
+        broadcast_workers=_parse_int("BOT_BROADCAST_WORKERS", 4, 1),
     )
 
 
@@ -355,7 +361,7 @@ def load_web_reader_config() -> WebReaderConfig:
         queue_default_priority=_parse_int("BOT_QUEUE_DEFAULT_PRIORITY", 100, 0),
         queue_max_attempts=_parse_int("BOT_QUEUE_MAX_ATTEMPTS", 5, 1),
         queue_max_items=_parse_int("BOT_QUEUE_MAX_ITEMS", 1000, 100),
-        queue_ttl_seconds=_parse_int("BOT_QUEUE_TTL_SECONDS", 600, 60),
+        queue_ttl_seconds=_parse_int("BOT_QUEUE_TTL_SECONDS", 1800, 60),
         telegram_web_url=telegram_web_url,
         telegram_web_profile_dir=_resolve_path(
             os.environ.get("TELEGRAM_WEB_PROFILE_DIR", ""),
@@ -428,7 +434,7 @@ def load_telegram_client_config() -> TelegramClientConfig:
         queue_default_priority=_parse_int("BOT_QUEUE_DEFAULT_PRIORITY", 100, 0),
         queue_max_attempts=_parse_int("BOT_QUEUE_MAX_ATTEMPTS", 5, 1),
         queue_max_items=_parse_int("BOT_QUEUE_MAX_ITEMS", 1000, 100),
-        queue_ttl_seconds=_parse_int("BOT_QUEUE_TTL_SECONDS", 600, 60),
+        queue_ttl_seconds=_parse_int("BOT_QUEUE_TTL_SECONDS", 1800, 60),
         api_id=api_id,
         api_hash=api_hash,
         phone=os.environ.get("TELEGRAM_PHONE", "").strip(),
@@ -454,7 +460,15 @@ def load_telegram_client_config() -> TelegramClientConfig:
         ),
         queue_max_age_seconds=_parse_int("TELEGRAM_CLIENT_QUEUE_MAX_AGE_SECONDS", 300, 1),
         history_poll_seconds=_parse_float("TELEGRAM_CLIENT_HISTORY_POLL_SECONDS", 2.0, 0.5),
-        history_poll_limit=_parse_int("TELEGRAM_CLIENT_HISTORY_POLL_LIMIT", 20, 1),
+        history_poll_limit=_parse_int("TELEGRAM_CLIENT_HISTORY_POLL_LIMIT", 1, 1),
+        queue_only_newest=_parse_bool(
+            os.environ.get("TELEGRAM_CLIENT_QUEUE_ONLY_NEWEST", ""),
+            True,
+        ),
+        supersede_pending=_parse_bool(
+            os.environ.get("TELEGRAM_CLIENT_SUPERSEDE_PENDING", ""),
+            False,
+        ),
         filter_enabled=_parse_bool(
             os.environ.get("TELEGRAM_CLIENT_FILTER_ENABLED", ""),
             _parse_bool(os.environ.get("TELEGRAM_WEB_FILTER_ENABLED", ""), False),
@@ -494,6 +508,10 @@ def load_queue_ui_config() -> QueueUiConfig:
     auth_username = (os.environ.get("QUEUE_UI_USERNAME", "admin").strip() or "admin")
     auth_enabled = bool(auth_password)
     auth_secret = load_or_create_auth_secret(BASE_DIR, auth_enabled)
+    desktop_pull_token = (
+        os.environ.get("DESKTOP_PULL_TOKEN", "").strip()
+        or auth_secret[:40]
+    )
 
     return QueueUiConfig(
         log_level=os.environ.get("BOT_LOG_LEVEL", "INFO").strip().upper(),
@@ -501,8 +519,8 @@ def load_queue_ui_config() -> QueueUiConfig:
         host=os.environ.get("QUEUE_UI_HOST", "127.0.0.1").strip() or "127.0.0.1",
         port=_parse_int("QUEUE_UI_PORT", 8787, 1),
         limit=_parse_int("QUEUE_UI_LIMIT", 100, 1),
-        refresh_seconds=_parse_float("QUEUE_UI_REFRESH_SECONDS", 0.5, 0.2),
-        queue_ttl_seconds=_parse_int("BOT_QUEUE_TTL_SECONDS", 600, 60),
+        refresh_seconds=_parse_float("QUEUE_UI_REFRESH_SECONDS", 3, 2),
+        queue_ttl_seconds=_parse_int("BOT_QUEUE_TTL_SECONDS", 1800, 60),
         queue_lease_seconds=_parse_int("BOT_QUEUE_LEASE_SECONDS", 90, 1),
         queue_retry_delay_seconds=_parse_int("BOT_QUEUE_RETRY_DELAY_SECONDS", 2, 0),
         filter_config_path=_resolve_path(
@@ -513,4 +531,6 @@ def load_queue_ui_config() -> QueueUiConfig:
         auth_username=auth_username,
         auth_password=auth_password,
         auth_secret=auth_secret,
+        desktop_pull_token=desktop_pull_token,
+        desktop_dedup_seconds=_parse_int("DESKTOP_OPEN_DEDUP_SECONDS", 90, 10),
     )

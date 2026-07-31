@@ -148,6 +148,231 @@ class ChatDatabase:
                 """
             )
             self._migrate_broadcast_groups(conn)
+            self._migrate_bot_tables(conn)
+
+    def _migrate_bot_tables(self, conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS broadcast_bots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                short_name TEXT NOT NULL UNIQUE,
+                token TEXT NOT NULL DEFAULT '',
+                telegram_username TEXT,
+                telegram_display_name TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_broadcast_bots_enabled
+                ON broadcast_bots(enabled, sort_order, short_name);
+
+            CREATE TABLE IF NOT EXISTS watch_group_bots (
+                watch_chat_id TEXT NOT NULL,
+                bot_id INTEGER NOT NULL,
+                PRIMARY KEY (watch_chat_id, bot_id),
+                FOREIGN KEY (bot_id) REFERENCES broadcast_bots(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_watch_group_bots_chat
+                ON watch_group_bots(watch_chat_id);
+            """
+        )
+
+    def ensure_broadcast_bot_slots(self, slot_count: int = 24) -> None:
+        now = _now()
+        with self._connect() as conn:
+            for index in range(1, slot_count + 1):
+                short_name = f"b{index:02d}"
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO broadcast_bots(
+                        short_name, token, enabled, sort_order, created_at, updated_at
+                    )
+                    VALUES (?, '', 1, ?, ?, ?)
+                    """,
+                    (short_name, index, now, now),
+                )
+
+    def delete_broadcast_bots_without_tokens(self) -> int:
+        with self._connect() as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
+            cursor = conn.execute(
+                """
+                DELETE FROM broadcast_bots
+                WHERE trim(COALESCE(token, '')) = ''
+                """
+            )
+            return int(cursor.rowcount or 0)
+
+    def seed_broadcast_bots_from_tokens(self, tokens: List[str]) -> int:
+        normalized_tokens = [(token or "").strip() for token in tokens if (token or "").strip()]
+        if not normalized_tokens:
+            self.delete_broadcast_bots_without_tokens()
+            return 0
+
+        self.ensure_broadcast_bot_slots(len(normalized_tokens))
+        now = _now()
+        bots = self.list_broadcast_bots(include_disabled=True)
+        imported = 0
+
+        for index, slot in enumerate(bots):
+            token = normalized_tokens[index] if index < len(normalized_tokens) else ""
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE broadcast_bots
+                    SET token = ?, enabled = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (token, 1 if token else 0, now, int(slot["id"])),
+                )
+            if token:
+                imported += 1
+
+        self.delete_broadcast_bots_without_tokens()
+        return imported
+
+    def list_broadcast_bots(self, *, include_disabled: bool = True) -> List[Dict[str, Any]]:
+        query = """
+            SELECT id, short_name, token, telegram_username, telegram_display_name,
+                   enabled, sort_order, created_at, updated_at
+            FROM broadcast_bots
+        """
+        if not include_disabled:
+            query += " WHERE enabled = 1"
+        query += " ORDER BY sort_order ASC, short_name ASC"
+        with self._connect() as conn:
+            rows = conn.execute(query).fetchall()
+        return [_row_to_broadcast_bot(row) for row in rows]
+
+    def replace_broadcast_bots(self, bots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        now = _now()
+        normalized = [
+            bot
+            for bot in (_normalize_broadcast_bot(raw, now) for raw in bots)
+            if bot["token"]
+        ]
+        if normalized:
+            self.ensure_broadcast_bot_slots(len(normalized))
+        with self._connect() as conn:
+            for bot in normalized:
+                conn.execute(
+                    """
+                    UPDATE broadcast_bots
+                    SET token = ?, telegram_username = ?, telegram_display_name = ?,
+                        enabled = ?, sort_order = ?, updated_at = ?
+                    WHERE short_name = ?
+                    """,
+                    (
+                        bot["token"],
+                        bot.get("telegram_username"),
+                        bot.get("telegram_display_name"),
+                        1 if bot.get("enabled", True) else 0,
+                        bot["sort_order"],
+                        now,
+                        bot["short_name"],
+                    ),
+                )
+        self.delete_broadcast_bots_without_tokens()
+        return self.list_broadcast_bots(include_disabled=True)
+
+    def list_enabled_broadcast_bot_tokens(self) -> List[Dict[str, Any]]:
+        return [
+            bot
+            for bot in self.list_broadcast_bots(include_disabled=False)
+            if (bot.get("token") or "").strip()
+        ]
+
+    def list_watch_group_bot_map(self) -> Dict[str, List[int]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT watch_chat_id, bot_id
+                FROM watch_group_bots
+                ORDER BY watch_chat_id ASC, bot_id ASC
+                """
+            ).fetchall()
+        result: Dict[str, List[int]] = {}
+        for row in rows:
+            chat_id = str(row["watch_chat_id"])
+            result.setdefault(chat_id, []).append(int(row["bot_id"]))
+        return result
+
+    def set_watch_group_bots(self, watch_chat_id: str, bot_ids: List[int]) -> None:
+        from config import normalize_client_chat_ref
+
+        chat_id = normalize_client_chat_ref(str(watch_chat_id or "").strip())
+        if not chat_id:
+            return
+        unique_ids = []
+        for bot_id in bot_ids or []:
+            try:
+                value = int(bot_id)
+            except (TypeError, ValueError):
+                continue
+            if value not in unique_ids:
+                unique_ids.append(value)
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM watch_group_bots WHERE watch_chat_id = ?",
+                (chat_id,),
+            )
+            for bot_id in unique_ids:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO watch_group_bots(watch_chat_id, bot_id)
+                    VALUES (?, ?)
+                    """,
+                    (chat_id, bot_id),
+                )
+
+    def get_bot_ids_for_watch_chat_id(self, watch_chat_id: str) -> List[int]:
+        from config import normalize_client_chat_ref
+
+        chat_id = normalize_client_chat_ref(str(watch_chat_id or "").strip())
+        if not chat_id:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT bot_id
+                FROM watch_group_bots
+                WHERE watch_chat_id = ?
+                ORDER BY bot_id ASC
+                """,
+                (chat_id,),
+            ).fetchall()
+        return [int(row["bot_id"]) for row in rows]
+
+    def list_enabled_bots_for_watch_chat_id(self, watch_chat_id: str) -> List[Dict[str, Any]]:
+        bot_ids = self.get_bot_ids_for_watch_chat_id(watch_chat_id)
+        if not bot_ids:
+            return []
+        enabled = {
+            int(bot["id"]): bot
+            for bot in self.list_broadcast_bots(include_disabled=False)
+            if (bot.get("token") or "").strip()
+        }
+        return [enabled[bot_id] for bot_id in bot_ids if bot_id in enabled]
+
+    def update_broadcast_bot_profile(
+        self,
+        bot_id: int,
+        *,
+        telegram_username: Optional[str],
+        telegram_display_name: Optional[str],
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE broadcast_bots
+                SET telegram_username = ?, telegram_display_name = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (telegram_username, telegram_display_name, _now(), bot_id),
+            )
 
     def _migrate_broadcast_groups(self, conn: sqlite3.Connection) -> None:
         columns = {
@@ -435,7 +660,11 @@ class ChatDatabase:
                 ORDER BY name ASC, id ASC
                 """
             ).fetchall()
-        return [_row_to_watch_group(row) for row in rows]
+        bot_map = self.list_watch_group_bot_map()
+        groups = [_row_to_watch_group(row) for row in rows]
+        for group in groups:
+            group["bot_ids"] = bot_map.get(group["chat_id"], [])
+        return groups
 
     def list_enabled_watch_groups(self) -> List[Dict[str, Any]]:
         with self._connect() as conn:
@@ -452,6 +681,14 @@ class ChatDatabase:
     def replace_watch_groups(self, groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         now = _now()
         normalized = [_normalize_watch_group(raw, now) for raw in groups]
+        bot_assignments = {
+            group["chat_id"]: [
+                int(bot_id)
+                for bot_id in (raw.get("bot_ids") or [])
+                if str(bot_id).strip().isdigit()
+            ]
+            for raw, group in zip(groups, normalized)
+        }
         with self._connect() as conn:
             conn.execute("DELETE FROM watch_groups")
             for group in normalized:
@@ -468,6 +705,8 @@ class ChatDatabase:
                         now,
                     ),
                 )
+        for chat_id, bot_ids in bot_assignments.items():
+            self.set_watch_group_bots(chat_id, bot_ids)
         return self.list_watch_groups()
 
     def delete_watch_group(self, group_id: int) -> bool:
@@ -524,6 +763,22 @@ class ChatDatabase:
                     AND room_id = ?
                 """,
                 (now, now, room_id),
+            )
+            return int(cursor.rowcount)
+
+    def supersede_all_pending(self) -> int:
+        now = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE message_queue
+                SET status = 'done',
+                    last_error = 'superseded by newer message',
+                    completed_at = ?,
+                    updated_at = ?
+                WHERE status = 'pending'
+                """,
+                (now, now),
             )
             return int(cursor.rowcount)
 
@@ -610,7 +865,11 @@ class ChatDatabase:
             conn.close()
 
     def claim_next_fair(self, consumer_id: str, lease_seconds: int) -> Optional[QueueJob]:
-        """Claim newest pending job from the room waiting longest (fair across rooms)."""
+        """Claim newest pending job from a free room (fair across listening groups).
+
+        Prefers rooms that do not already have a job in `processing`, so multiple
+        workers can run one logical queue per watch room in parallel.
+        """
         now = _now()
         conn = self._connect()
         try:
@@ -630,11 +889,36 @@ class ChatDatabase:
                 ) rooms ON rooms.room_id = q.room_id
                 WHERE q.status = 'pending'
                     AND q.available_at <= ?
+                    AND q.room_id NOT IN (
+                        SELECT room_id FROM message_queue WHERE status = 'processing'
+                    )
                 ORDER BY rooms.room_latest ASC, q.priority DESC, q.created_at DESC
                 LIMIT 1
                 """,
                 (now, now),
             ).fetchone()
+
+            # Fallback when every room already has an in-flight job.
+            if not row:
+                row = conn.execute(
+                    """
+                    SELECT q.id
+                    FROM message_queue q
+                    INNER JOIN (
+                        SELECT room_id, MAX(created_at) AS room_latest
+                        FROM message_queue
+                        WHERE status = 'pending'
+                            AND available_at <= ?
+                        GROUP BY room_id
+                    ) rooms ON rooms.room_id = q.room_id
+                    WHERE q.status = 'pending'
+                        AND q.available_at <= ?
+                    ORDER BY rooms.room_latest ASC, q.priority DESC, q.created_at DESC
+                    LIMIT 1
+                    """,
+                    (now, now),
+                ).fetchone()
+
             if not row:
                 conn.commit()
                 return None
@@ -662,6 +946,29 @@ class ChatDatabase:
             raise
         finally:
             conn.close()
+
+    def count_pending_rooms(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(DISTINCT room_id) AS c
+                FROM message_queue
+                WHERE status IN ('pending', 'processing')
+                """
+            ).fetchone()
+        return int(row["c"] or 0) if row else 0
+
+    def list_active_queue_room_ids(self) -> List[int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT room_id
+                FROM message_queue
+                WHERE status IN ('pending', 'processing')
+                ORDER BY room_id ASC
+                """
+            ).fetchall()
+        return [int(row["room_id"]) for row in rows]
 
     def skip_older_pending_for_room(self, room_id: int, before_job_id: int) -> int:
         now = _now()
@@ -1122,6 +1429,10 @@ class ChatDatabase:
             raise RuntimeError(f"Queue job not found: {job_id}")
         return row
 
+    def vacuum(self) -> None:
+        with self._connect() as conn:
+            conn.execute("VACUUM")
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=30)
         conn.row_factory = sqlite3.Row
@@ -1202,6 +1513,44 @@ def _optional_float(value: Optional[Any]) -> Optional[float]:
 
 def _now() -> float:
     return time.time()
+
+
+def _row_to_broadcast_bot(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "short_name": row["short_name"],
+        "token": row["token"] or "",
+        "telegram_username": row["telegram_username"],
+        "telegram_display_name": row["telegram_display_name"],
+        "enabled": bool(row["enabled"]),
+        "sort_order": int(row["sort_order"]),
+        "created_at": float(row["created_at"]),
+        "updated_at": float(row["updated_at"]),
+    }
+
+
+def _normalize_broadcast_bot(raw: Dict[str, Any], now: float) -> Dict[str, Any]:
+    short_name = str(raw.get("short_name") or "").strip().lower()
+    if not short_name:
+        raise ValueError("broadcast bot short_name is required")
+    sort_order = raw.get("sort_order")
+    try:
+        sort_value = int(sort_order)
+    except (TypeError, ValueError):
+        match = None
+        if short_name.startswith("b") and short_name[1:].isdigit():
+            sort_value = int(short_name[1:])
+        else:
+            sort_value = 0
+    return {
+        "short_name": short_name,
+        "token": str(raw.get("token") or "").strip(),
+        "telegram_username": str(raw.get("telegram_username") or "").strip() or None,
+        "telegram_display_name": str(raw.get("telegram_display_name") or "").strip() or None,
+        "enabled": bool(raw.get("enabled", True)),
+        "sort_order": sort_value,
+        "created_at": float(raw.get("created_at") or now),
+    }
 
 
 def _row_to_watch_group(row: sqlite3.Row) -> Dict[str, Any]:

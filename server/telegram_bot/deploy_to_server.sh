@@ -5,7 +5,7 @@
 #   bash deploy_to_server.sh
 #
 # Tuỳ chọn env:
-#   SERVER_HOST=103.38.237.7 SERVER_USER=root SERVER_PASS='...' bash deploy_to_server.sh
+#   SERVER_HOST=160.30.19.215 SERVER_USER=root SERVER_PASS='...' bash deploy_to_server.sh
 
 set -euo pipefail
 
@@ -13,7 +13,7 @@ cd "$(dirname "$0")"
 ROOT_DIR="$(pwd)"
 REMOTE_DIR="${REMOTE_DIR:-/root/click-live/server/telegram_bot}"
 
-SERVER_HOST="${SERVER_HOST:-103.38.237.7}"
+SERVER_HOST="${SERVER_HOST:-160.30.19.215}"
 SERVER_USER="${SERVER_USER:-root}"
 SERVER_PASS="${SERVER_PASS:-}"
 
@@ -30,8 +30,9 @@ if [[ -z "$SERVER_PASS" ]]; then
   echo
 fi
 
-SSH=(sshpass -p "$SERVER_PASS" ssh -o StrictHostKeyChecking=no "${SERVER_USER}@${SERVER_HOST}")
-RSYNC_SSH="sshpass -p ${SERVER_PASS} ssh -o StrictHostKeyChecking=no"
+SSH_OPTS=(-o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no)
+SSH=(sshpass -p "$SERVER_PASS" ssh "${SSH_OPTS[@]}" "${SERVER_USER}@${SERVER_HOST}")
+RSYNC_SSH="sshpass -p ${SERVER_PASS} ssh ${SSH_OPTS[*]}"
 
 echo "==> Rsync code -> ${SERVER_USER}@${SERVER_HOST}:${REMOTE_DIR}"
 rsync -az --delete \
@@ -82,14 +83,26 @@ PY
 }
 
 upsert_env "QUEUE_UI_HOST" "0.0.0.0"
+upsert_env "QUEUE_UI_REFRESH_SECONDS" "3"
+upsert_env "DESKTOP_OPEN_DEDUP_SECONDS" "90"
 upsert_env "QUEUE_UI_USERNAME" "$QUEUE_UI_USERNAME"
 upsert_env "QUEUE_UI_PASSWORD" "$QUEUE_UI_PASSWORD"
 upsert_env "BOT_BROADCAST_ENABLED" "true"
+upsert_env "BOT_BROADCAST_WORKERS" "4"
 upsert_env "TELEGRAM_CLIENT_SESSION" "data/telegram_client.session"
 upsert_env "TELEGRAM_CLIENT_HISTORY_POLL_SECONDS" "1"
 upsert_env "BOT_QUEUE_POLL_INTERVAL_SECONDS" "0.05"
+upsert_env "BOT_QUEUE_TTL_SECONDS" "1800"
+upsert_env "BOT_LOG_LEVEL" "ERROR"
+upsert_env "TELEGRAM_CLIENT_HISTORY_POLL_LIMIT" "1"
+upsert_env "TELEGRAM_CLIENT_QUEUE_ONLY_NEWEST" "true"
+upsert_env "TELEGRAM_CLIENT_SUPERSEDE_PENDING" "false"
+upsert_env "TELEGRAM_CLIENT_FILTER_ENABLED" "true"
+upsert_env "TELEGRAM_CLIENT_FILTER_CONFIG_PATH" "data/message_filters.json"
+upsert_env "DEEPLINK_OPEN_BASE_URL" "http://${SERVER_HOST}:8792"
+upsert_env "DEEPLINK_API_BASE_URL" "http://127.0.0.1:8792"
 
-sshpass -p "$SERVER_PASS" scp -o StrictHostKeyChecking=no "$TMP_ENV" \
+sshpass -p "$SERVER_PASS" scp "${SSH_OPTS[@]}" "$TMP_ENV" \
   "${SERVER_USER}@${SERVER_HOST}:${REMOTE_DIR}/.env"
 
 echo "==> Setup venv + systemd on server"
@@ -110,6 +123,15 @@ install -m 644 systemd/click-live-queue.service /etc/systemd/system/
 install -m 644 systemd/click-live-telegram-reader.service /etc/systemd/system/
 install -m 644 systemd/click-live-broadcast.service /etc/systemd/system/
 systemctl daemon-reload
+
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/click-live.conf <<'JOURNAL'
+[Journal]
+SystemMaxUse=100M
+MaxRetentionSec=3day
+JOURNAL
+systemctl restart systemd-journald || true
+journalctl --vacuum-size=100M || true
 
 # Dừng process cũ chạy ngoài systemd
 pkill -f "python3 queue_ui.py" 2>/dev/null || true

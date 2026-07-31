@@ -17,6 +17,7 @@ from config import (
 from db import ChatDatabase
 from message_filter import MessageFilterEngine, parse_box_signal
 from deeplink_resolve import enrich_payload_with_deeplink
+from logging_setup import setup_logging
 from message_format import telethon_message_to_html
 
 
@@ -132,7 +133,7 @@ class TelethonReader:
                     )
                 else:
                     self._last_message_ids[target.room_key] = 0
-                logger.info(
+                logger.debug(
                     "Watching Telegram target label=%s room=%s entity=%s title=%r last_message_id=%s",
                     target.label,
                     target.room_key,
@@ -151,7 +152,7 @@ class TelethonReader:
                 except Exception:
                     logger.exception("Failed to handle Telegram client message chat_id=%s", event.chat_id)
 
-            logger.info("Telegram client reader ready targets=%s", len(entities))
+            logger.warning("Telegram client reader ready targets=%s", len(entities))
             heartbeat_task = asyncio.create_task(
                 self._heartbeat(client, len(entities), target_signature)
             )
@@ -189,7 +190,7 @@ class TelethonReader:
     ) -> None:
         while True:
             await asyncio.sleep(30)
-            logger.info(
+            logger.debug(
                 "Telegram client reader heartbeat connected=%s targets=%s",
                 client.is_connected(),
                 target_count,
@@ -209,15 +210,28 @@ class TelethonReader:
             for target, entity, peer_id in watch_targets:
                 try:
                     min_id = self._last_message_ids.get(target.room_key, 0)
-                    messages = []
-                    async for message in client.iter_messages(
-                        entity,
-                        limit=self.config.history_poll_limit,
-                        min_id=min_id,
-                    ):
-                        messages.append(message)
-                    for message in reversed(messages):
-                        await self._handle_message(message, peer_id)
+                    limit = 1 if self.config.queue_only_newest else self.config.history_poll_limit
+                    if self.config.queue_only_newest:
+                        newest = None
+                        async for message in client.iter_messages(
+                            entity,
+                            limit=limit,
+                            min_id=min_id,
+                        ):
+                            newest = message
+                            break
+                        if newest is not None:
+                            await self._handle_message(newest, peer_id)
+                    else:
+                        messages = []
+                        async for message in client.iter_messages(
+                            entity,
+                            limit=limit,
+                            min_id=min_id,
+                        ):
+                            messages.append(message)
+                        for message in reversed(messages):
+                            await self._handle_message(message, peer_id)
                 except Exception:
                     logger.exception("Failed to poll Telegram history target=%s", target.label)
             await asyncio.sleep(self.config.history_poll_seconds)
@@ -233,7 +247,7 @@ class TelethonReader:
             for raw_id in _message_chat_ids(message, event_chat_id):
                 if raw_id not in self._unknown_chat_ids_logged:
                     self._unknown_chat_ids_logged.add(raw_id)
-                    logger.info("Skipping Telegram message for unknown chat_id=%s", raw_id)
+                    logger.debug("Skipping Telegram message for unknown chat_id=%s", raw_id)
             return
 
         last_seen = self._last_message_ids.get(target.room_key, 0)
@@ -242,7 +256,7 @@ class TelethonReader:
 
         try:
             if message.out and not self.config.include_outgoing:
-                logger.info(
+                logger.debug(
                     "Skipping outgoing Telegram client message room=%s message=%s include_outgoing=false",
                     target.room_key,
                     message.id,
@@ -251,7 +265,7 @@ class TelethonReader:
 
             timestamp_ms = _message_timestamp_ms(message.date)
             if not _is_recent_message(timestamp_ms, self.config.queue_max_age_seconds):
-                logger.info(
+                logger.debug(
                     "Skipped stale Telegram client message room=%s message=%s timestamp_ms=%s",
                     target.room_key,
                     message.id,
@@ -295,13 +309,14 @@ class TelethonReader:
                 return
 
             if direction == "incoming" and self.config.enqueue:
-                superseded = self.db.supersede_all_pending_for_room(room_id)
-                if superseded:
-                    logger.debug(
-                        "Superseded pending queue jobs room=%s count=%s before enqueue",
-                        target.room_key,
-                        superseded,
-                    )
+                if self.config.supersede_pending:
+                    superseded = self.db.supersede_all_pending_for_room(room_id)
+                    if superseded:
+                        logger.debug(
+                            "Superseded pending queue jobs room=%s count=%s before enqueue",
+                            target.room_key,
+                            superseded,
+                        )
                 queue_priority = (
                     filter_result.priority
                     if filter_result.priority is not None
@@ -340,7 +355,7 @@ class TelethonReader:
                     payload=queue_payload,
                     max_attempts=self.config.queue_max_attempts,
                 )
-                logger.info(
+                logger.debug(
                     "Enqueued Telegram client message room=%s message=%s queue=%s",
                     target.room_key,
                     message.id,
@@ -378,21 +393,13 @@ class TelethonReader:
             "messages": ttl_deleted["messages"] + size_deleted["messages"],
         }
         if deleted["queue"] or deleted["messages"]:
-            logger.info(
+            logger.debug(
                 "Pruned queue queue=%s messages=%s ttl=%ss max_items=%s",
                 deleted["queue"],
                 deleted["messages"],
                 self.config.queue_ttl_seconds,
                 self.config.queue_max_items,
             )
-
-
-def setup_logging(log_level: str) -> None:
-    level = getattr(logging, log_level, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
 
 
 def _entity_ref_value(entity_ref: str):
@@ -483,7 +490,7 @@ def _mask_phone(phone: str) -> str:
 async def async_main() -> None:
     config = load_telegram_client_config()
     setup_logging(config.log_level)
-    logger.info("Starting Telegram client reader session=%s", config.session_path)
+    logger.warning("Starting Telegram client reader session=%s", config.session_path)
     reader = TelethonReader(config=config, db=ChatDatabase(config.db_path))
     await reader.run()
 

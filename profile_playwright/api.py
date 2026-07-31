@@ -95,13 +95,19 @@ def _open_live_html(room_id: str) -> str:
 </html>"""
 
 
-def resolve_deeplink(url: str) -> dict[str, Any]:
+def resolve_deeplink(url: str, context: str = "") -> dict[str, Any]:
     clean_url = url.strip()
-    deeplink = decode_live_url(clean_url)
+    if not context:
+        context = clean_url
+    try:
+        code = extract_encoded_param(clean_url)
+    except ValueError:
+        code = ""
+    deeplink = decode_live_url(clean_url, context)
     return {
         "ok": True,
         "url": clean_url,
-        "code": extract_encoded_param(clean_url),
+        "code": code,
         "deeplink": deeplink,
     }
 
@@ -127,12 +133,12 @@ class DeeplinkApiHandler(BaseHTTPRequestHandler):
             return
         _html_response(self, 200, _open_live_html(room_id))
 
-    def _handle_deeplink(self, url: str) -> None:
+    def _handle_deeplink(self, url: str, context: str = "") -> None:
         if not url:
             _json_response(self, 400, {"ok": False, "error": "Missing url"})
             return
         try:
-            _json_response(self, 200, resolve_deeplink(url))
+            _json_response(self, 200, resolve_deeplink(url, context))
         except ValueError as exc:
             _json_response(self, 400, {"ok": False, "error": str(exc), "url": url})
         except Exception as exc:
@@ -149,7 +155,7 @@ class DeeplinkApiHandler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "service": "live-deeplink-api",
-                    "supports": ["i.junb.io.vn", "thanhtai.io", "open/live"],
+                    "supports": ["i.junb.io.vn", "thanhtai.io", "open/live", "playwright"],
                 },
             )
             return
@@ -163,7 +169,8 @@ class DeeplinkApiHandler(BaseHTTPRequestHandler):
             return
 
         url = (query.get("url") or [""])[0]
-        self._handle_deeplink(url)
+        context = (query.get("context") or [""])[0]
+        self._handle_deeplink(url, context)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
@@ -178,10 +185,19 @@ class DeeplinkApiHandler(BaseHTTPRequestHandler):
             return
 
         url = str(payload.get("url") or "").strip()
-        self._handle_deeplink(url)
+        context = str(payload.get("context") or "").strip()
+        self._handle_deeplink(url, context)
 
 
 def main() -> None:
+    try:
+        from thanhtai_playwright import warm_browser
+
+        warm_browser(headless=True)
+        print("Playwright browser warmed.")
+    except Exception as exc:
+        print(f"Playwright warm-up skipped: {exc}")
+
     server = ThreadingHTTPServer((HOST, PORT), DeeplinkApiHandler)
     print(f"Live deeplink API listening on http://{HOST}:{PORT}")
     print("GET  /api/deeplink?url=https://i.junb.io.vn/i/?b7YVmORSncRD4")

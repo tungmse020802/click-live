@@ -6,7 +6,7 @@
 #   SERVER_PASS='...' bash deploy_to_server.sh
 #
 # Env:
-#   SERVER_HOST=103.38.237.7
+#   SERVER_HOST=160.30.19.215
 #   SERVER_USER=root
 #   REMOTE_DIR=/root/click-live/profile_playwright
 
@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
 ROOT_DIR="$(pwd)"
 REMOTE_DIR="${REMOTE_DIR:-/root/click-live/profile_playwright}"
 
-SERVER_HOST="${SERVER_HOST:-103.38.237.7}"
+SERVER_HOST="${SERVER_HOST:-160.30.19.215}"
 SERVER_USER="${SERVER_USER:-root}"
 SERVER_PASS="${SERVER_PASS:-}"
 
@@ -30,8 +30,9 @@ if [[ -z "$SERVER_PASS" ]]; then
   echo
 fi
 
-SSH=(sshpass -p "$SERVER_PASS" ssh -o StrictHostKeyChecking=no "${SERVER_USER}@${SERVER_HOST}")
-RSYNC_SSH="sshpass -p ${SERVER_PASS} ssh -o StrictHostKeyChecking=no"
+SSH_OPTS=(-o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no)
+SSH=(sshpass -p "$SERVER_PASS" ssh "${SSH_OPTS[@]}" "${SERVER_USER}@${SERVER_HOST}")
+RSYNC_SSH="sshpass -p ${SERVER_PASS} ssh ${SSH_OPTS[*]}"
 
 echo "==> Rsync profile_playwright -> ${SERVER_USER}@${SERVER_HOST}:${REMOTE_DIR}"
 rsync -az \
@@ -47,7 +48,18 @@ rsync -az \
   "$ROOT_DIR/" "${SERVER_USER}@${SERVER_HOST}:${REMOTE_DIR}/"
 
 echo "==> Install systemd service"
-"${SSH[@]}" "mkdir -p ${REMOTE_DIR}/systemd"
+"${SSH[@]}" bash -s <<REMOTE_SETUP
+set -euo pipefail
+cd "${REMOTE_DIR}"
+if [[ ! -d .venv ]]; then
+  python3 -m venv .venv
+fi
+.venv/bin/pip install -q -U pip
+.venv/bin/pip install -q -r requirements.txt
+export PLAYWRIGHT_BROWSERS_PATH="${REMOTE_DIR}/.pw-browsers"
+.venv/bin/playwright install chromium
+mkdir -p systemd
+REMOTE_SETUP
 "${SSH[@]}" "cp ${REMOTE_DIR}/systemd/click-live-deeplink-api.service /etc/systemd/system/click-live-deeplink-api.service"
 "${SSH[@]}" "systemctl daemon-reload"
 "${SSH[@]}" "systemctl enable click-live-deeplink-api.service"
@@ -59,5 +71,7 @@ echo "==> Health check"
 "${SSH[@]}" "curl -s http://127.0.0.1:8792/health"
 echo
 "${SSH[@]}" "curl -s --get http://127.0.0.1:8792/api/deeplink --data-urlencode 'url=https://thanhtai.io/r/b7YVmORSncRD4'"
+echo
+"${SSH[@]}" "curl -s --get http://127.0.0.1:8792/api/deeplink --data-urlencode 'url=https://thanhtai.io/r/f4cb4b1649bf'"
 echo
 echo "Done. API: http://${SERVER_HOST}:8792/api/deeplink"

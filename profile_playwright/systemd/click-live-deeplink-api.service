@@ -9,9 +9,12 @@ WorkingDirectory=/root/click-live/profile_playwright
 Environment=PYTHONUNBUFFERED=1
 Environment=DEEPLINK_API_HOST=0.0.0.0
 Environment=DEEPLINK_API_PORT=8792
-ExecStart=/usr/bin/python3 /root/click-live/profile_playwright/api.py
+Environment=PLAYWRIGHT_BROWSERS_PATH=/root/click-live/profile_playwright/.pw-browsers
+Environment=THANHTAI_DEVICE_ID=device_3e95ba58-01a4-4622-bb11-286820dd05d9
+ExecStart=/root/click-live/profile_playwright/.venv/bin/python /root/click-live/profile_playwright/api.py
 Restart=always
-RestartSec=3
+RestartSec=5
+TimeoutStartSec=120
 
 [Install]
 WantedBy=multi-user.target

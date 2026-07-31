@@ -6,16 +6,31 @@ import shutil
 import socket
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, urlparse
 
 from bot_broadcast import discover_all_bot_groups, list_configured_bots, register_discovered_groups
 from config import QueueUiConfig, _parse_client_targets, load_config, load_queue_ui_config
+from desktop_relay import desktop_status, enqueue_open, pull_pending
+from logging_setup import setup_logging
 from db import ChatDatabase, QueueJob
-from deeplink_resolve import resolve_live_url
+from deeplink_resolve import (
+    build_thanhtai_countdown_url,
+    extract_countdown_url,
+    find_countdown_url_for_open,
+    find_first_countdown_url,
+    normalize_url_href,
+    resolve_countdown_open_url,
+    extract_room_id,
+    item_context_from_parts,
+    resolve_link_for_open,
+    resolve_live_url,
+)
+from message_format import broadcast_text_from_payload, queue_display_from_payload
 from dotenv import load_dotenv
 from telegram import Bot
 from ui_auth import (
@@ -35,864 +50,50 @@ logger = logging.getLogger(__name__)
 
 PHONE_SCREENSHOT_DIR = Path(__file__).resolve().parent / "data" / "phone_screenshots"
 PHONE_SCREENSHOT_MAX_BYTES = 15 * 1024 * 1024
+QUEUE_CHAT_HTML_PATH = Path(__file__).resolve().parent / "templates" / "queue_chat.html"
+
+
+def _load_queue_html() -> str:
+    template = QUEUE_CHAT_HTML_PATH.read_text(encoding="utf-8")
+    return template.replace("__LOGOUT_SCRIPT__", LOGOUT_SCRIPT)
+
+
+def _enrich_queue_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    payload = item.get("payload") or {}
+    message = item.get("message") or {}
+    message_text = str(message.get("text") or "")
+    display_html, _ = queue_display_from_payload(message_text, payload)
+
+    deeplink = str(payload.get("deeplink") or payload.get("deep_link") or "").strip()
+    room_id = str(payload.get("room_id") or "").strip() or (extract_room_id(deeplink) or "")
+    combined = item_context_from_parts(message_text, payload)
+    countdown_url = find_countdown_url_for_open(display_html) or extract_countdown_url(
+        message_text, payload
+    )
+    if not countdown_url and room_id.isdigit():
+        countdown_url = build_thanhtai_countdown_url(room_id)
+    if countdown_url:
+        countdown_url = normalize_url_href(countdown_url)
+
+    source_url = str(payload.get("source_url") or "").strip()
+    has_link = bool(
+        countdown_url
+        or source_url
+        or deeplink
+        or re.search(r"https?://|snssdk1180://", combined, re.I)
+    )
+
+    enriched = dict(item)
+    enriched["display_html"] = display_html
+    enriched["countdown_url"] = countdown_url
+    enriched["deeplink"] = deeplink
+    enriched["room_id"] = room_id
+    enriched["has_link"] = has_link
+    return enriched
+
+
+HTML = _load_queue_html()
 
-
-HTML = r"""<!doctype html>
-<html lang="vi">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Giám sát hàng đợi tin nhắn</title>
-  <style>
-    :root {
-      --bg: #f5f6f8;
-      --surface: #ffffff;
-      --surface-2: #eef1f4;
-      --border: #d7dce2;
-      --text: #20242a;
-      --muted: #66707b;
-      --blue: #1d5fd0;
-      --green: #17803d;
-      --amber: #9a6500;
-      --red: #b42318;
-      --purple: #7149a8;
-      --shadow: 0 1px 2px rgba(20, 28, 38, 0.08);
-    }
-
-    * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      min-height: 100vh;
-      background: var(--bg);
-      color: var(--text);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      letter-spacing: 0;
-    }
-
-    button, input, select {
-      font: inherit;
-    }
-
-    .shell {
-      min-height: 100vh;
-      display: grid;
-      grid-template-rows: auto auto 1fr;
-    }
-
-    .topbar {
-      height: 58px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 0 20px;
-      background: #151922;
-      color: #f9fafb;
-      border-bottom: 1px solid #252b36;
-    }
-
-    .brand {
-      display: flex;
-      align-items: baseline;
-      gap: 12px;
-      min-width: 0;
-    }
-
-    .brand h1 {
-      margin: 0;
-      font-size: 18px;
-      font-weight: 700;
-      line-height: 1;
-      white-space: nowrap;
-    }
-
-    .brand span {
-      color: #aeb6c3;
-      font-size: 12px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .toolbar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-    }
-
-    .control {
-      height: 34px;
-      border: 1px solid #323948;
-      background: #202634;
-      color: #f9fafb;
-      border-radius: 6px;
-      padding: 0 10px;
-      min-width: 0;
-    }
-
-    .button {
-      height: 34px;
-      min-width: 38px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      border: 1px solid #394252;
-      background: #263040;
-      color: #f9fafb;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-
-    .button:hover {
-      background: #30394b;
-    }
-
-    .checkbox {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      height: 34px;
-      padding: 0 10px;
-      color: #d8dde6;
-      font-size: 13px;
-      white-space: nowrap;
-    }
-
-    .live-status {
-      height: 34px;
-      display: inline-flex;
-      align-items: center;
-      max-width: 280px;
-      padding: 0 10px;
-      border: 1px solid #323948;
-      background: #1b2130;
-      color: #b8c0cc;
-      border-radius: 6px;
-      font-size: 12px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .stats {
-      display: grid;
-      grid-template-columns: repeat(8, minmax(110px, 1fr));
-      gap: 1px;
-      background: var(--border);
-      border-bottom: 1px solid var(--border);
-    }
-
-    .stat {
-      min-height: 70px;
-      padding: 12px 16px;
-      background: var(--surface);
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      gap: 5px;
-    }
-
-    .stat .label {
-      color: var(--muted);
-      font-size: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0;
-    }
-
-    .stat .value {
-      font-size: 22px;
-      font-weight: 700;
-      line-height: 1;
-    }
-
-    .main {
-      min-height: 0;
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(340px, 420px);
-      gap: 0;
-    }
-
-    .table-wrap {
-      min-height: 0;
-      overflow: auto;
-      border-right: 1px solid var(--border);
-      background: var(--surface);
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      table-layout: fixed;
-      font-size: 13px;
-    }
-
-    thead th {
-      position: sticky;
-      top: 0;
-      z-index: 1;
-      height: 38px;
-      padding: 0 10px;
-      background: #e8ebef;
-      border-bottom: 1px solid var(--border);
-      color: #3a414b;
-      text-align: left;
-      font-weight: 700;
-      white-space: nowrap;
-    }
-
-    tbody td {
-      height: 44px;
-      padding: 7px 10px;
-      border-bottom: 1px solid #edf0f3;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      vertical-align: middle;
-    }
-
-    tbody tr {
-      cursor: pointer;
-    }
-
-    tbody tr:hover {
-      background: #f7f9fb;
-    }
-
-    tbody tr.selected {
-      background: #edf4ff;
-      box-shadow: inset 3px 0 0 var(--blue);
-    }
-
-    .col-id { width: 76px; }
-    .col-status { width: 118px; }
-    .col-priority { width: 82px; }
-    .col-room { width: 170px; }
-    .col-attempts { width: 96px; }
-    .col-created { width: 152px; }
-    .col-message { width: auto; }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      height: 24px;
-      max-width: 100%;
-      padding: 0 8px;
-      border-radius: 999px;
-      font-size: 12px;
-      font-weight: 700;
-      border: 1px solid transparent;
-      text-transform: uppercase;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    .pending { color: var(--amber); background: #fff7e6; border-color: #f3d18b; }
-    .processing { color: var(--blue); background: #eef5ff; border-color: #a9c8ff; }
-    .done { color: var(--green); background: #eaf7ee; border-color: #a8dfba; }
-    .dead, .failed { color: var(--red); background: #fff0ee; border-color: #f5b6ad; }
-    .filtered { color: var(--muted); background: #eef1f4; border-color: #c8d0d9; }
-    .system { color: var(--purple); background: #f4effc; border-color: #d7c4f3; }
-
-    .detail {
-      min-height: 0;
-      overflow: auto;
-      background: #fbfcfd;
-      padding: 16px;
-    }
-
-    .detail h2 {
-      margin: 0 0 12px;
-      font-size: 16px;
-      line-height: 1.2;
-    }
-
-    .kv {
-      display: grid;
-      grid-template-columns: 112px minmax(0, 1fr);
-      gap: 8px 10px;
-      padding: 12px 0;
-      border-top: 1px solid var(--border);
-      font-size: 13px;
-    }
-
-    .kv .key {
-      color: var(--muted);
-    }
-
-    .kv .value {
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
-
-    .message-box, pre {
-      width: 100%;
-      margin: 8px 0 0;
-      padding: 12px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--surface);
-      box-shadow: var(--shadow);
-      color: var(--text);
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      font-size: 13px;
-      line-height: 1.45;
-    }
-
-    .detail-actions {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin: 0 0 12px;
-    }
-
-    .detail-actions .button {
-      width: auto;
-      min-width: 120px;
-      padding: 0 12px;
-      background: var(--blue);
-      border-color: #3170df;
-    }
-
-    .detail-actions .button.secondary {
-      background: #fff;
-      color: var(--text);
-      border-color: var(--border);
-    }
-
-    .context-menu {
-      position: fixed;
-      z-index: 50;
-      min-width: 210px;
-      display: none;
-      padding: 6px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: #fff;
-      box-shadow: 0 12px 32px rgba(20,28,38,.22);
-    }
-
-    .context-menu.open { display: block; }
-
-    .context-menu button {
-      width: 100%;
-      min-height: 34px;
-      display: block;
-      border: 0;
-      border-radius: 6px;
-      background: #fff;
-      color: var(--text);
-      text-align: left;
-      padding: 0 10px;
-      cursor: pointer;
-    }
-
-    .context-menu button:hover { background: #eef5ff; }
-
-    .context-menu .muted-line {
-      padding: 6px 10px;
-      color: var(--muted);
-      font-size: 12px;
-      border-top: 1px solid #edf0f3;
-      margin-top: 4px;
-    }
-
-    .empty {
-      padding: 28px;
-      color: var(--muted);
-      text-align: center;
-    }
-
-    .muted {
-      color: var(--muted);
-    }
-
-    @media (max-width: 960px) {
-      .topbar {
-        height: auto;
-        min-height: 58px;
-        align-items: flex-start;
-        flex-direction: column;
-        padding: 12px;
-      }
-
-      .toolbar {
-        width: 100%;
-        flex-wrap: wrap;
-      }
-
-      .control {
-        flex: 1 1 130px;
-      }
-
-      .stats {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
-      .main {
-        grid-template-columns: 1fr;
-      }
-
-      .table-wrap {
-        max-height: 55vh;
-        border-right: 0;
-        border-bottom: 1px solid var(--border);
-      }
-
-      .detail {
-        max-height: none;
-      }
-    }
-  </style>
-</head>
-<body>
-  <div class="shell">
-    <header class="topbar">
-      <div class="brand">
-        <h1>Giám sát hàng đợi</h1>
-        <span id="dbPath"></span>
-      </div>
-      <div class="toolbar">
-        <select id="statusFilter" class="control" aria-label="Trạng thái">
-          <option value="">Tất cả trạng thái</option>
-          <option value="pending">Chờ xử lý</option>
-          <option value="processing">Đang xử lý</option>
-          <option value="done">Hoàn thành</option>
-          <option value="dead,failed">Lỗi / thất bại</option>
-        </select>
-        <select id="limitFilter" class="control" aria-label="Số dòng">
-          <option value="25">25</option>
-          <option value="50">50</option>
-          <option value="100" selected>100</option>
-          <option value="200">200</option>
-        </select>
-        <label class="checkbox"><input id="autoRefresh" type="checkbox" checked> Tự động</label>
-        <button id="reloadBtn" class="button" title="Tải lại" aria-label="Tải lại">↻</button>
-        <button id="filtersBtn" class="button" title="Bộ lọc" aria-label="Bộ lọc">Bộ lọc</button>
-        <button id="watchBtn" class="button" title="Nhóm theo dõi" aria-label="Nhóm theo dõi">Theo dõi</button>
-        <button id="broadcastBtn" class="button" title="Nhóm phát tin" aria-label="Nhóm phát tin">Phát tin</button>
-        <button id="phoneBtn" class="button" title="Giám sát điện thoại" aria-label="Giám sát điện thoại">Điện thoại</button>
-        <button id="nextPhoneBtn" class="button primary" title="Gửi tin chờ mới nhất sang điện thoại" aria-label="Gửi tin chờ mới nhất">Tin chờ mới nhất</button>
-        <button id="logoutBtn" class="button" title="Đăng xuất" aria-label="Đăng xuất">Đăng xuất</button>
-        <span id="liveStatus" class="live-status">Đang khởi động...</span>
-      </div>
-    </header>
-
-    <section class="stats" id="stats"></section>
-
-    <main class="main">
-      <section class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th class="col-id">ID</th>
-              <th class="col-status">Trạng thái</th>
-              <th class="col-priority">Ưu tiên</th>
-              <th class="col-room">Phòng</th>
-              <th class="col-attempts">Lần thử</th>
-              <th class="col-created">Tạo lúc</th>
-              <th class="col-message">Tin nhắn</th>
-            </tr>
-          </thead>
-          <tbody id="queueRows"></tbody>
-        </table>
-        <div id="emptyState" class="empty" hidden>Chưa có job trong hàng đợi</div>
-      </section>
-
-      <aside class="detail" id="detail">
-        <h2>Chi tiết job</h2>
-        <div class="muted">Chưa chọn dòng nào</div>
-      </aside>
-    </main>
-    <div id="contextMenu" class="context-menu" role="menu">
-      <button id="ctxOpenPhoneBtn">Mở link trên điện thoại</button>
-      <button id="ctxOpenAdbBtn">Chạy qua USB/ADB</button>
-      <button id="ctxPhonePageBtn">Giám sát điện thoại</button>
-      <div id="ctxHint" class="muted-line">Nhấn chuột phải vào một dòng</div>
-    </div>
-  </div>
-
-  <script>
-    const state = {
-      items: [],
-      selectedId: null,
-      timer: null,
-      refreshSeconds: 1,
-      controller: null
-    };
-
-    const els = {
-      dbPath: document.getElementById('dbPath'),
-      stats: document.getElementById('stats'),
-      rows: document.getElementById('queueRows'),
-      detail: document.getElementById('detail'),
-      empty: document.getElementById('emptyState'),
-      status: document.getElementById('statusFilter'),
-      limit: document.getElementById('limitFilter'),
-      auto: document.getElementById('autoRefresh'),
-      reload: document.getElementById('reloadBtn'),
-      liveStatus: document.getElementById('liveStatus'),
-      contextMenu: document.getElementById('contextMenu'),
-      ctxHint: document.getElementById('ctxHint')
-    };
-
-    function esc(value) {
-      return String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-    }
-
-    function timeText(value) {
-      if (!value) return '';
-      return new Date(value * 1000).toLocaleString();
-    }
-
-    function shortText(value, size = 140) {
-      const text = String(value ?? '').replace(/\s+/g, ' ').trim();
-      return text.length > size ? text.slice(0, size - 3) + '...' : text;
-    }
-
-    function badge(status) {
-      return `<span class="badge ${esc(status)}">${esc(status)}</span>`;
-    }
-
-    async function loadQueue() {
-      if (state.controller) state.controller.abort();
-      state.controller = new AbortController();
-
-      const params = new URLSearchParams();
-      params.set('limit', els.limit.value);
-      params.set('_', String(Date.now()));
-      if (els.status.value) params.set('statuses', els.status.value);
-
-      const res = await fetch('/api/queue?' + params.toString(), {
-        cache: 'no-store',
-        signal: state.controller.signal
-      });
-      if (res.status === 401) {
-        location.href = '/login?next=' + encodeURIComponent(location.pathname);
-        return;
-      }
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const data = await res.json();
-      state.items = data.items || [];
-      state.refreshSeconds = data.refresh_seconds || 2;
-      if (data.limit && String(data.limit) !== els.limit.value) {
-        els.limit.value = String(data.limit);
-      }
-      els.dbPath.textContent = data.db_path || '';
-      renderStats(data.stats || {}, data);
-      renderRows();
-      renderDetail();
-      renderLiveStatus(data);
-    }
-
-    function renderStats(stats, data) {
-      const labels = {
-        pending: 'Chờ xử lý',
-        processing: 'Đang xử lý',
-        done: 'Hoàn thành',
-        dead: 'Chết',
-        failed: 'Thất bại',
-        total: 'Tổng',
-        latest: 'Mới nhất',
-        refresh: 'Tải lại'
-      };
-      const order = ['pending', 'processing', 'done', 'dead', 'failed', 'total', 'latest', 'refresh'];
-      const total = Object.values(stats).reduce((sum, value) => sum + Number(value || 0), 0);
-      const latest = data.latest_id || state.items[0]?.id || 0;
-      const merged = {...stats, total, latest, refresh: `${state.refreshSeconds}s`};
-      els.stats.innerHTML = order.map((key) => `
-        <div class="stat">
-          <div class="label">${esc(labels[key] || key)}</div>
-          <div class="value">${key === 'refresh' ? esc(merged[key]) : Number(merged[key] || 0).toLocaleString()}</div>
-        </div>
-      `).join('');
-    }
-
-    function renderLiveStatus(data) {
-      const generated = data.generated_at ? new Date(data.generated_at) : new Date();
-      const latest = data.latest_id || state.items[0]?.id || 0;
-      els.liveStatus.textContent = `Cập nhật ${generated.toLocaleTimeString()} | mới nhất #${latest} | ${state.items.length} dòng`;
-    }
-
-    function renderRows() {
-      els.empty.hidden = state.items.length !== 0;
-      els.rows.innerHTML = state.items.map((item) => {
-        const selected = item.id === state.selectedId ? 'selected' : '';
-        const room = item.room && (item.room.title || item.room.chat_id);
-        return `
-          <tr class="${selected}" data-id="${item.id}">
-            <td class="col-id">#${item.id}</td>
-            <td class="col-status">${badge(item.status)}</td>
-            <td class="col-priority">${item.priority}</td>
-            <td class="col-room" title="${esc(room)}">${esc(room)}</td>
-            <td class="col-attempts">${item.attempts}/${item.max_attempts}</td>
-            <td class="col-created">${esc(timeText(item.created_at))}</td>
-            <td class="col-message" title="${esc(item.message?.text)}">${esc(shortText(item.message?.text))}</td>
-          </tr>
-        `;
-      }).join('');
-
-      els.rows.querySelectorAll('tr').forEach((row) => {
-        row.addEventListener('click', () => {
-          state.selectedId = Number(row.dataset.id);
-          renderRows();
-          renderDetail();
-        });
-        row.addEventListener('contextmenu', (event) => {
-          event.preventDefault();
-          state.selectedId = Number(row.dataset.id);
-          renderRows();
-          renderDetail();
-          showContextMenu(event.clientX, event.clientY);
-        });
-      });
-
-      if (state.selectedId && !state.items.some((item) => item.id === state.selectedId)) {
-        state.selectedId = state.items[0]?.id || null;
-      }
-    }
-
-    function findLink(item) {
-      const payload = item?.payload || {};
-      const message = item?.message || {};
-      const candidates = [
-        payload.url, payload.link, payload.deeplink, payload.deep_link, payload.live_url, payload.room_url,
-        message.text
-      ];
-      for (const value of candidates) {
-        const text = String(value || '');
-        const match = text.match(/(?:https?:\/\/|tiktok:\/\/)[^\s<>'\"]+/i);
-        if (match) return match[0];
-      }
-      return '';
-    }
-
-    function parseTimeDelayMs(value) {
-      const text = String(value || '').trim();
-      if (!text) return 0;
-      let match = text.match(/(\d{1,2}):(\d{2})\s*s?/i);
-      if (match) return (Number(match[1]) * 60 + Number(match[2])) * 1000;
-      match = text.match(/(\d+(?:\.\d+)?)\s*s/i);
-      if (match) return Math.round(Number(match[1]) * 1000);
-      return 0;
-    }
-
-    function findTimeMeta(item) {
-      const payload = item?.payload || {};
-      const message = item?.message || {};
-      const candidates = [payload.TIME, payload.time, payload.Time, payload.click_time, payload.open_time, message.text];
-      for (const value of candidates) {
-        const text = String(value || '');
-        const match = text.match(/TIME\s*[:：]\s*([^\n\r]+)/i) || text.match(/(\d{1,2}:\d{2}\s*s?\s*-\s*\d{1,2}:\d{2}:\d{2})/i) || text.match(/(\d{1,2}:\d{2}\s*s?)/i);
-        if (match) {
-          const label = match[1].trim();
-          return { label, click_after_ms: parseTimeDelayMs(label) };
-        }
-      }
-      return { label:'', click_after_ms:0 };
-    }
-
-    function phoneClickPoint() {
-      return {
-        x: Number(localStorage.getItem('phoneClickX') || 540),
-        y: Number(localStorage.getItem('phoneClickY') || 1800)
-      };
-    }
-
-    async function sendNewestToPhone() {
-      if (!state.items.length) await loadQueue();
-      const pending = state.items.filter((item) => item.status === 'pending').sort((a,b) => Number(b.id || 0) - Number(a.id || 0));
-      const item = pending[0];
-      if (!item) {
-        els.liveStatus.textContent = 'Không có tin chờ xử lý';
-        return;
-      }
-      state.selectedId = item.id;
-      renderRows();
-      renderDetail();
-      await sendSelectedToPhone();
-      els.liveStatus.textContent = `Đã gửi tin chờ mới nhất #${item.id} sang điện thoại`;
-    }
-
-    async function sendSelectedToPhone() {
-      const item = state.items.find((value) => value.id === state.selectedId);
-      if (!item) return;
-      const link = findLink(item);
-      if (!link) {
-        els.liveStatus.textContent = `Job #${item.id} không có link/deeplink`;
-        return;
-      }
-      const base = (localStorage.getItem('phoneMonitorBaseUrl') || '').replace(/\/$/, '');
-      if (!base) {
-        localStorage.setItem('pendingQueueLink', link);
-        localStorage.setItem('pendingQueueJobId', String(item.id));
-        const timeMeta = findTimeMeta(item);
-        localStorage.setItem('pendingQueueTime', timeMeta.label);
-        localStorage.setItem('pendingQueueClickAfterMs', String(timeMeta.click_after_ms));
-        window.location.href = '/phone-monitor';
-        return;
-      }
-      const point = phoneClickPoint();
-      const timeMeta = findTimeMeta(item);
-      const body = new URLSearchParams({ url: link, source: 'queue', queue_id: String(item.id), time: timeMeta.label, click_after_ms: String(timeMeta.click_after_ms), click_x: String(point.x), click_y: String(point.y) });
-      const res = await fetch(base + '/actions/deeplink', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body });
-      const text = await res.text();
-      if (!res.ok) throw new Error(text || `HTTP ${res.status}`);
-      els.liveStatus.textContent = `Đã gửi job #${item.id} sang điện thoại`;
-    }
-
-    async function sendSelectedToAdb() {
-      const item = state.items.find((value) => value.id === state.selectedId);
-      if (!item) return;
-      const link = findLink(item);
-      if (!link) {
-        els.liveStatus.textContent = `Job #${item.id} không có link/deeplink`;
-        return;
-      }
-      const timeMeta = findTimeMeta(item);
-      const point = phoneClickPoint();
-      const res = await fetch('/api/phone/adb-open', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({ url:link, queue_id:item.id, click_after_ms:timeMeta.click_after_ms, click_x:point.x, click_y:point.y })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      els.liveStatus.textContent = `ADB đã mở job #${item.id} trên ${data.device || 'điện thoại'}`;
-    }
-
-    function showContextMenu(x, y) {
-      const item = state.items.find((value) => value.id === state.selectedId);
-      const link = findLink(item);
-      els.ctxHint.textContent = item ? `Job #${item.id}${link ? '' : ' | không phát hiện link'}` : 'Chưa chọn job';
-      els.contextMenu.style.left = `${Math.min(x, window.innerWidth - 230)}px`;
-      els.contextMenu.style.top = `${Math.min(y, window.innerHeight - 150)}px`;
-      els.contextMenu.classList.add('open');
-    }
-
-    function hideContextMenu() {
-      els.contextMenu.classList.remove('open');
-    }
-
-    function renderDetail() {
-      const item = state.items.find((value) => value.id === state.selectedId);
-      if (!item) {
-        els.detail.innerHTML = '<h2>Chi tiết job</h2><div class="muted">Chưa chọn dòng nào</div>';
-        return;
-      }
-
-      const room = item.room || {};
-      const user = item.user || {};
-      const message = item.message || {};
-      const link = findLink(item);
-      const timeMeta = findTimeMeta(item);
-      els.detail.innerHTML = `
-        <h2>Job #${item.id}</h2>
-        <div class="detail-actions">
-          <button id="sendPhoneBtn" class="button" ${link ? '' : 'disabled'}>Mở trên điện thoại</button>
-          <button id="phonePageBtn" class="button secondary">Giám sát điện thoại</button>
-        </div>
-        <div class="kv">
-          <div class="key">Link</div><div class="value">${link ? `<a href="${esc(link)}" target="_blank" rel="noopener">${esc(link)}</a>` : '<span class="muted">Không phát hiện link</span>'}</div>
-          <div class="key">TIME</div><div class="value">${timeMeta.label ? `${esc(timeMeta.label)} | click sau ${(timeMeta.click_after_ms / 1000).toFixed(0)}s` : '<span class="muted">Không phát hiện TIME</span>'}</div>
-          <div class="key">Trạng thái</div><div class="value">${badge(item.status)} ${item.lease_expired ? '<span class="badge dead">hết hạn</span>' : ''}</div>
-          <div class="key">Ưu tiên</div><div class="value">${item.priority}</div>
-          <div class="key">Lần thử</div><div class="value">${item.attempts}/${item.max_attempts}</div>
-          <div class="key">Đang khóa bởi</div><div class="value">${esc(item.locked_by || '')}</div>
-          <div class="key">Tạo lúc</div><div class="value">${esc(timeText(item.created_at))}</div>
-          <div class="key">Cập nhật</div><div class="value">${esc(timeText(item.updated_at))}</div>
-          <div class="key">Sẵn sàng lúc</div><div class="value">${esc(timeText(item.available_at))}</div>
-        </div>
-        <div class="kv">
-          <div class="key">Phòng</div><div class="value">${esc(room.title || room.chat_id || '')}</div>
-          <div class="key">Nền tảng</div><div class="value">${esc(room.platform || '')}</div>
-          <div class="key">Chat ID</div><div class="value">${esc(room.chat_id || '')}</div>
-          <div class="key">Người dùng</div><div class="value">${esc(user.username || user.platform_user_id || '')}</div>
-          <div class="key">ID tin nhắn</div><div class="value">${esc(message.platform_message_id || message.id || '')}</div>
-        </div>
-        <div class="kv">
-          <div class="key">Tin nhắn</div>
-          <div class="value"><div class="message-box">${esc(message.text || '')}</div></div>
-          <div class="key">Payload</div>
-          <div class="value"><pre>${esc(JSON.stringify(item.payload || {}, null, 2))}</pre></div>
-          <div class="key">Lỗi</div>
-          <div class="value">${esc(item.last_error || '')}</div>
-        </div>
-      `;
-      document.getElementById('sendPhoneBtn')?.addEventListener('click', () => sendSelectedToPhone().catch((err) => { els.liveStatus.textContent = `Lỗi điện thoại: ${err.message}`; }));
-      document.getElementById('phonePageBtn')?.addEventListener('click', () => { window.location.href = '/phone-monitor'; });
-    }
-
-    function bindContextMenu() {
-      document.getElementById('ctxOpenPhoneBtn').addEventListener('click', () => {
-        hideContextMenu();
-        sendSelectedToPhone().catch((err) => { els.liveStatus.textContent = `Lỗi điện thoại: ${err.message}`; });
-      });
-      document.getElementById('ctxOpenAdbBtn').addEventListener('click', () => {
-        hideContextMenu();
-        sendSelectedToAdb().catch((err) => { els.liveStatus.textContent = `Lỗi ADB: ${err.message}`; });
-      });
-      document.getElementById('ctxPhonePageBtn').addEventListener('click', () => { window.location.href = '/phone-monitor'; });
-      document.addEventListener('click', hideContextMenu);
-      window.addEventListener('blur', hideContextMenu);
-      window.addEventListener('resize', hideContextMenu);
-    }
-
-    function schedule() {
-      clearInterval(state.timer);
-      if (els.auto.checked) {
-        state.timer = setInterval(() => {
-          loadQueue().catch((err) => {
-            if (err.name !== 'AbortError') {
-              els.liveStatus.textContent = `Lỗi: ${err.message}`;
-            }
-          });
-        }, state.refreshSeconds * 1000);
-      }
-    }
-
-    els.reload.addEventListener('click', () => loadQueue().catch((err) => {
-      if (err.name !== 'AbortError') {
-        els.liveStatus.textContent = `Error: ${err.message}`;
-      }
-    }));
-    document.getElementById('filtersBtn').addEventListener('click', () => {
-      window.location.href = '/filters';
-    });
-    document.getElementById('watchBtn').addEventListener('click', () => {
-      window.location.href = '/watch';
-    });
-    document.getElementById('broadcastBtn').addEventListener('click', () => {
-      window.location.href = '/broadcast';
-    });
-    document.getElementById('phoneBtn').addEventListener('click', () => {
-      window.location.href = '/phone-monitor';
-    });
-    document.getElementById('nextPhoneBtn').addEventListener('click', () => {
-      sendNewestToPhone().catch((err) => { els.liveStatus.textContent = `Lỗi gửi tin: ${err.message}`; });
-    });
-    els.auto.addEventListener('change', schedule);
-    els.status.addEventListener('change', loadQueue);
-    els.limit.addEventListener('change', loadQueue);
-
-    bindContextMenu();
-    loadQueue().then(schedule).catch((err) => {
-      els.detail.innerHTML = `<h2>Chi tiết job</h2><div class="message-box">${esc(err.message)}</div>`;
-    });
-  </script>
-  <script>
-""" + LOGOUT_SCRIPT + r"""
-</body>
-</html>
-"""
 
 
 FILTERS_HTML = r"""<!doctype html>
@@ -900,70 +101,68 @@ FILTERS_HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Bộ lọc tin nhắn</title>
+  <title>Setup Filter</title>
   <style>
-    :root { --bg:#f5f6f8; --surface:#fff; --border:#d7dce2; --text:#20242a; --muted:#66707b; --blue:#1d5fd0; --green:#17803d; --red:#b42318; }
+    :root { --bg:#0f141b; --card:#17202b; --line:#2a3544; --text:#e8edf4; --muted:#8b98a8; --blue:#3b82f6; --green:#22c55e; --red:#ef4444; --input:#0d1218; --accent:#fbbf24; }
     * { box-sizing: border-box; }
-    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; letter-spacing:0; }
-    button,input,textarea { font:inherit; }
+    body { margin:0; min-height:100vh; background:linear-gradient(180deg,#101722,#0b1016); color:var(--text); font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    button,input { font:inherit; }
     .shell { min-height:100vh; display:grid; grid-template-rows:auto 1fr; }
-    .topbar { min-height:58px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:0 20px; background:#151922; color:#f9fafb; border-bottom:1px solid #252b36; }
+    .topbar { min-height:58px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:0 20px; background:#0c1118; border-bottom:1px solid #1f2937; }
     .brand { display:flex; align-items:baseline; gap:12px; min-width:0; }
-    h1 { margin:0; font-size:18px; line-height:1; }
-    .brand span { color:#aeb6c3; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    h1 { margin:0; font-size:18px; }
+    .brand span { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .toolbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
-    .button { height:34px; min-width:38px; display:inline-flex; align-items:center; justify-content:center; border:1px solid #394252; background:#263040; color:#f9fafb; border-radius:6px; padding:0 12px; cursor:pointer; }
-    .button:hover { background:#30394b; }
-    .button.primary { background:var(--blue); border-color:#3170df; }
-    .button.danger { background:#4a2530; border-color:#6d3342; }
-    .main { min-height:0; display:grid; grid-template-columns:340px minmax(0,1fr); background:var(--surface); }
-    .list-pane { min-height:0; overflow:auto; border-right:1px solid var(--border); background:#fbfcfd; }
-    .list-head { position:sticky; top:0; z-index:1; display:flex; gap:8px; padding:12px; border-bottom:1px solid var(--border); background:#eef1f4; }
+    .button { height:34px; display:inline-flex; align-items:center; justify-content:center; border:1px solid #334155; background:#1e293b; color:#f8fafc; border-radius:8px; padding:0 12px; cursor:pointer; }
+    .button:hover { background:#273449; }
+    .button.primary { background:var(--blue); border-color:#2563eb; }
+    .button.danger { background:#3f1d24; border-color:#7f1d1d; }
+    .main { min-height:0; display:grid; grid-template-columns:300px minmax(0,1fr); }
+    .list-pane { min-height:0; overflow:auto; border-right:1px solid var(--line); background:#111822; }
+    .list-head { position:sticky; top:0; z-index:1; display:flex; gap:8px; padding:12px; border-bottom:1px solid var(--line); background:#151d28; }
     .filter-list { margin:0; padding:0; list-style:none; }
-    .filter-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:12px; border-bottom:1px solid #edf0f3; cursor:pointer; }
-    .filter-row:hover { background:#f7f9fb; }
-    .filter-row.selected { background:#edf4ff; box-shadow:inset 3px 0 0 var(--blue); }
-    .filter-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:700; font-size:13px; }
+    .filter-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; padding:12px; border-bottom:1px solid #1a2330; cursor:pointer; }
+    .filter-row:hover { background:#162030; }
+    .filter-row.selected { background:#1a2740; box-shadow:inset 3px 0 0 var(--blue); }
+    .filter-name { font-weight:700; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
     .filter-meta { margin-top:4px; color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .pill { display:inline-flex; align-items:center; height:22px; padding:0 8px; border-radius:999px; border:1px solid #c8d0d9; color:#3a414b; background:#eef1f4; font-size:12px; font-weight:700; white-space:nowrap; }
-    .pill.on { color:var(--green); background:#eaf7ee; border-color:#a8dfba; }
-    .pill.off { color:var(--red); background:#fff0ee; border-color:#f5b6ad; }
-    .editor { min-height:0; overflow:auto; padding:18px; background:var(--surface); }
-    .editor-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
-    .editor-head h2 { margin:0; font-size:18px; line-height:1.2; }
-    .form-grid { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:14px; }
-    .field { min-width:0; display:flex; flex-direction:column; gap:6px; }
-    .field.wide { grid-column:span 2; }
-    .field.full { grid-column:1 / -1; }
-    label { color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }
-    input,textarea { width:100%; min-width:0; border:1px solid var(--border); border-radius:6px; background:#fff; color:var(--text); padding:9px 10px; }
-    textarea { min-height:80px; resize:vertical; line-height:1.4; }
-    .checkline { height:40px; display:inline-flex; align-items:center; gap:8px; color:var(--text); font-size:13px; text-transform:none; }
-    .combo { position:relative; min-width:0; }
-    .combo-button { width:100%; min-height:40px; display:flex; align-items:center; justify-content:space-between; gap:8px; border:1px solid var(--border); border-radius:6px; background:#fff; color:var(--text); padding:8px 10px; cursor:pointer; text-align:left; }
-    .combo-button:disabled { color:#98a2ae; background:#f3f5f7; cursor:default; }
-    .combo-summary { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .combo-caret { color:var(--muted); font-size:12px; }
-    .combo-menu { display:none; position:absolute; left:0; right:0; top:calc(100% + 4px); z-index:10; border:1px solid var(--border); border-radius:6px; background:#fff; box-shadow:0 8px 24px rgba(20,28,38,.16); overflow:hidden; }
-    .combo.open .combo-menu { display:block; }
-    .combo-search { border:0; border-bottom:1px solid var(--border); border-radius:0; }
-    .country-list { max-height:280px; overflow:auto; padding:4px 0; }
-    .country-row { min-height:34px; display:flex; align-items:center; gap:8px; padding:7px 10px; cursor:pointer; font-size:13px; }
-    .country-row:hover { background:#f7f9fb; }
-    .country-row input { width:auto; min-width:16px; margin:0; }
-    .country-code { min-width:58px; font-weight:700; color:#303844; }
-    .country-name { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#3a414b; }
-    .country-empty { padding:12px 10px; color:var(--muted); font-size:13px; }
-    .status { min-height:34px; display:flex; align-items:center; padding:0 10px; border:1px solid var(--border); border-radius:6px; color:var(--muted); background:#fbfcfd; font-size:13px; }
-    .hint { color:var(--muted); font-size:12px; line-height:1.45; margin-top:6px; }
-    .sample { grid-column:1 / -1; border:1px solid var(--border); border-radius:6px; background:#111827; color:#d1d5db; padding:12px; white-space:pre-wrap; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; line-height:1.45; }
-    @media (max-width:920px) { .topbar{align-items:flex-start; flex-direction:column; padding:12px;} .main{grid-template-columns:1fr;} .list-pane{max-height:40vh; border-right:0; border-bottom:1px solid var(--border);} .form-grid{grid-template-columns:repeat(2,minmax(0,1fr));} .field.wide{grid-column:1 / -1;} }
+    .pill { display:inline-flex; align-items:center; height:22px; padding:0 8px; border-radius:999px; border:1px solid #334155; font-size:12px; font-weight:700; }
+    .pill.on { color:#86efac; background:#052e16; border-color:#166534; }
+    .pill.off { color:#fca5a5; background:#450a0a; border-color:#7f1d1d; }
+    .editor { min-height:0; overflow:auto; padding:24px; display:flex; justify-content:center; }
+    .editor-wrap { width:min(720px,100%); display:flex; flex-direction:column; gap:14px; }
+    .status { min-height:34px; display:flex; align-items:center; padding:0 12px; border:1px solid var(--line); border-radius:8px; color:var(--muted); background:#121925; font-size:13px; }
+    .meta-bar { display:grid; grid-template-columns:minmax(0,1fr) 110px 90px; gap:10px; align-items:end; }
+    .meta-bar label { display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+    .meta-bar input[type=text], .meta-bar input[type=number] { width:100%; height:38px; border:1px solid var(--line); border-radius:8px; background:var(--input); color:var(--text); padding:0 10px; }
+    .checkline { height:38px; display:inline-flex; align-items:center; gap:8px; color:var(--text); font-size:13px; }
+    .msg-card { border:1px solid #2b384a; border-radius:16px; background:linear-gradient(180deg,#1a2432,#141c27); box-shadow:0 18px 40px rgba(0,0,0,.28); padding:18px 18px 16px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+    .msg-title { color:#cbd5e1; font-size:13px; margin-bottom:14px; }
+    .msg-line { display:flex; align-items:center; flex-wrap:wrap; gap:8px; min-height:40px; margin:0 0 10px; font-size:15px; line-height:1.45; }
+    .msg-line.dim { color:#64748b; }
+    .msg-line .label { color:#e2e8f0; white-space:nowrap; }
+    .msg-line .sep { color:#94a3b8; }
+    .range { display:inline-flex; align-items:center; gap:6px; }
+    .range input { width:78px; height:34px; border:1px solid #3b4a5f; border-radius:8px; background:#0b1118; color:var(--accent); text-align:center; padding:0 6px; font-weight:700; }
+    .range input:focus { outline:2px solid rgba(59,130,246,.35); border-color:#3b82f6; }
+    .range .dash { color:#94a3b8; }
+    .hint { color:var(--muted); font-size:12px; line-height:1.45; }
+    .reject-box { border:1px dashed #3b4a5f; border-radius:12px; padding:12px; background:#121925; }
+    .reject-box label { display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:700; text-transform:uppercase; }
+    .reject-box input { width:100%; height:38px; border:1px solid var(--line); border-radius:8px; background:var(--input); color:var(--text); padding:0 10px; }
+    .empty { color:var(--muted); padding:40px 12px; text-align:center; }
+    @media (max-width:920px) {
+      .main { grid-template-columns:1fr; }
+      .list-pane { max-height:34vh; border-right:0; border-bottom:1px solid var(--line); }
+      .meta-bar { grid-template-columns:1fr; }
+      .range input { width:68px; }
+    }
   </style>
 </head>
 <body>
   <div class="shell">
     <header class="topbar">
-      <div class="brand"><h1>Bộ lọc tin nhắn</h1><span id="filterPath"></span></div>
+      <div class="brand"><h1>Setup Filter</h1><span id="filterPath"></span></div>
       <div class="toolbar">
         <button id="queueBtn" class="button">Hàng đợi</button>
         <button id="reloadBtn" class="button">Tải lại</button>
@@ -981,206 +180,262 @@ FILTERS_HTML = r"""<!doctype html>
         <ul id="filterList" class="filter-list"></ul>
       </section>
       <section class="editor">
-        <div class="editor-head"><h2 id="editorTitle">Bộ lọc</h2><div id="status" class="status">Sẵn sàng</div></div>
-        <div class="form-grid">
-          <div class="field wide"><label for="nameInput">Tên</label><input id="nameInput" autocomplete="off"></div>
-          <div class="field"><label for="priorityInput">Ưu tiên</label><input id="priorityInput" type="number" min="0" step="1"></div>
-          <div class="field"><label class="checkline"><input id="enabledInput" type="checkbox"> Bật</label></div>
-          <div class="field wide"><label for="boxesInput">BOX Min</label><input id="boxesInput" autocomplete="off" placeholder="100/25"><div class="hint">Nhập 100/25 nghĩa là lấy BOX có giá trị 1 &gt;= 100 và giá trị 2 &gt;= 25.</div></div>
-          <div class="field wide">
-            <label for="countryComboButton">Quốc gia</label>
-            <div id="countryCombo" class="combo">
-              <button id="countryComboButton" class="combo-button" type="button" aria-haspopup="listbox" aria-expanded="false">
-                <span id="countriesSummary" class="combo-summary">Mọi quốc gia</span>
-                <span class="combo-caret">v</span>
-              </button>
-              <div id="countryMenu" class="combo-menu">
-                <input id="countrySearchInput" class="combo-search" autocomplete="off" placeholder="Tìm quốc gia hoặc mã">
-                <label class="country-row"><input id="allCountriesInput" type="checkbox"><span class="country-code">ALL</span><span class="country-name">Tất cả quốc gia</span></label>
-                <div id="countryList" class="country-list" role="listbox" aria-multiselectable="true"></div>
+        <div class="editor-wrap">
+          <div id="status" class="status">Sẵn sàng</div>
+          <div id="editorEmpty" class="empty" hidden>Chưa có bộ lọc. Bấm Thêm để tạo.</div>
+          <div id="editorBody">
+            <div class="meta-bar">
+              <div>
+                <label for="nameInput">Tên bộ lọc</label>
+                <input id="nameInput" type="text" autocomplete="off" placeholder="filter_1">
+              </div>
+              <div>
+                <label for="priorityInput">Ưu tiên</label>
+                <input id="priorityInput" type="number" min="0" step="1">
+              </div>
+              <div>
+                <label>&nbsp;</label>
+                <label class="checkline"><input id="enabledInput" type="checkbox"> Bật</label>
               </div>
             </div>
-          </div>
-          <div class="field wide"><label for="badgesInput">Huy hiệu</label><input id="badgesInput" autocomplete="off" placeholder="💎,🏅"></div>
-          <div class="field"><label for="minRateInput">Rate tối thiểu</label><input id="minRateInput" type="number" min="0" step="0.01"><div class="hint">Lấy Rate &gt;= giá trị nhập.</div></div>
-          <div class="field"><label for="minViewsInput">Views tối thiểu</label><input id="minViewsInput" type="number" min="0" step="1"><div class="hint">Lấy Views &gt;= giá trị nhập.</div></div>
-          <div class="field wide"><label for="noteInput">Ghi chú chứa</label><textarea id="noteInput" placeholder='"Rương treo", "ABC", "CDE"'></textarea><div class="hint">Có thể nhập nhiều từ khoá: "ABC", "CDE". So sánh không phân biệt hoa/thường.</div></div>
-          <div class="sample">Mẫu tin nhắn:
-🎁 BOX: 100/25 💎 🏅 🇰🇷
-📈 Rate : 5.5
-👀 12
-📝 Rương treo ít view
 
-Form trên sẽ hiểu: BOX value 1 = 100, BOX value 2 = 25, country = KR, badges = 💎 🏅, rate = 5.5, views = 12, note = Rương treo ít view.</div>
+            <div class="msg-card" aria-label="Message-style filter">
+              <div class="msg-title">##  BT25754 › sample.room</div>
+
+              <div class="msg-line dim">
+                <span class="label">⏳ TIME :</span>
+                <span>00:57s - 22:17:26</span>
+              </div>
+
+              <div class="msg-line">
+                <span class="label">🟪  BAG :</span>
+                <span class="range">
+                  <input id="minBox1" type="number" min="0" step="1" placeholder="min">
+                  <span class="dash">-</span>
+                  <input id="maxBox1" type="number" min="0" step="1" placeholder="max">
+                </span>
+                <span class="sep">/</span>
+                <span class="range">
+                  <input id="minBox2" type="number" min="0" step="1" placeholder="min">
+                  <span class="dash">-</span>
+                  <input id="maxBox2" type="number" min="0" step="1" placeholder="max">
+                </span>
+                <span class="sep">🏅🇦🇪</span>
+              </div>
+
+              <div class="msg-line">
+                <span class="label">📈  Rate :</span>
+                <span class="range">
+                  <input id="minRate" type="number" min="0" step="0.1" placeholder="min">
+                  <span class="dash">-</span>
+                  <input id="maxRate" type="number" min="0" step="0.1" placeholder="max">
+                </span>
+                <span class="sep">👀 …</span>
+              </div>
+
+              <div class="msg-line">
+                <span class="label">🎯  Level:</span>
+                <span class="range">
+                  <input id="minLevel" type="number" min="0" step="1" placeholder="min">
+                  <span class="dash">-</span>
+                  <input id="maxLevel" type="number" min="0" step="1" placeholder="max">
+                </span>
+                <span class="sep">👤 …</span>
+              </div>
+            </div>
+
+            <p class="hint">Để trống min/max = không giới hạn phía đó. Ví dụ BAG <code>50-50 / 1-5</code>, Rate <code>10-50</code>, Level <code>1-3</code>.</p>
+
+            <div class="reject-box">
+              <label for="rejectCommentInput">Chặn nếu dòng 💬 chứa</label>
+              <input id="rejectCommentInput" autocomplete="off" placeholder="҉">
+              <p class="hint" style="margin:8px 0 0">Không chuyển tiếp tin có ký tự này trên dòng bình luận 💬 (vd. watermark mặt trời ҉).</p>
+            </div>
+          </div>
         </div>
       </section>
     </main>
   </div>
   <script>
-    const state = { filters: [], selected: 0, path: '' };
+    const state = { filters: [], reject: [], selected: 0, path: '' };
     const $ = (id) => document.getElementById(id);
-    const els = { path:$('filterPath'), list:$('filterList'), status:$('status'), title:$('editorTitle'), name:$('nameInput'), priority:$('priorityInput'), enabled:$('enabledInput'), boxes:$('boxesInput'), countryCombo:$('countryCombo'), countryButton:$('countryComboButton'), countrySummary:$('countriesSummary'), countrySearch:$('countrySearchInput'), countryList:$('countryList'), badges:$('badgesInput'), minRate:$('minRateInput'), minViews:$('minViewsInput'), note:$('noteInput'), allCountries:$('allCountriesInput') };
-    const COUNTRY_CODES = 'AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ LA LB LC LI LK LR LS LT LU LV LY MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ VA VC VE VG VI VN VU WF WS XK YE YT ZA ZM ZW'.split(' ');
-    const regionNames = typeof Intl !== 'undefined' && Intl.DisplayNames ? new Intl.DisplayNames([navigator.language || 'en'], { type:'region' }) : null;
-    const COUNTRY_OPTIONS = COUNTRY_CODES.map((code) => ({ code, name: countryName(code), flag: flagFromCode(code) })).sort((a,b) => a.name.localeCompare(b.name) || a.code.localeCompare(b.code));
-    const COUNTRY_ORDER = new Map(COUNTRY_OPTIONS.map((item,index) => [item.code, index]));
+    const els = {
+      path:$('filterPath'), list:$('filterList'), status:$('status'),
+      editorEmpty:$('editorEmpty'), editorBody:$('editorBody'),
+      name:$('nameInput'), priority:$('priorityInput'), enabled:$('enabledInput'),
+      minBox1:$('minBox1'), maxBox1:$('maxBox1'), minBox2:$('minBox2'), maxBox2:$('maxBox2'),
+      minRate:$('minRate'), maxRate:$('maxRate'), minLevel:$('minLevel'), maxLevel:$('maxLevel'),
+      rejectComment:$('rejectCommentInput'),
+    };
     function esc(value) { return String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
-    function toCsv(value) { return Array.isArray(value) ? value.join(',') : String(value ?? ''); }
     function cleanKeyword(value) { return String(value || '').trim().replace(/^[\'\"]+|[\'\"]+$/g, '').trim(); }
     function fromCsv(value) { return String(value || '').split(',').map(cleanKeyword).filter(Boolean); }
-    function parseBoxMin(value) {
-      const text = String(value || '').trim();
-      if (!text) return null;
-      const match = text.match(/^(\d+)\s*\/\s*(\d+)$/);
-      return match ? { left:Number(match[1]), right:Number(match[2]), label:`${match[1]}/${match[2]}` } : null;
-    }
-    function optionalNumber(value) { return value === '' ? undefined : Number(value); }
-    function optionalText(value) { const text = String(value || '').trim(); return text ? text : undefined; }
-    function countryName(code) { try { return regionNames?.of(code) || code; } catch { return code; } }
-    function flagFromCode(code) { return /^[A-Z]{2}$/.test(code) ? String.fromCodePoint(...code.split('').map((char) => 127397 + char.charCodeAt(0))) : ''; }
-    function normalizeCountries(value) {
-      const seen = new Set();
-      const values = Array.isArray(value) ? value : fromCsv(value);
-      return values.map((item) => String(item).trim().toUpperCase()).filter((code) => /^[A-Z]{2}$/.test(code) && !seen.has(code) && seen.add(code));
-    }
-    function sortCountries(value) {
-      return normalizeCountries(value).sort((a,b) => (COUNTRY_ORDER.get(a) ?? 9999) - (COUNTRY_ORDER.get(b) ?? 9999) || a.localeCompare(b));
-    }
+    function optionalNumber(value) { return value === '' || value === null || value === undefined ? undefined : Number(value); }
     function currentFilter() { return state.filters[state.selected] || null; }
     function compactFilter(filter) {
-      ['priority','min_box1','max_box1','min_box2','max_box2','min_rate','max_rate','min_views','max_views','text_regex'].forEach((key) => { if (filter[key] === undefined || filter[key] === null || filter[key] === '') delete filter[key]; });
-      ['boxes','countries','badges','note_contains','text_contains'].forEach((key) => { if (!Array.isArray(filter[key]) || filter[key].length === 0) delete filter[key]; });
+      ['priority','min_box1','max_box1','min_box2','max_box2','min_rate','max_rate','min_level','max_level','min_views','max_views','text_regex'].forEach((key) => {
+        if (filter[key] === undefined || filter[key] === null || filter[key] === '' || Number.isNaN(filter[key])) delete filter[key];
+      });
+      ['boxes','countries','badges','note_contains','text_contains'].forEach((key) => {
+        if (!Array.isArray(filter[key]) || filter[key].length === 0) delete filter[key];
+      });
+    }
+    function fmtRange(minV, maxV, label) {
+      if (minV === undefined && maxV === undefined) return '';
+      if (minV !== undefined && maxV !== undefined) return `${label}${minV}-${maxV}`;
+      if (minV !== undefined) return `${label}>=${minV}`;
+      return `${label}<=${maxV}`;
+    }
+    function syncRejectFromForm() {
+      const tokens = fromCsv(els.rejectComment.value);
+      if (!tokens.length) { state.reject = []; return; }
+      const existing = (state.reject || []).find((r) => r.name === 'block_sun_comment') || {};
+      state.reject = [{ name:'block_sun_comment', enabled: existing.enabled !== false, comment_contains: tokens }];
     }
     function syncFormToFilter() {
-      const filter = currentFilter(); if (!filter) return;
+      const filter = currentFilter();
+      syncRejectFromForm();
+      if (!filter) return;
       filter.name = els.name.value.trim() || `filter_${state.selected + 1}`;
       filter.enabled = els.enabled.checked;
       filter.priority = optionalNumber(els.priority.value);
-      const boxMin = parseBoxMin(els.boxes.value);
-      filter.boxes = [];
-      filter.min_box1 = boxMin ? boxMin.left : undefined;
-      filter.min_box2 = boxMin ? boxMin.right : undefined;
-      delete filter.max_box1;
-      delete filter.max_box2;
-      filter.countries = sortCountries(filter.countries);
-      filter.badges = fromCsv(els.badges.value);
+      filter.min_box1 = optionalNumber(els.minBox1.value);
+      filter.max_box1 = optionalNumber(els.maxBox1.value);
+      filter.min_box2 = optionalNumber(els.minBox2.value);
+      filter.max_box2 = optionalNumber(els.maxBox2.value);
       filter.min_rate = optionalNumber(els.minRate.value);
-      delete filter.max_rate;
-      filter.min_views = optionalNumber(els.minViews.value);
+      filter.max_rate = optionalNumber(els.maxRate.value);
+      filter.min_level = optionalNumber(els.minLevel.value);
+      filter.max_level = optionalNumber(els.maxLevel.value);
+      delete filter.boxes;
+      delete filter.countries;
+      delete filter.badges;
+      delete filter.note_contains;
+      delete filter.text_contains;
+      delete filter.text_regex;
+      delete filter.min_views;
       delete filter.max_views;
-      filter.note_contains = fromCsv(els.note.value);
-      filter.text_contains = [];
-      filter.text_regex = undefined;
       compactFilter(filter);
     }
     function renderList() {
       els.list.innerHTML = state.filters.map((filter,index) => {
         const selected = index === state.selected ? 'selected' : '';
         const enabled = filter.enabled !== false;
-        const boxMin = filter.min_box1 !== undefined || filter.min_box2 !== undefined ? `box>=${filter.min_box1 ?? 0}/${filter.min_box2 ?? 0}` : toCsv(filter.boxes);
-        const meta = [boxMin, toCsv(filter.countries) || 'mọi quốc gia', filter.min_rate !== undefined ? `rate>=${filter.min_rate}` : '', filter.min_views !== undefined ? `views>=${filter.min_views}` : '', filter.priority !== undefined ? `p${filter.priority}` : ''].filter(Boolean).join(' | ');
-        return `<li class="filter-row ${selected}" data-index="${index}"><div><div class="filter-name">${esc(filter.name || `filter_${index + 1}`)}</div><div class="filter-meta">${esc(meta || 'trống')}</div></div><span class="pill ${enabled ? 'on' : 'off'}">${enabled ? 'bật' : 'tắt'}</span></li>`;
+        const bagLeft = fmtRange(filter.min_box1, filter.max_box1, '');
+        const bagRight = fmtRange(filter.min_box2, filter.max_box2, '');
+        const bag = (bagLeft || bagRight) ? `BAG ${bagLeft || '*'}/${bagRight || '*'}` : '';
+        const meta = [
+          bag,
+          fmtRange(filter.min_rate, filter.max_rate, 'rate '),
+          fmtRange(filter.min_level, filter.max_level, 'lv '),
+          filter.priority !== undefined ? `p${filter.priority}` : '',
+        ].filter(Boolean).join(' | ');
+        return `<li class="filter-row ${selected}" data-index="${index}"><div><div class="filter-name">${esc(filter.name || `filter_${index + 1}`)}</div><div class="filter-meta">${esc(meta || 'không giới hạn')}</div></div><span class="pill ${enabled ? 'on' : 'off'}">${enabled ? 'bật' : 'tắt'}</span></li>`;
       }).join('');
-      els.list.querySelectorAll('.filter-row').forEach((row) => row.addEventListener('click', () => { syncFormToFilter(); state.selected = Number(row.dataset.index); render(); }));
+      els.list.querySelectorAll('.filter-row').forEach((row) => row.addEventListener('click', () => {
+        syncFormToFilter();
+        state.selected = Number(row.dataset.index);
+        render();
+      }));
     }
-    function updateCountrySummary(filter) {
-      if (!filter) {
-        els.countrySummary.textContent = 'Chưa chọn bộ lọc';
-        return;
-      }
-      const selected = sortCountries(filter.countries);
-      if (!selected.length) {
-        els.countrySummary.textContent = 'Mọi quốc gia';
-        return;
-      }
-      const preview = selected.slice(0, 6).join(', ');
-      els.countrySummary.textContent = selected.length > 6 ? `${preview} +${selected.length - 6}` : preview;
-    }
-    function renderCountryList(filter) {
-      const selected = new Set(sortCountries(filter?.countries));
-      const query = els.countrySearch.value.trim().toLowerCase();
-      const options = COUNTRY_OPTIONS.filter((item) => !query || item.code.toLowerCase().includes(query) || item.name.toLowerCase().includes(query));
-      if (!options.length) {
-        els.countryList.innerHTML = '<div class="country-empty">Không tìm thấy quốc gia</div>';
-        return;
-      }
-      els.countryList.innerHTML = options.map((item) => {
-        const checked = selected.has(item.code) ? 'checked' : '';
-        return `<label class="country-row"><input type="checkbox" data-code="${esc(item.code)}" ${checked}><span class="country-code">${esc(item.flag)} ${esc(item.code)}</span><span class="country-name">${esc(item.name)}</span></label>`;
-      }).join('');
-    }
-    function renderCountryCombo(filter) {
-      const disabled = !filter;
-      els.countryButton.disabled = disabled;
-      els.countrySearch.disabled = disabled;
-      els.countryCombo.classList.toggle('disabled', disabled);
-      if (disabled) {
-        els.countryCombo.classList.remove('open');
-        els.countryButton.setAttribute('aria-expanded', 'false');
-      }
-      updateCountrySummary(filter);
-      renderCountryList(filter);
-      if (els.allCountries) els.allCountries.checked = !sortCountries(filter?.countries).length;
-    }
+    function setVal(el, value) { el.value = value === undefined || value === null ? '' : value; }
     function renderForm() {
       const filter = currentFilter();
-      document.querySelectorAll('input, textarea').forEach((node) => node.disabled = !filter);
-      els.title.textContent = filter ? (filter.name || `Bộ lọc #${state.selected + 1}`) : 'Bộ lọc';
-      els.name.value = filter?.name || ''; els.priority.value = filter?.priority ?? ''; els.enabled.checked = filter ? filter.enabled !== false : false;
-      els.boxes.value = filter?.min_box1 !== undefined || filter?.min_box2 !== undefined ? `${filter.min_box1 ?? 0}/${filter.min_box2 ?? 0}` : (Array.isArray(filter?.boxes) ? (filter.boxes[0] || '') : String(filter?.boxes || '')); els.badges.value = toCsv(filter?.badges);
-      els.minRate.value = filter?.min_rate ?? ''; els.minViews.value = filter?.min_views ?? '';
-      els.note.value = toCsv(filter?.note_contains);
-      renderCountryCombo(filter);
+      const has = !!filter;
+      els.editorEmpty.hidden = has || state.filters.length > 0 ? has : false;
+      els.editorEmpty.hidden = has;
+      els.editorBody.hidden = !has;
+      if (!filter) {
+        const rejectTokens = [];
+        (state.reject || []).forEach((rule) => {
+          if (rule.enabled === false) return;
+          (rule.comment_contains || []).forEach((v) => rejectTokens.push(v));
+          (rule.text_contains || []).forEach((v) => rejectTokens.push(v));
+        });
+        els.rejectComment.value = rejectTokens.join(',');
+        return;
+      }
+      els.name.value = filter.name || '';
+      els.priority.value = filter.priority ?? '';
+      els.enabled.checked = filter.enabled !== false;
+      setVal(els.minBox1, filter.min_box1);
+      setVal(els.maxBox1, filter.max_box1);
+      setVal(els.minBox2, filter.min_box2);
+      setVal(els.maxBox2, filter.max_box2);
+      setVal(els.minRate, filter.min_rate);
+      setVal(els.maxRate, filter.max_rate);
+      setVal(els.minLevel, filter.min_level);
+      setVal(els.maxLevel, filter.max_level);
+      const rejectTokens = [];
+      (state.reject || []).forEach((rule) => {
+        if (rule.enabled === false) return;
+        (rule.comment_contains || []).forEach((v) => rejectTokens.push(v));
+        (rule.text_contains || []).forEach((v) => rejectTokens.push(v));
+      });
+      els.rejectComment.value = rejectTokens.join(',');
     }
     function render() { renderList(); renderForm(); }
-    function newFilter() { return { name:`filter_${state.filters.length + 1}`, enabled:true, priority:100, min_box1:100, min_box2:25, countries:[], badges:[] }; }
+    function newFilter() {
+      return {
+        name: `filter_${state.filters.length + 1}`,
+        enabled: true,
+        priority: 100,
+        min_box1: 50,
+        max_box1: 50,
+        min_box2: 1,
+        max_box2: 1,
+        min_rate: 50,
+        max_rate: 50,
+        min_level: 1,
+        max_level: 1,
+      };
+    }
     async function loadFilters() {
       const res = await fetch('/api/filters?_=' + Date.now(), { cache:'no-store' });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      state.path = data.path || ''; state.filters = Array.isArray(data.filters) ? data.filters : [];
+      state.path = data.path || '';
+      state.filters = Array.isArray(data.filters) ? data.filters : [];
+      state.reject = Array.isArray(data.reject) ? data.reject : [];
       state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1));
-      els.path.textContent = state.path; els.status.textContent = `Đã tải ${state.filters.length} bộ lọc`; render();
+      els.path.textContent = state.path;
+      els.status.textContent = `Đã tải ${state.filters.length} bộ lọc` + (state.reject.length ? ` | chặn ${state.reject.length}` : '');
+      render();
     }
     async function saveFilters() {
       syncFormToFilter();
-      const res = await fetch('/api/filters', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ filters:state.filters }) });
+      const res = await fetch('/api/filters', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ filters:state.filters, reject:state.reject }) });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Lưu thất bại');
-      state.filters = data.filters || []; state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1)); els.status.textContent = `Đã lưu ${state.filters.length} bộ lọc`; render();
+      state.filters = data.filters || [];
+      state.reject = data.reject || [];
+      state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1));
+      els.status.textContent = `Đã lưu ${state.filters.length} bộ lọc` + (state.reject.length ? ` | chặn ${state.reject.length}` : '');
+      render();
     }
     $('queueBtn').addEventListener('click', () => window.location.href = '/');
     $('reloadBtn').addEventListener('click', () => loadFilters().catch((err) => els.status.textContent = err.message));
     $('saveBtn').addEventListener('click', () => saveFilters().catch((err) => els.status.textContent = err.message));
     $('addBtn').addEventListener('click', () => { syncFormToFilter(); state.filters.push(newFilter()); state.selected = state.filters.length - 1; render(); els.status.textContent = 'Đã thêm'; });
-    $('copyBtn').addEventListener('click', () => { syncFormToFilter(); const filter = currentFilter(); if (!filter) return; const copy = JSON.parse(JSON.stringify(filter)); copy.name = `${copy.name || 'filter'}_copy`; state.filters.splice(state.selected + 1, 0, copy); state.selected += 1; render(); els.status.textContent = 'Đã nhân bản'; });
-    $('deleteBtn').addEventListener('click', () => { if (!currentFilter()) return; state.filters.splice(state.selected, 1); state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1)); render(); els.status.textContent = 'Đã xóa'; });
-    els.countryButton.addEventListener('click', () => {
+    $('copyBtn').addEventListener('click', () => {
+      syncFormToFilter();
+      const filter = currentFilter(); if (!filter) return;
+      const copy = JSON.parse(JSON.stringify(filter));
+      copy.name = `${copy.name || 'filter'}_copy`;
+      state.filters.splice(state.selected + 1, 0, copy);
+      state.selected += 1;
+      render();
+      els.status.textContent = 'Đã nhân bản';
+    });
+    $('deleteBtn').addEventListener('click', () => {
       if (!currentFilter()) return;
-      const open = !els.countryCombo.classList.contains('open');
-      els.countryCombo.classList.toggle('open', open);
-      els.countryButton.setAttribute('aria-expanded', open ? 'true' : 'false');
-      if (open) { els.countrySearch.focus(); renderCountryList(currentFilter()); }
+      state.filters.splice(state.selected, 1);
+      state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1));
+      render();
+      els.status.textContent = 'Đã xóa';
     });
-    els.countrySearch.addEventListener('input', () => renderCountryList(currentFilter()));
-    els.allCountries.addEventListener('change', () => { const filter = currentFilter(); if (!filter) return; if (els.allCountries.checked) filter.countries = []; updateCountrySummary(filter); renderCountryList(filter); renderList(); });
-    els.countryList.addEventListener('change', (event) => {
-      const checkbox = event.target.closest('input[type="checkbox"][data-code]');
-      const filter = currentFilter();
-      if (!checkbox || !filter) return;
-      const selected = new Set(sortCountries(filter.countries));
-      if (checkbox.checked) selected.add(checkbox.dataset.code);
-      else selected.delete(checkbox.dataset.code);
-      filter.countries = sortCountries([...selected]);
-      compactFilter(filter);
-      updateCountrySummary(filter);
-      renderCountryList(filter);
-      renderList();
+    document.querySelectorAll('input').forEach((node) => {
+      node.addEventListener('input', () => { syncFormToFilter(); renderList(); });
+      node.addEventListener('change', () => { syncFormToFilter(); renderList(); });
     });
-    document.addEventListener('click', (event) => {
-      if (els.countryCombo.contains(event.target)) return;
-      els.countryCombo.classList.remove('open');
-      els.countryButton.setAttribute('aria-expanded', 'false');
-    });
-    document.querySelectorAll('input, textarea').forEach((node) => { node.addEventListener('input', () => { syncFormToFilter(); renderList(); els.title.textContent = currentFilter()?.name || 'Bộ lọc'; }); node.addEventListener('change', () => { syncFormToFilter(); renderList(); }); });
     loadFilters().catch((err) => els.status.textContent = err.message);
   </script>
   <script>
@@ -1250,6 +505,7 @@ BROADCAST_HTML = r"""<!doctype html>
       <div class="toolbar">
         <button id="queueBtn" class="button">Hàng đợi</button>
         <button id="watchBtn" class="button">Nhóm theo dõi</button>
+        <button id="botsBtn" class="button">Bot (24)</button>
         <button id="discoverBtn" class="button primary">Quét nhóm bot vừa được add</button>
         <button id="reloadBtn" class="button">Tải lại</button>
         <button id="logoutBtn" class="button">Đăng xuất</button>
@@ -1274,7 +530,14 @@ BROADCAST_HTML = r"""<!doctype html>
         </div>
         <div id="botHint" class="hint">
           <b>Telethon session</b> chỉ dùng để đọc tin từ nhóm nguồn.<br>
-          Các bot bên trên gửi tin tới nhóm đã add bot và được <b>duyệt trên web</b>.
+          Các bot bên trên gửi tin tới nhóm đã add bot và được <b>duyệt trên web</b>.<br>
+          <b>Quét nhóm</b> chỉ thấy group có update gần đây (add bot / nhắn tin). Bot API <b>không list</b> hết group cũ.
+          Nếu không ra: kick bot → add lại, hoặc gửi 1 tin trong group, hoặc nhập Chat ID bên dưới.
+        </div>
+        <div class="form-grid" style="margin-bottom:14px;">
+          <div class="field"><label for="manualNameInput">Thêm thủ công — Tên</label><input id="manualNameInput" placeholder="Tên nhóm"></div>
+          <div class="field"><label for="manualChatIdInput">Chat ID</label><input id="manualChatIdInput" placeholder="-100xxxxxxxxxx"></div>
+          <div class="field full"><button id="manualAddBtn" class="button">Thêm vào chờ duyệt</button></div>
         </div>
         <div class="form-grid">
           <div class="field"><label for="nameInput">Tên nhóm</label><input id="nameInput"></div>
@@ -1364,13 +627,43 @@ BROADCAST_HTML = r"""<!doctype html>
       renderList(); renderForm();
     }
     async function discoverGroups(){
+      els.status.textContent = 'Đang quét getUpdates trên tất cả bot...';
       const res = await fetch('/api/broadcast-groups/discover', { method:'POST' });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Discover failed');
       state.pending = data.pending || [];
       state.approved = data.approved || [];
       state.tab = 'pending';
       setTab('pending');
-      els.status.textContent = `Quét xong: thêm ${data.added || 0}, cập nhật ${data.updated || 0}, bot quét ${(data.scans || []).length}`;
+      const scans = data.scans || [];
+      const withUpdates = scans.filter((s) => (s.update_count || s.count || 0) > 0).length;
+      const empty = scans.length - withUpdates;
+      const names = (data.new_pending || []).map((g) => g.name).filter(Boolean);
+      const parts = [
+        `Thêm mới ${data.added || 0}`,
+        `cập nhật ${data.updated || 0}`,
+        `đã duyệt sẵn ${data.already_approved || 0}`,
+        `bot có update ${withUpdates}/${scans.length}`,
+      ];
+      if (names.length) parts.push('mới: ' + names.join(', '));
+      if (empty > 0) parts.push(`${empty} bot chưa có update (add lại bot hoặc nhắn 1 tin trong group)`);
+      els.status.textContent = 'Quét xong: ' + parts.join(' | ');
+    }
+    async function manualAddGroup(){
+      const name = $('manualNameInput').value.trim();
+      const chatId = $('manualChatIdInput').value.trim();
+      if (!chatId) throw new Error('Nhập Chat ID');
+      const res = await fetch('/api/broadcast-groups/manual-add', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({ name, chat_id: chatId }),
+      });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Add failed');
+      state.pending = data.pending || [];
+      state.approved = data.approved || [];
+      state.tab = 'pending';
+      setTab('pending');
+      $('manualChatIdInput').value = '';
+      els.status.textContent = data.created ? `Đã thêm ${chatId} vào chờ duyệt` : `Đã cập nhật ${chatId}`;
     }
     async function approveCurrent(){
       const g = current(); if (!g?.id) throw new Error('Chọn nhóm pending');
@@ -1416,8 +709,10 @@ BROADCAST_HTML = r"""<!doctype html>
     }
     $('queueBtn').onclick = () => location.href = '/';
     $('watchBtn').onclick = () => location.href = '/watch';
+    $('botsBtn').onclick = () => location.href = '/bots';
     $('reloadBtn').onclick = () => Promise.all([loadBots(), loadGroups()]).catch((e) => els.status.textContent = e.message);
     $('discoverBtn').onclick = () => discoverGroups().catch((e) => els.status.textContent = e.message);
+    $('manualAddBtn').onclick = () => manualAddGroup().catch((e) => els.status.textContent = e.message);
     $('tabPending').onclick = () => setTab('pending');
     $('tabApproved').onclick = () => setTab('approved');
     $('approveBtn').onclick = () => approveCurrent().catch((e) => els.status.textContent = e.message);
@@ -1427,6 +722,132 @@ BROADCAST_HTML = r"""<!doctype html>
     $('testAllBtn').onclick = () => testSend(true).catch((e) => els.status.textContent = e.message);
     ['nameInput','enabledInput'].forEach((id) => { $(id).addEventListener('input', () => { syncForm(); renderList(); }); $(id).addEventListener('change', () => { syncForm(); renderList(); }); });
     Promise.all([loadBots(), loadGroups()]).catch((e) => els.status.textContent = e.message);
+  </script>
+  <script>
+""" + LOGOUT_SCRIPT + r"""
+</body>
+</html>
+"""
+
+BOTS_HTML = r"""<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quản lý Bot</title>
+  <style>
+    :root { --bg:#f5f6f8; --surface:#fff; --border:#d7dce2; --text:#20242a; --muted:#66707b; --blue:#1d5fd0; --green:#17803d; --red:#b42318; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:var(--bg); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    button,input { font:inherit; }
+    .shell { min-height:100vh; display:grid; grid-template-rows:auto auto 1fr; }
+    .topbar,.subbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 20px; background:#151922; color:#f9fafb; }
+    .topbar { min-height:58px; }
+    .subbar { min-height:46px; background:#1d2430; border-top:1px solid #252b36; }
+    h1 { margin:0; font-size:18px; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; }
+    .button { height:34px; display:inline-flex; align-items:center; justify-content:center; border:1px solid #394252; background:#263040; color:#f9fafb; border-radius:6px; padding:0 12px; cursor:pointer; }
+    .button.primary { background:var(--blue); border-color:#3170df; }
+    .main { padding:18px; overflow:auto; }
+    .card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th,td { border-bottom:1px solid #edf0f3; padding:10px 8px; text-align:left; vertical-align:middle; }
+    th { color:var(--muted); font-size:11px; text-transform:uppercase; background:#fbfcfd; position:sticky; top:0; }
+    input[type=text] { width:100%; border:1px solid var(--border); border-radius:6px; padding:8px 10px; }
+    .pill { display:inline-flex; align-items:center; height:22px; padding:0 8px; border-radius:999px; font-size:12px; font-weight:700; }
+    .pill.on { color:var(--green); background:#eaf7ee; border:1px solid #a8dfba; }
+    .pill.off { color:var(--red); background:#fff0ee; border:1px solid #f5b6ad; }
+    .hint,.status { margin-top:12px; padding:10px; border:1px solid var(--border); border-radius:6px; background:#fbfcfd; color:var(--muted); font-size:13px; line-height:1.45; }
+    .hint { margin-top:0; margin-bottom:12px; background:#fffdf5; border-color:#f0d199; }
+    .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <h1>Bot Telegram</h1>
+      <div class="toolbar">
+        <button id="queueBtn" class="button">Hàng đợi</button>
+        <button id="watchBtn" class="button">Nhóm theo dõi</button>
+        <button id="broadcastBtn" class="button">Phát tin</button>
+        <button id="importEnvBtn" class="button">Import .env</button>
+        <button id="reloadBtn" class="button">Tải lại</button>
+        <button id="syncBtn" class="button">Đồng bộ Telegram</button>
+        <button id="saveBtn" class="button primary">Lưu</button>
+        <button id="logoutBtn" class="button">Đăng xuất</button>
+      </div>
+    </header>
+    <div class="subbar"><div id="summary" style="color:#aeb6c3;">Sẵn sàng</div></div>
+    <main class="main">
+      <div class="card">
+        <div class="hint">Load nhanh từ cache DB. Bấm <b>Đồng bộ Telegram</b> khi cần gọi getMe lại (song song). Mỗi nhóm theo dõi chọn list bot riêng.</div>
+        <table>
+          <thead><tr><th>Slot</th><th>Tên</th><th>@username</th><th>Token</th><th>Bật</th></tr></thead>
+          <tbody id="botRows"></tbody>
+        </table>
+        <div id="status" class="status">Sẵn sàng</div>
+      </div>
+    </main>
+  </div>
+  <script>
+    const state = { bots: [] };
+    const $ = (id) => document.getElementById(id);
+    function esc(v){ return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function render(){
+      $('botRows').innerHTML = state.bots.map((b) => {
+        const user = b.username ? '@' + b.username : (b.telegram_username ? '@' + b.telegram_username : '-');
+        const pill = b.enabled !== false ? 'on' : 'off';
+        return `<tr data-id="${b.id}">
+          <td class="mono">${esc(b.short_name)}</td>
+          <td>${esc(b.display_name || b.telegram_display_name || b.short_name)}</td>
+          <td class="mono">${esc(user)}</td>
+          <td><input data-field="token" type="text" value="${esc(b.token || '')}" placeholder="${esc(b.token_hint || 'token...')}"></td>
+          <td><label><input data-field="enabled" type="checkbox" ${b.enabled !== false ? 'checked' : ''}> <span class="pill ${pill}">${b.enabled !== false ? 'on' : 'off'}</span></label></td>
+        </tr>`;
+      }).join('');
+      const active = state.bots.filter((b) => b.enabled !== false && (b.token || '').trim()).length;
+      $('summary').textContent = `${active}/${state.bots.length} bot có token`;
+    }
+    function collect(){
+      return state.bots.map((b) => {
+        const row = document.querySelector(`tr[data-id="${b.id}"]`);
+        const token = row?.querySelector('[data-field="token"]')?.value?.trim() || b.token || '';
+        const enabled = !!row?.querySelector('[data-field="enabled"]')?.checked;
+        return { short_name:b.short_name, token, enabled, sort_order:b.sort_order, telegram_username:b.telegram_username, telegram_display_name:b.telegram_display_name };
+      });
+    }
+    async function load(refresh=false){
+      $('status').textContent = refresh ? 'Đang đồng bộ Telegram...' : 'Đang tải cache...';
+      const url = '/api/bot-slots?_=' + Date.now() + (refresh ? '&refresh=1' : '');
+      const res = await fetch(url, { cache:'no-store' });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      state.bots = data.bots || [];
+      render();
+      const mode = data.from_cache ? 'cache' : 'telegram';
+      $('status').textContent = `Đã tải ${state.bots.length} bot (${mode}${data.refreshed ? `, sync ${data.refreshed}` : ''}).`;
+    }
+    async function save(){
+      const res = await fetch('/api/bot-slots', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ bots: collect() }) });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Save failed');
+      state.bots = data.bots || [];
+      render();
+      $('status').textContent = 'Đã lưu bot slots. Restart broadcast worker để áp dụng token mới.';
+    }
+    async function importEnv(){
+      const res = await fetch('/api/bot-slots/import-env', { method:'POST' });
+      const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Import failed');
+      state.bots = data.bots || [];
+      render();
+      $('status').textContent = data.imported ? `Import ${data.imported} token từ .env` : 'Không có token mới';
+    }
+    $('queueBtn').onclick = () => location.href = '/';
+    $('watchBtn').onclick = () => location.href = '/watch';
+    $('broadcastBtn').onclick = () => location.href = '/broadcast';
+    $('reloadBtn').onclick = () => load(false).catch((e) => $('status').textContent = e.message);
+    $('syncBtn').onclick = () => load(true).catch((e) => $('status').textContent = e.message);
+    $('saveBtn').onclick = () => save().catch((e) => $('status').textContent = e.message);
+    $('importEnvBtn').onclick = () => importEnv().catch((e) => $('status').textContent = e.message);
+    load(false).catch((e) => $('status').textContent = e.message);
   </script>
   <script>
 """ + LOGOUT_SCRIPT + r"""
@@ -1474,6 +895,16 @@ WATCH_HTML = r"""<!doctype html>
     .status,.hint { margin-top:12px; padding:10px; border:1px solid var(--border); border-radius:6px; background:#fbfcfd; color:var(--muted); font-size:13px; line-height:1.45; white-space:pre-wrap; }
     .hint { margin-top:0; margin-bottom:12px; background:#fffdf5; border-color:#f0d199; }
     .checkline { display:flex; align-items:center; gap:8px; min-height:38px; }
+    .bot-add-row { display:flex; gap:8px; align-items:center; }
+    .bot-add-row input { flex:1; }
+    .bot-tags { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; min-height:36px; }
+    .bot-tag { display:inline-flex; align-items:center; gap:8px; border:1px solid #b8d4f5; border-radius:6px; padding:6px 10px; background:#edf4ff; font-size:13px; }
+    .bot-tag .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-weight:700; }
+    .bot-tag button { border:0; background:transparent; cursor:pointer; color:var(--red); font-size:16px; line-height:1; padding:0; }
+    .bot-empty { color:var(--muted); font-size:13px; padding:8px 0; }
+    .env-bot-list { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .env-bot-pick { display:inline-flex; align-items:center; border:1px dashed #b8c4d6; border-radius:6px; padding:6px 10px; background:#fff; font-size:12px; cursor:pointer; color:var(--blue); }
+    .env-bot-pick:hover { background:#edf4ff; border-color:#8eb8ea; }
   </style>
 </head>
 <body>
@@ -1482,6 +913,7 @@ WATCH_HTML = r"""<!doctype html>
       <h1>Nhóm theo dõi (Telethon)</h1>
       <div class="toolbar">
         <button id="queueBtn" class="button">Hàng đợi</button>
+        <button id="botsBtn" class="button">Bot (24)</button>
         <button id="broadcastBtn" class="button">Phát tin</button>
         <button id="importEnvBtn" class="button">Import từ .env</button>
         <button id="reloadBtn" class="button">Tải lại</button>
@@ -1499,13 +931,22 @@ WATCH_HTML = r"""<!doctype html>
       <section class="editor">
         <div class="hint">
           <b>Telethon session</b> (tài khoản của bạn) đọc tin từ các nhóm này.<br>
-          Tin khớp filter sẽ vào queue và bot gửi tới các nhóm đã duyệt ở trang <b>Broadcast</b>.<br>
-          Chat ID: <code>-1003431776950</code>, <code>@channel</code>, hoặc <code>#-100...</code>. Session phải là thành viên nhóm.
+          Tin khớp filter sẽ vào queue. Chỉ các bot được chọn bên dưới mới gửi broadcast cho nhóm này.
         </div>
         <div class="form-grid">
           <div class="field"><label for="nameInput">Tên nhóm</label><input id="nameInput" placeholder="Moon v7.81"></div>
           <div class="field"><label for="chatIdInput">Chat ID / @username</label><input id="chatIdInput" placeholder="-1003431776950"></div>
           <div class="field"><label class="checkline"><input id="enabledInput" type="checkbox" checked> Bật</label></div>
+          <div class="field full">
+            <label for="botIdInput">Bot gửi tin cho nhóm này</label>
+            <div class="bot-add-row">
+              <input id="botIdInput" placeholder="@clone_tetris02_bot, @cl_bot1_bot">
+              <button id="addBotBtn" class="button primary" type="button">Thêm bot</button>
+            </div>
+            <div id="envBotList" class="env-bot-list"></div>
+            <div id="botTags" class="bot-tags"></div>
+            <div class="group-meta" style="margin-top:8px;">Chỉ dùng bot có token trong <b>.env</b> (<code>TELEGRAM_BOT_TOKEN</code> / <code>TELEGRAM_BOT_TOKENS</code>). Nhập <b>@username</b> hoặc bấm tên bên trên.</div>
+          </div>
           <div class="field full">
             <button id="addBtn" class="button primary">Thêm nhóm</button>
             <button id="saveBtn" class="button">Lưu thay đổi</button>
@@ -1517,21 +958,133 @@ WATCH_HTML = r"""<!doctype html>
     </main>
   </div>
   <script>
-    const state = { groups:[], selected:0 };
+    const state = { groups:[], selected:0, bots:[] };
     const $ = (id) => document.getElementById(id);
-    const els = { list:$('groupList'), status:$('status'), summary:$('summary'), name:$('nameInput'), chatId:$('chatIdInput'), enabled:$('enabledInput') };
+    const els = { list:$('groupList'), status:$('status'), summary:$('summary'), name:$('nameInput'), chatId:$('chatIdInput'), enabled:$('enabledInput'), botIdInput:$('botIdInput'), botTags:$('botTags'), envBotList:$('envBotList') };
     function esc(v){ return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
     function current(){ return state.groups[state.selected] || null; }
+    function botById(){ return Object.fromEntries(state.bots.map((b) => [Number(b.id), b])); }
+    function botUsername(bot){ return String(bot?.username || '').trim().toLowerCase().replace(/^@+/, ''); }
+    function botDisplayName(bot){ return bot?.name || (bot?.username ? '@' + bot.username : '?'); }
+    function buildBotLookups(){
+      const byUsername = {};
+      for (const b of state.bots) {
+        const username = botUsername(b);
+        if (username) byUsername[username] = b;
+      }
+      return { byUsername };
+    }
+    function parseBotRefs(text){
+      return String(text || '').split(/[\s,;]+/).map((v) => v.trim()).filter(Boolean);
+    }
+    function findBot(ref){
+      const key = String(ref || '').trim().toLowerCase().replace(/^@+/, '');
+      if (!key) return null;
+      return buildBotLookups().byUsername[key] || null;
+    }
+    function availableBotNames(){
+      return state.bots.map((b) => botDisplayName(b)).filter((v) => v && v !== '?');
+    }
+    function ensureBotIds(g){
+      if (!Array.isArray(g.bot_ids)) g.bot_ids = [];
+      return g.bot_ids;
+    }
     function syncForm(){
       const g = current(); if (!g) return;
       g.name = els.name.value.trim() || g.name;
       g.enabled = els.enabled.checked;
     }
+    function addBotByUsername(username){
+      const g = current(); if (!g) throw new Error('Chọn nhóm trước');
+      const bot = findBot(username);
+      if (!bot) throw new Error('Bot không có trong .env: ' + username);
+      const ids = ensureBotIds(g);
+      const id = Number(bot.id);
+      if (!ids.includes(id)) ids.push(id);
+      renderBotTags(); renderList();
+      return botDisplayName(bot);
+    }
+    function addBotsFromInput(){
+      const g = current(); if (!g) throw new Error('Chọn nhóm trước');
+      const refs = parseBotRefs(els.botIdInput.value);
+      if (!refs.length) throw new Error('Nhập @username bot từ danh sách .env');
+      const added = [];
+      const unknown = [];
+      for (const ref of refs) {
+        try {
+          const name = addBotByUsername(ref);
+          if (!added.includes(name)) added.push(name);
+        } catch (e) {
+          unknown.push(ref);
+        }
+      }
+      if (unknown.length) {
+        const hint = availableBotNames().join(', ');
+        throw new Error('Bot không có trong .env: ' + unknown.join(', ') + (hint ? ' — có: ' + hint : ''));
+      }
+      els.botIdInput.value = '';
+      if (added.length) els.status.textContent = `Đã thêm ${added.join(', ')} — bấm Lưu để áp dụng`;
+    }
+    function removeBot(botId){
+      const g = current(); if (!g) return;
+      g.bot_ids = ensureBotIds(g).filter((id) => Number(id) !== Number(botId));
+      renderBotTags(); renderList(); renderEnvBotList();
+    }
+    function renderBotTags(){
+      const g = current();
+      const byId = botById();
+      if (!g) {
+        els.botTags.innerHTML = '<div class="bot-empty">Chọn nhóm để gán bot</div>';
+        els.botIdInput.disabled = true;
+        $('addBotBtn').disabled = true;
+        return;
+      }
+      els.botIdInput.disabled = false;
+      $('addBotBtn').disabled = false;
+      const tags = ensureBotIds(g).map((id) => {
+        const bot = byId[Number(id)];
+        const name = botDisplayName(bot);
+        return `<span class="bot-tag"><span class="mono">${esc(name)}</span><button type="button" data-remove-bot="${id}" title="Xóa">×</button></span>`;
+      });
+      els.botTags.innerHTML = tags.length ? tags.join('') : '<div class="bot-empty">Chưa gán bot — nhập @username từ danh sách .env</div>';
+      els.botTags.querySelectorAll('[data-remove-bot]').forEach((btn) => btn.addEventListener('click', () => removeBot(btn.dataset.removeBot)));
+    }
+    function groupBotSummary(g){
+      const byId = botById();
+      const names = (g.bot_ids || []).map((id) => botDisplayName(byId[Number(id)])).filter((v) => v && v !== '?');
+      if (!names.length) return '0 bot';
+      const preview = names.slice(0, 3).join(', ');
+      const more = names.length > 3 ? ` +${names.length - 3}` : '';
+      return `${preview}${more} · ${names.length} bot`;
+    }
+    function renderEnvBotList(){
+      const g = current();
+      if (!state.bots.length) {
+        els.envBotList.innerHTML = '<div class="bot-empty">Chưa có bot trong .env — thêm TELEGRAM_BOT_TOKEN / TELEGRAM_BOT_TOKENS</div>';
+        return;
+      }
+      const selected = new Set((g?.bot_ids || []).map(Number));
+      els.envBotList.innerHTML = state.bots.map((b) => {
+        const name = botDisplayName(b);
+        const picked = selected.has(Number(b.id));
+        return `<button type="button" class="env-bot-pick" data-pick-bot="${esc(b.username || name)}" ${g && !picked ? '' : 'disabled'}>${esc(name)}</button>`;
+      }).join('');
+      els.envBotList.querySelectorAll('[data-pick-bot]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          try {
+            const added = addBotByUsername(btn.dataset.pickBot);
+            els.status.textContent = `Đã thêm ${added} — bấm Lưu để áp dụng`;
+          } catch (e) { els.status.textContent = e.message; }
+        });
+      });
+    }
     function renderList(){
       els.list.innerHTML = state.groups.length ? state.groups.map((g,i) => {
         const pill = g.enabled !== false ? 'on' : 'off';
         const pillText = g.enabled !== false ? 'bật' : 'tắt';
-        return `<li class="group-row ${i===state.selected?'selected':''}" data-index="${i}"><div><div class="group-name">${esc(g.name)}</div><div class="group-meta">${esc(g.chat_id)}</div></div><span class="pill ${pill}">${pillText}</span></li>`;
+        const botCount = (g.bot_ids || []).length;
+        const botMeta = groupBotSummary(g);
+        return `<li class="group-row ${i===state.selected?'selected':''}" data-index="${i}"><div><div class="group-name">${esc(g.name)}</div><div class="group-meta">${esc(g.chat_id)} · ${esc(botMeta)}</div></div><span class="pill ${pill}">${pillText}</span></li>`;
       }).join('') : `<li class="group-row"><div><div class="group-name">Chưa có nhóm</div><div class="group-meta">Thêm Chat ID bên phải</div></div></li>`;
       els.list.querySelectorAll('.group-row[data-index]').forEach((row) => row.addEventListener('click', () => { syncForm(); state.selected = Number(row.dataset.index); renderForm(); renderList(); }));
       els.summary.textContent = `${state.groups.length} nhóm | ${state.groups.filter((g) => g.enabled !== false).length} đang bật`;
@@ -1545,11 +1098,14 @@ WATCH_HTML = r"""<!doctype html>
       els.enabled.checked = g ? g.enabled !== false : true;
       $('deleteBtn').disabled = !g;
       $('saveBtn').disabled = !g;
+      renderBotTags();
+      renderEnvBotList();
     }
     async function loadGroups(){
       const res = await fetch('/api/watch-groups?_=' + Date.now(), { cache:'no-store' });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      state.groups = data.groups || [];
+      state.groups = (data.groups || []).map((g) => ({ ...g, bot_ids: g.bot_ids || [] }));
+      state.bots = data.bots || [];
       state.selected = Math.min(state.selected, Math.max(0, state.groups.length - 1));
       renderList(); renderForm();
     }
@@ -1558,6 +1114,7 @@ WATCH_HTML = r"""<!doctype html>
       const res = await fetch('/api/watch-groups', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ groups: state.groups }) });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Save failed');
       state.groups = data.groups || [];
+      state.bots = data.bots || state.bots;
       els.status.textContent = `Đã lưu ${state.groups.length} nhóm. Telethon reader sẽ tự reload trong ~30s.`;
       renderList(); renderForm();
     }
@@ -1566,7 +1123,7 @@ WATCH_HTML = r"""<!doctype html>
       const chatId = els.chatId.value.trim();
       if (!chatId) throw new Error('Nhập Chat ID hoặc @username');
       if (state.groups.some((g) => g.chat_id === chatId)) throw new Error('Chat ID đã tồn tại');
-      state.groups.push({ name: name || chatId, chat_id: chatId, enabled: els.enabled.checked });
+      state.groups.push({ name: name || chatId, chat_id: chatId, enabled: els.enabled.checked, bot_ids: [] });
       state.selected = state.groups.length - 1;
       renderList(); renderForm();
       els.status.textContent = 'Đã thêm vào danh sách — bấm Lưu để áp dụng';
@@ -1593,12 +1150,15 @@ WATCH_HTML = r"""<!doctype html>
       els.status.textContent = data.imported ? `Import ${data.imported} nhóm từ .env` : 'Không có nhóm mới từ .env';
     }
     $('queueBtn').onclick = () => location.href = '/';
+    $('botsBtn').onclick = () => location.href = '/bots';
     $('broadcastBtn').onclick = () => location.href = '/broadcast';
     $('reloadBtn').onclick = () => loadGroups().catch((e) => els.status.textContent = e.message);
     $('importEnvBtn').onclick = () => importEnv().catch((e) => els.status.textContent = e.message);
     $('addBtn').onclick = () => { try { addGroup(); } catch (e) { els.status.textContent = e.message; } };
+    $('addBotBtn').onclick = () => { try { addBotsFromInput(); } catch (e) { els.status.textContent = e.message; } };
     $('saveBtn').onclick = () => saveGroups().catch((e) => els.status.textContent = e.message);
     $('deleteBtn').onclick = () => deleteCurrent().catch((e) => els.status.textContent = e.message);
+    els.botIdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); try { addBotsFromInput(); } catch (err) { els.status.textContent = err.message; } } });
     ['nameInput','enabledInput'].forEach((id) => { $(id).addEventListener('input', () => { syncForm(); renderList(); }); $(id).addEventListener('change', () => { syncForm(); renderList(); }); });
     loadGroups().catch((e) => els.status.textContent = e.message);
   </script>
@@ -1697,6 +1257,7 @@ PHONE_MONITOR_HTML = r"""<!doctype html>
 class QueueUiHandler(BaseHTTPRequestHandler):
     db: ChatDatabase
     config: QueueUiConfig
+    _last_queue_prune_at: float = 0.0
 
     def _session_cookie_value(self) -> Optional[str]:
         return parse_cookie_header(self.headers.get("Cookie", ""), SESSION_COOKIE)
@@ -1705,7 +1266,11 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         return is_authenticated(self._session_cookie_value(), self.config)
 
     def _auth_is_public(self, path: str) -> bool:
-        return path in PUBLIC_PATHS or path.startswith("/api/auth/")
+        return (
+            path in PUBLIC_PATHS
+            or path.startswith("/api/auth/")
+            or path == "/api/desktop/pull"
+        )
 
     def _ensure_auth(self) -> bool:
         parsed = urlparse(self.path)
@@ -1806,11 +1371,19 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_headers("text/html; charset=utf-8", len(WATCH_HTML.encode("utf-8")))
             return
 
+        if parsed.path == "/bots":
+            self._send_headers("text/html; charset=utf-8", len(BOTS_HTML.encode("utf-8")))
+            return
+
         if parsed.path == "/phone-monitor":
             self._send_headers("text/html; charset=utf-8", len(PHONE_MONITOR_HTML.encode("utf-8")))
             return
 
         if parsed.path == "/api/queue":
+            self._send_headers("application/json; charset=utf-8", 0)
+            return
+
+        if parsed.path == "/api/deeplink/resolve":
             self._send_headers("application/json; charset=utf-8", 0)
             return
 
@@ -1834,6 +1407,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_headers("application/json; charset=utf-8", 0)
             return
 
+        if parsed.path == "/api/bot-slots":
+            self._send_headers("application/json; charset=utf-8", 0)
+            return
+
         if parsed.path == "/api/phone/config":
             self._send_headers("application/json; charset=utf-8", 0)
             return
@@ -1853,9 +1430,15 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/desktop/pull":
+            query = parse_qs(parsed.query)
+            token = str((query.get("token") or [""])[0])
+            self._send_json(pull_pending(token, self.config.desktop_pull_token))
+            return
+
         if not self._ensure_auth():
             return
-        parsed = urlparse(self.path)
         if parsed.path == "/login":
             self._send_html(LOGIN_HTML)
             return
@@ -1865,6 +1448,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/":
+            self._send_html(HTML)
+            return
+
+        if parsed.path == "/desktop-tool":
             self._send_html(HTML)
             return
 
@@ -1880,12 +1467,20 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_html(WATCH_HTML)
             return
 
+        if parsed.path == "/bots":
+            self._send_html(BOTS_HTML)
+            return
+
         if parsed.path == "/phone-monitor":
             self._send_html(PHONE_MONITOR_HTML)
             return
 
         if parsed.path == "/api/queue":
             self._send_json(self._queue_snapshot(parse_qs(parsed.query)))
+            return
+
+        if parsed.path == "/api/deeplink/resolve":
+            self._resolve_deeplink_link(parse_qs(parsed.query))
             return
 
         if parsed.path == "/events":
@@ -1908,6 +1503,16 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_json(self._watch_groups_snapshot())
             return
 
+        if parsed.path == "/api/bot-slots":
+            query = parse_qs(parsed.query)
+            refresh = str((query.get("refresh") or ["0"])[0]).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            self._send_json(self._bot_slots_snapshot(refresh=refresh))
+            return
+
         if parsed.path == "/api/phone/config":
             self._send_json(_phone_config())
             return
@@ -1922,6 +1527,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/phone/adb-devices":
             self._send_json(_adb_devices())
+            return
+
+        if parsed.path == "/api/desktop/status":
+            self._send_json(desktop_status())
             return
 
         self.send_error(404)
@@ -1939,6 +1548,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         if not self._ensure_auth():
             return
 
+        if parsed.path == "/api/deeplink/resolve":
+            self._resolve_deeplink_link_post()
+            return
+
         if parsed.path == "/api/filters":
             self._save_filters()
             return
@@ -1949,6 +1562,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/broadcast-groups/discover":
             self._discover_broadcast_groups()
+            return
+
+        if parsed.path == "/api/broadcast-groups/manual-add":
+            self._manual_add_broadcast_group()
             return
 
         if parsed.path == "/api/broadcast-groups/approve":
@@ -1975,12 +1592,24 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._import_watch_groups_from_env()
             return
 
+        if parsed.path == "/api/bot-slots":
+            self._save_bot_slots()
+            return
+
+        if parsed.path == "/api/bot-slots/import-env":
+            self._import_bot_slots_from_env()
+            return
+
         if parsed.path == "/api/phone/job-result":
             self._phone_job_result()
             return
 
         if parsed.path == "/api/queue/mark-done":
             self._queue_mark_done()
+            return
+
+        if parsed.path == "/api/desktop/open":
+            self._desktop_open_post()
             return
 
         if parsed.path == "/api/phone/screenshot":
@@ -1999,6 +1628,32 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args) -> None:
         logger.debug("%s - %s", self.client_address[0], fmt % args)
+
+    def _desktop_open_post(self) -> None:
+        import html as html_module
+
+        try:
+            payload = self._read_json_body()
+            url = html_module.unescape(str(payload.get("url") or "").strip())
+            job_id = payload.get("job_id")
+            ttl_seconds = int(payload.get("ttl_seconds") or 30)
+            click_after_ms = int(payload.get("click_after_ms") or 0)
+            time_label = str(payload.get("time_label") or "").strip()
+            parsed_job_id = int(job_id) if job_id is not None else None
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+
+        result = enqueue_open(
+            url,
+            job_id=parsed_job_id,
+            ttl_seconds=ttl_seconds,
+            dedup_seconds=self.config.desktop_dedup_seconds,
+            click_after_ms=click_after_ms,
+            time_label=time_label,
+        )
+        status = 200 if result.get("ok") else 400
+        self._send_json(result, status=status)
 
     def _phone_next_job(self, query: Dict[str, List[str]]) -> Dict[str, object]:
         self._prune_queue_ttl()
@@ -2040,7 +1695,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         self._write_sse_comment("connected")
-        logger.info("SSE client connected address=%s after_id=%s", self.client_address[0], after_id)
+        logger.debug("SSE client connected address=%s after_id=%s", self.client_address[0], after_id)
 
         last_keepalive = time.time()
         while True:
@@ -2064,7 +1719,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                     last_keepalive = now
                 time.sleep(poll_seconds)
             except (BrokenPipeError, ConnectionResetError):
-                logger.info("SSE client disconnected address=%s", self.client_address[0])
+                logger.debug("SSE client disconnected address=%s", self.client_address[0])
                 return
             except Exception as exc:
                 logger.exception("SSE stream failed")
@@ -2187,6 +1842,29 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         if not head_only:
             self.wfile.write(body)
 
+    def _resolve_deeplink_link(self, query: Dict[str, List[str]]) -> None:
+        url = (query.get("url") or [""])[0]
+        context = (query.get("context") or [""])[0]
+        self._send_json(resolve_link_for_open(url, context))
+
+    def _resolve_deeplink_link_post(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+
+        url = str(payload.get("url") or "").strip()
+        context = str(payload.get("context") or "").strip()
+        if not context:
+            message = str(payload.get("message") or "").strip()
+            raw_payload = payload.get("payload")
+            context = item_context_from_parts(
+                message,
+                raw_payload if isinstance(raw_payload, dict) else {},
+            )
+        self._send_json(resolve_link_for_open(url, context))
+
     def _queue_snapshot(self, query: Dict[str, List[str]]) -> Dict[str, object]:
         self._prune_queue_ttl()
         requested_limit = _int_query(query, "limit", self.config.limit)
@@ -2196,10 +1874,12 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             limit=limit,
             statuses=statuses or None,
         )
+        items = [_enrich_queue_item(item) for item in items]
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "db_path": self.config.db_path,
             "refresh_seconds": self.config.refresh_seconds,
+            "queue_ttl_seconds": self.config.queue_ttl_seconds,
             "limit": limit,
             "requested_limit": requested_limit,
             "latest_id": items[0]["id"] if items else 0,
@@ -2209,6 +1889,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         }
 
     def _prune_queue_ttl(self) -> None:
+        now = time.time()
+        if now - QueueUiHandler._last_queue_prune_at < 60:
+            return
+        QueueUiHandler._last_queue_prune_at = now
         deleted = self.db.prune_queue_older_than(self.config.queue_ttl_seconds)
         if deleted["queue"] or deleted["messages"]:
             logger.info(
@@ -2220,10 +1904,12 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
     def _filters_snapshot(self) -> Dict[str, object]:
         path = Path(self.config.filter_config_path)
+        filters, reject = _load_filter_config(path)
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "path": str(path),
-            "filters": _load_filter_rules(path),
+            "filters": filters,
+            "reject": reject,
         }
 
     def _broadcast_groups_snapshot(self) -> Dict[str, object]:
@@ -2237,14 +1923,121 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         }
 
     def _broadcast_bots_snapshot(self) -> Dict[str, object]:
-        tokens = _bot_tokens()
-        bots = list_configured_bots(tokens)
+        return self._bot_slots_snapshot(refresh=False)
+
+    def _bot_slots_snapshot(self, *, refresh: bool = False) -> Dict[str, object]:
+        from bot_broadcast import fetch_bot_info, mask_bot_token
+
+        slots = self.db.list_broadcast_bots(include_disabled=True)
+        bots: List[Dict[str, Any]] = []
+        pending: List[tuple[int, Dict[str, Any], str]] = []
+
+        for slot in slots:
+            token = (slot.get("token") or "").strip()
+            if not token:
+                continue
+            cached_username = str(slot.get("telegram_username") or "").strip()
+            cached_display = str(slot.get("telegram_display_name") or "").strip()
+            item: Dict[str, Any] = {
+                "id": slot["id"],
+                "short_name": slot["short_name"],
+                "token": token,
+                "token_hint": mask_bot_token(token),
+                "enabled": slot.get("enabled", True),
+                "sort_order": slot.get("sort_order", 0),
+                "telegram_username": cached_username or None,
+                "telegram_display_name": cached_display or None,
+                "username": cached_username,
+                "display_name": cached_display or cached_username or slot["short_name"],
+                "mention": f"@{cached_username}" if cached_username else "",
+                "ok": bool(cached_username),
+                "cached": bool(cached_username),
+            }
+            bots.append(item)
+            if refresh or not cached_username:
+                pending.append((len(bots) - 1, slot, token))
+
+        refreshed = 0
+        if pending:
+            workers = min(12, len(pending))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(fetch_bot_info, token): (index, slot)
+                    for index, slot, token in pending
+                }
+                for future in as_completed(futures):
+                    index, slot = futures[future]
+                    item = bots[index]
+                    try:
+                        me = future.result()
+                        item.update(me)
+                        item["ok"] = True
+                        item["cached"] = False
+                        item["telegram_username"] = me.get("username") or item.get("telegram_username")
+                        item["telegram_display_name"] = me.get("display_name") or item.get(
+                            "telegram_display_name"
+                        )
+                        self.db.update_broadcast_bot_profile(
+                            int(slot["id"]),
+                            telegram_username=me.get("username"),
+                            telegram_display_name=me.get("display_name"),
+                        )
+                        refreshed += 1
+                    except Exception as exc:
+                        item["error"] = str(exc)
+                        if item.get("telegram_username"):
+                            item["ok"] = True
+                            item["cached"] = True
+
+        active = [bot for bot in bots if bot.get("enabled") and bot.get("token")]
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "count": len(tokens),
-            "active_count": sum(1 for bot in bots if bot.get("ok")),
+            "count": len(bots),
+            "active_count": len(active),
+            "from_cache": not refresh,
+            "refreshed": refreshed,
             "bots": bots,
         }
+
+    def _save_bot_slots(self) -> None:
+        try:
+            payload = self._read_json_body()
+            raw_bots = payload.get("bots")
+            if not isinstance(raw_bots, list):
+                raise ValueError("bots must be a list")
+            normalized = []
+            for raw in raw_bots:
+                if not isinstance(raw, dict):
+                    raise ValueError("each bot must be an object")
+                normalized.append(
+                    {
+                        "short_name": str(raw.get("short_name") or "").strip(),
+                        "token": str(raw.get("token") or "").strip(),
+                        "enabled": bool(raw.get("enabled", True)),
+                        "sort_order": raw.get("sort_order"),
+                        "telegram_username": raw.get("telegram_username"),
+                        "telegram_display_name": raw.get("telegram_display_name"),
+                    }
+                )
+            self.db.replace_broadcast_bots(normalized)
+        except Exception as exc:
+            logger.exception("Failed to save bot slots")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(self._bot_slots_snapshot(refresh=False))
+
+    def _import_bot_slots_from_env(self) -> None:
+        try:
+            imported = self.db.seed_broadcast_bots_from_tokens(_bot_tokens())
+            removed = self.db.delete_broadcast_bots_without_tokens()
+        except Exception as exc:
+            logger.exception("Failed to import bot tokens from .env")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        snapshot = self._bot_slots_snapshot(refresh=False)
+        snapshot["imported"] = imported
+        snapshot["removed_empty"] = removed
+        self._send_json(snapshot)
 
     def _save_broadcast_groups(self) -> None:
         try:
@@ -2271,11 +2064,42 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
         self._send_json(self._broadcast_groups_snapshot())
 
+    def _normalize_watch_group_bot_ids(self, raw: Dict[str, object]) -> List[int]:
+        bot_ids: List[int] = []
+        for bot_id in raw.get("bot_ids") or []:
+            try:
+                value = int(bot_id)
+            except (TypeError, ValueError):
+                continue
+            if value not in bot_ids:
+                bot_ids.append(value)
+
+        raw_names = raw.get("bot_names") or raw.get("bot_short_names") or []
+        if isinstance(raw_names, str):
+            raw_names = re.split(r"[\s,;]+", raw_names.strip())
+        if isinstance(raw_names, list) and raw_names:
+            env_bots = _env_broadcast_bots(self.db)
+            username_to_id = {
+                str(bot.get("username") or "").strip().lower(): int(bot["id"])
+                for bot in env_bots
+                if str(bot.get("username") or "").strip()
+            }
+            for name in raw_names:
+                key = str(name or "").strip().lower().lstrip("@")
+                if not key:
+                    continue
+                bot_id = username_to_id.get(key)
+                if bot_id is not None and bot_id not in bot_ids:
+                    bot_ids.append(bot_id)
+        return bot_ids
+
     def _watch_groups_snapshot(self) -> Dict[str, object]:
         groups = self.db.list_watch_groups()
+        picker_bots = _env_broadcast_bots(self.db)
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "groups": groups,
+            "bots": picker_bots,
         }
 
     def _save_watch_groups(self) -> None:
@@ -2296,6 +2120,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                         "chat_id": str(raw.get("chat_id") or "").strip(),
                         "enabled": bool(raw.get("enabled", True)),
                         "created_at": raw.get("created_at"),
+                        "bot_ids": self._normalize_watch_group_bot_ids(raw),
                     }
                 )
 
@@ -2377,6 +2202,28 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                 **result,
             }
         )
+
+    def _manual_add_broadcast_group(self) -> None:
+        try:
+            payload = self._read_json_body()
+            chat_id = str(payload.get("chat_id") or "").strip()
+            name = str(payload.get("name") or "").strip() or chat_id
+            if not chat_id:
+                raise ValueError("chat_id is required")
+            # Normalize common paste formats
+            chat_id = chat_id.replace(" ", "")
+            if chat_id.startswith("https://t.me/") or chat_id.startswith("@"):
+                raise ValueError("Cần numeric chat_id (vd -100...), không dùng link/@username")
+            int(chat_id)  # validate numeric
+            created = self.db.upsert_pending_broadcast_group(chat_id=chat_id, name=name)
+            snapshot = self._broadcast_groups_snapshot()
+            snapshot["created"] = created
+            snapshot["chat_id"] = chat_id
+        except Exception as exc:
+            logger.exception("Failed to manual-add broadcast group")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        self._send_json(snapshot)
 
     def _approve_broadcast_group(self) -> None:
         try:
@@ -2505,9 +2352,14 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         try:
             raw_body = self.rfile.read(length).decode("utf-8")
             payload = json.loads(raw_body)
-            filters = _normalize_filter_rules(payload.get("filters", payload))
+            filters = _normalize_filter_rules(payload.get("filters", []))
+            if "reject" in payload:
+                reject = _normalize_reject_rules(payload.get("reject"))
+            else:
+                # Preserve existing reject when UI only posts allow filters.
+                _, reject = _load_filter_config(Path(self.config.filter_config_path))
             path = Path(self.config.filter_config_path)
-            _write_filter_rules(path, filters)
+            _write_filter_config(path, filters, reject)
         except Exception as exc:
             logger.exception("Failed to save message filters")
             self._send_json({"error": str(exc)}, status=400)
@@ -2518,6 +2370,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "path": str(path),
                 "filters": filters,
+                "reject": reject,
             }
         )
 
@@ -2788,18 +2641,105 @@ def _statuses_query(query: Dict[str, List[str]]) -> List[str]:
 
 
 def _load_filter_rules(path: Path) -> List[Dict[str, Any]]:
+    filters, _reject = _load_filter_config(path)
+    return filters
+
+
+def _load_filter_config(path: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     if not path.exists():
-        return []
+        return [], []
 
     with path.open(encoding="utf-8") as file:
         payload = json.load(file)
 
-    raw_filters = payload.get("filters", payload) if isinstance(payload, dict) else payload
-    return _normalize_filter_rules(raw_filters)
+    if isinstance(payload, dict):
+        raw_filters = payload.get("filters", [])
+        raw_reject = payload.get("reject", [])
+    else:
+        raw_filters = payload
+        raw_reject = []
+
+    return _normalize_filter_rules(raw_filters), _normalize_reject_rules(raw_reject)
 
 
 def _bot_tokens() -> List[str]:
     return list(load_config().bot_tokens)
+
+
+def _env_broadcast_bots(db: ChatDatabase) -> List[Dict[str, Any]]:
+    from bot_broadcast import fetch_bot_info
+
+    tokens = _bot_tokens()
+    if not tokens:
+        return []
+
+    db.seed_broadcast_bots_from_tokens(tokens)
+    slots_by_token = {
+        str(bot.get("token") or "").strip(): bot
+        for bot in db.list_broadcast_bots(include_disabled=True)
+        if str(bot.get("token") or "").strip()
+    }
+    bots: List[Dict[str, Any]] = []
+    pending: List[tuple[int, Dict[str, Any], str]] = []
+
+    for index, token in enumerate(tokens):
+        token = token.strip()
+        slot = slots_by_token.get(token)
+        if not slot:
+            continue
+
+        username = str(slot.get("telegram_username") or "").strip()
+        display_name = str(
+            slot.get("telegram_display_name") or username or f"bot{index + 1}"
+        ).strip()
+        bots.append(
+            {
+                "id": int(slot["id"]),
+                "username": username,
+                "name": f"@{username}" if username else display_name,
+                "display_name": display_name,
+                "has_token": True,
+                "ok": bool(username),
+                "env_index": index + 1,
+                "_slot": slot,
+                "_token": token,
+            }
+        )
+        if not username:
+            pending.append((len(bots) - 1, slot, token))
+
+    if pending:
+        with ThreadPoolExecutor(max_workers=min(12, len(pending))) as pool:
+            futures = {
+                pool.submit(fetch_bot_info, token): (index, slot)
+                for index, slot, token in pending
+            }
+            for future in as_completed(futures):
+                index, slot = futures[future]
+                item = bots[index]
+                try:
+                    me = future.result()
+                    username = str(me.get("username") or "").strip()
+                    display_name = str(
+                        me.get("display_name") or username or item["display_name"]
+                    ).strip()
+                    item["username"] = username
+                    item["display_name"] = display_name
+                    item["name"] = f"@{username}" if username else display_name
+                    item["ok"] = bool(username)
+                    if username:
+                        db.update_broadcast_bot_profile(
+                            int(slot["id"]),
+                            telegram_username=username,
+                            telegram_display_name=display_name,
+                        )
+                except Exception:
+                    item["ok"] = False
+
+    for item in bots:
+        item.pop("_slot", None)
+        item.pop("_token", None)
+    return bots
 
 
 def _bot_token() -> str:
@@ -2810,8 +2750,17 @@ def _bot_token() -> str:
 
 
 def _write_filter_rules(path: Path, filters: List[Dict[str, Any]]) -> None:
+    _, reject = _load_filter_config(path)
+    _write_filter_config(path, filters, reject)
+
+
+def _write_filter_config(
+    path: Path,
+    filters: List[Dict[str, Any]],
+    reject: List[Dict[str, Any]],
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"filters": filters}
+    payload = {"filters": filters, "reject": reject}
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -2825,6 +2774,31 @@ def _normalize_filter_rules(raw_filters: Any) -> List[Dict[str, Any]]:
         raise ValueError("filters must be a list")
 
     return [_normalize_filter_rule(raw_filter, index) for index, raw_filter in enumerate(raw_filters)]
+
+
+def _normalize_reject_rules(raw_reject: Any) -> List[Dict[str, Any]]:
+    if raw_reject in (None, ""):
+        return []
+    if not isinstance(raw_reject, list):
+        raise ValueError("reject must be a list")
+
+    rules: List[Dict[str, Any]] = []
+    for index, raw_rule in enumerate(raw_reject):
+        if not isinstance(raw_rule, dict):
+            raise ValueError(f"reject #{index + 1} must be an object")
+        rule: Dict[str, Any] = {
+            "name": str(raw_rule.get("name") or f"reject_{index + 1}").strip(),
+            "enabled": bool(raw_rule.get("enabled", True)),
+        }
+        for key in ("text_contains", "comment_contains"):
+            values = _string_list(raw_rule.get(key))
+            if values:
+                rule[key] = values
+        text_regex = str(raw_rule.get("text_regex") or "").strip()
+        if text_regex:
+            rule["text_regex"] = text_regex
+        rules.append(rule)
+    return rules
 
 
 def _normalize_filter_rule(raw_filter: Any, index: int) -> Dict[str, Any]:
@@ -2842,6 +2816,8 @@ def _normalize_filter_rule(raw_filter: Any, index: int) -> Dict[str, Any]:
         "max_box1",
         "min_box2",
         "max_box2",
+        "min_level",
+        "max_level",
         "min_views",
         "max_views",
     ):
@@ -2884,14 +2860,6 @@ def _string_list(value: Any) -> List[str]:
     return [item.strip() for item in str(value).split(",") if item.strip()]
 
 
-def setup_logging(log_level: str) -> None:
-    level = getattr(logging, log_level, logging.INFO)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    )
-
-
 def _seed_watch_groups_from_env(db: ChatDatabase) -> None:
     if db.list_watch_groups():
         return
@@ -2915,12 +2883,21 @@ def _seed_watch_groups_from_env(db: ChatDatabase) -> None:
     ]
     imported = db.seed_watch_groups_if_empty(groups)
     if imported:
-        logger.info("Seeded %s watch groups from TELEGRAM_CLIENT_TARGETS", imported)
+        logger.debug("Seeded %s watch groups from TELEGRAM_CLIENT_TARGETS", imported)
 
 
 def create_server(config: QueueUiConfig) -> ThreadingHTTPServer:
     db = ChatDatabase(config.db_path)
     db.init_schema()
+    try:
+        seeded = db.seed_broadcast_bots_from_tokens(_bot_tokens())
+        removed = db.delete_broadcast_bots_without_tokens()
+        if seeded:
+            logger.debug("Seeded %s broadcast bot tokens from .env into DB slots", seeded)
+        if removed:
+            logger.debug("Removed %s broadcast bot slots without tokens", removed)
+    except Exception:
+        logger.exception("Failed to seed broadcast bots from .env")
     _seed_watch_groups_from_env(db)
 
     class Handler(QueueUiHandler):
@@ -2947,9 +2924,9 @@ def main() -> None:
     setup_logging(config.log_level)
     server = create_server(config)
     host, port = server.server_address
-    logger.info("Queue UI running at http://%s:%s", host, port)
+    logger.warning("Queue UI running at http://%s:%s", host, port)
     if config.auth_enabled:
-        logger.info("Queue UI login enabled for user=%s", config.auth_username)
+        logger.warning("Queue UI login enabled for user=%s", config.auth_username)
     else:
         logger.warning(
             "Queue UI login disabled. Set QUEUE_UI_PASSWORD in .env to require authentication."

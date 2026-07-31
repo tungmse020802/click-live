@@ -1,9 +1,11 @@
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
-# De trong khi dang ky thiet bi moi; dien sau khi admin cap quyen
-DEVICE_ID = ""
+# De trong khi dang ky thiet bi moi; dien sau khi admin cap quyen.
+# Co the set qua env THANHTAI_DEVICE_ID (khong can sua file tren server).
+DEVICE_ID = os.environ.get("THANHTAI_DEVICE_ID", "").strip()
 
 # Referral link
 TARGET_URL = "https://thanhtai.io/r/525ddbd53026"

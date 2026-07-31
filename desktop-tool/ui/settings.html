@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Desktop Tool — Cài đặt</title>
+  <style>
+    :root {
+      --bg: #0e1621;
+      --panel: #17212b;
+      --line: #2a3544;
+      --text: #f5f5f5;
+      --muted: #8b98a8;
+      --blue: #3b82f6;
+      --green: #22c55e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.45 system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    .wrap { padding: 18px 20px 24px; max-width: 440px; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin-bottom: 18px; font-size: 13px; }
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 14px;
+    }
+    section h2 {
+      margin: 0 0 10px;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--muted);
+    }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    input[type="number"] {
+      width: 100%;
+      background: #0d1218;
+      border: 1px solid var(--line);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+    }
+    .row { display: flex; gap: 10px; align-items: end; }
+    .row > * { flex: 1; }
+    .delay-box {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .delay-value {
+      font-size: 22px;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      min-width: 90px;
+      text-align: center;
+    }
+    .delay-value.positive { color: var(--green); }
+    .delay-value.negative { color: #f87171; }
+    button {
+      font: inherit;
+      border: 1px solid var(--line);
+      background: #1f2c3a;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+    button:hover { border-color: var(--blue); }
+    button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+    button.small { padding: 6px 10px; font-size: 12px; }
+    .toggle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .status {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #0d1218;
+      border: 1px solid var(--line);
+      font-size: 12px;
+      color: var(--muted);
+      min-height: 42px;
+    }
+    .status strong { color: var(--text); }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Click Live Desktop Tool</h1>
+    <p class="sub">Mở countdown Chrome → đếm giờ → click trên màn hình desktop</p>
+
+    <section>
+      <h2>Đếm giờ &amp; delay ±</h2>
+      <label>Chờ mặc định nếu tin không có TIME (giây)</label>
+      <input id="defaultWaitSec" type="number" min="0" step="0.1" value="0">
+
+      <label style="margin-top:12px">Offset delay (cộng vào TIME trong tin)</label>
+      <div class="delay-box">
+        <div>
+          <button class="small" data-delta="-50">−0.05</button>
+          <button class="small" data-delta="-10">−0.01</button>
+        </div>
+        <div class="delay-value" id="delayLabel">0.00s</div>
+        <div>
+          <button class="small" data-delta="10">+0.01</button>
+          <button class="small" data-delta="50">+0.05</button>
+        </div>
+      </div>
+      <p class="hint">Click khi bộ đếm <strong>junb / thanhtai</strong> về <strong>0.0s</strong> (junb: <code>end_time</code> trong link; thanhtai: WS realtime) + offset ±. Tab Chrome tự đóng <strong>30 giây sau 0.0s</strong>.</p>
+    </section>
+
+    <section>
+      <h2>Click desktop (ngoài app)</h2>
+      <div class="toggle" style="margin-bottom:12px">
+        <span>Tự click sau khi hết giờ</span>
+        <input id="autoClickEnabled" type="checkbox">
+      </div>
+      <div class="row">
+        <div>
+          <label>X (pixel)</label>
+          <input id="clickX" type="number" min="0" step="1">
+        </div>
+        <div>
+          <label>Y (pixel)</label>
+          <input id="clickY" type="number" min="0" step="1">
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; margin-top:12px; flex-wrap:wrap">
+        <button id="pickBtn" class="primary">Chọn điểm trên màn hình</button>
+        <button id="testClickBtn">Test click</button>
+        <button id="accessBtn">Quyền Accessibility</button>
+      </div>
+      <p class="hint">Dùng <strong>cliclick</strong> để click desktop. Cần quyền Accessibility cho Electron / Click Live Desktop Tool. Cài: <code>brew install cliclick</code></p>
+    </section>
+
+    <section>
+      <h2>Trạng thái</h2>
+      <div class="status" id="status">Sẵn sàng.</div>
+    </section>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>
