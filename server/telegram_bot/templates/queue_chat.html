@@ -672,7 +672,10 @@
 
       let phoneNote = '';
       if (data.phone?.ok) {
-        phoneNote = ` · TikTok ${data.room_id || 'deeplink'} ✓`;
+        const via = data.phone.method === 'phone_poll' || data.phone.push ? 'poll' : 'relay';
+        phoneNote = via === 'poll'
+          ? ` · TikTok ${data.room_id || ''} → phone (poll)`
+          : ` · TikTok ${data.room_id || 'deeplink'} ✓`;
       } else if (data.phone_open_url) {
         try {
           const localPhone = await openPhoneViaMonitor(data.phone_open_url, item, timeMeta);

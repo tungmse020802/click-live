@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 
 from deeplink_resolve import DEEPLINK_PREFIX, deeplink_open_href, extract_room_id, resolve_link_for_open
 from desktop_relay import enqueue_open
+from phone_push import push_phone_open
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,21 @@ def open_link_for_queue(
             click_y=click_y,
             device_id=device_id,
         )
+        push_result = push_phone_open(
+            url=phone_url,
+            queue_id=job_id,
+            time_label=time_label,
+            click_after_ms=click_after_ms,
+            click_x=click_x,
+            click_y=click_y,
+        )
+        if push_result.get("ok"):
+            phone = {
+                **phone,
+                "ok": True,
+                "method": phone.get("method") if phone.get("ok") else "phone_poll",
+                "push": push_result,
+            }
 
     return {
         "ok": True,

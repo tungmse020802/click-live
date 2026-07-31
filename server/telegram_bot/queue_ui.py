@@ -19,6 +19,7 @@ from open_link import open_link_for_queue
 from desktop_relay import desktop_status, enqueue_open, pull_pending
 from logging_setup import setup_logging
 from db import ChatDatabase, QueueJob
+from phone_push import pop_phone_open
 from deeplink_resolve import (
     DEEPLINK_PREFIX,
     build_thanhtai_countdown_url,
@@ -1709,16 +1710,24 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         self._prune_queue_ttl()
         after_id = non_negative_int((query.get("after_id") or ["0"])[0], 0)
         device_id = str((query.get("device_id") or ["phone"])[0] or "phone")
+        wait_seconds = min(_int_query(query, "wait", 0), 25)
+
+        pushed = pop_phone_open(device_id)
+        if pushed:
+            return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": pushed}
+
         claimed = self.db.claim_next_after(device_id, self.config.queue_lease_seconds, after_id)
         if claimed:
             job = _phone_job_from_claimed_job(claimed)
             if job:
                 return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": job}
             self.db.mark_job_done(claimed.id, f"{device_id}: unsupported phone job")
-        wait_seconds = min(_int_query(query, "wait", 0), 25)
         deadline = time.time() + wait_seconds
         while wait_seconds > 0 and time.time() < deadline:
             time.sleep(1)
+            pushed = pop_phone_open(device_id)
+            if pushed:
+                return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": pushed}
             claimed = self.db.claim_next_after(device_id, self.config.queue_lease_seconds, after_id)
             if claimed:
                 job = _phone_job_from_claimed_job(claimed)
