@@ -592,36 +592,84 @@
       return data;
     }
 
+    async function openPhoneViaMonitor(phoneUrl, item, timeMeta) {
+      const base = (localStorage.getItem('phoneMonitorBaseUrl') || '').replace(/\/$/, '');
+      if (!base) return null;
+      const point = phoneClickPoint();
+      const body = new URLSearchParams({
+        url: phoneUrl,
+        source: 'queue',
+        queue_id: String(item.id),
+        time: timeMeta.label || '',
+        click_after_ms: String(timeMeta.click_after_ms || 0),
+        click_x: String(point.x),
+        click_y: String(point.y)
+      });
+      const res = await fetch(base + '/actions/deeplink', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body
+      });
+      if (!res.ok) throw new Error(await res.text() || `HTTP ${res.status}`);
+      return { ok: true, method: 'phone_monitor_client' };
+    }
+
     async function openCountdownForItem(item) {
       if (!item) return;
       els.liveStatus.textContent = `Đang mở link job #${item.id}...`;
-      const data = await resolveQueueLink(item);
-      if (!data) return;
-      const target = decodeHtmlUrl(data.countdown_url);
-      if (!target || /\/open\/live|snssdk1180:\/\//i.test(target)) {
-        throw new Error('Không có URL countdown hợp lệ (chỉ mở trang countdown)');
-      }
-
+      const link = findLink(item);
+      if (!link) throw new Error('Không phát hiện link');
       const timeMeta = findTimeMeta(item);
+      const point = phoneClickPoint();
 
-      try {
-        const relay = await openViaDesktopRelay(target, item.id, {
+      const res = await fetch('/api/open/link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url: link,
+          context: itemContext(item),
+          job_id: item.id,
+          ttl_seconds: TAB_TTL_SECONDS,
           click_after_ms: timeMeta.click_after_ms,
-          time_label: timeMeta.label
-        });
-        if (!relay) return;
-        if (relay.deduplicated) {
-          els.liveStatus.textContent = `Link đã mở trên desktop (dedup) · job #${item.id}`;
-        } else if (state.desktopOnline) {
-          els.liveStatus.textContent = `Đã gửi desktop · job #${item.id} (click 0.0s, đóng tab +30s)`;
-        } else {
-          els.liveStatus.textContent = `Đã xếp hàng desktop — chạy desktop-tool trên Mac · job #${item.id}`;
-        }
+          time_label: timeMeta.label,
+          click_x: point.x,
+          click_y: point.y,
+          open_phone: true,
+          open_desktop: true
+        })
+      });
+      const data = await res.json();
+      if (res.status === 401) {
+        location.href = '/login?next=' + encodeURIComponent(location.pathname);
         return;
-      } catch (err) {
-        els.liveStatus.textContent = `Lỗi desktop relay: ${err.message}`;
       }
-      window.open(target, '_blank', 'noopener,noreferrer');
+      if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+
+      const target = decodeHtmlUrl(data.countdown_url || '');
+      if (!target || /\/open\/live|snssdk1180:\/\//i.test(target)) {
+        throw new Error('Không có URL countdown hợp lệ');
+      }
+
+      let phoneNote = '';
+      if (data.phone?.ok) {
+        phoneNote = ' · điện thoại ✓';
+      } else if (data.phone_open_url) {
+        try {
+          const localPhone = await openPhoneViaMonitor(data.phone_open_url, item, timeMeta);
+          if (localPhone?.ok) phoneNote = ' · điện thoại ✓ (local)';
+        } catch (err) {
+          phoneNote = ` · phone: ${err.message}`;
+        }
+      }
+
+      const desktop = data.desktop || {};
+      if (desktop.deduplicated) {
+        els.liveStatus.textContent = `Link đã mở trên desktop (dedup) · job #${item.id}${phoneNote}`;
+      } else if (state.desktopOnline) {
+        els.liveStatus.textContent = `Desktop + deeplink · job #${item.id}${phoneNote}`;
+      } else {
+        els.liveStatus.textContent = `Đã xếp hàng desktop · job #${item.id}${phoneNote}`;
+      }
     }
 
     async function checkDesktopTool() {
@@ -736,7 +784,7 @@
       const ttlMin = Math.round((state.queueTtlSeconds || 1800) / 60);
       const shown = getDisplayItems().length;
       const buffered = state.newArrivalCount > 0 ? ` · +${state.newArrivalCount} tin mới (bấm ↑)` : '';
-      els.liveStatus.textContent = `${dot} · ${t} · ${shown} tin${buffered} · giữ ${ttlMin} phút · ${state.desktopOnline ? 'Mở link → desktop-tool' : 'chạy desktop-tool'}`;
+      els.liveStatus.textContent = `${dot} · ${t} · ${shown} tin${buffered} · giữ ${ttlMin} phút · Mở link → desktop + deeplink điện thoại`;
     }
 
     function sortedItems(items = state.items) {

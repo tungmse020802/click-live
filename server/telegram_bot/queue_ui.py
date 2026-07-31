@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from bot_broadcast import discover_all_bot_groups, list_configured_bots, register_discovered_groups
 from config import QueueUiConfig, _parse_client_targets, load_config, load_queue_ui_config
+from open_link import open_link_for_queue
 from desktop_relay import desktop_status, enqueue_open, pull_pending
 from logging_setup import setup_logging
 from db import ChatDatabase, QueueJob
@@ -1612,6 +1613,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._desktop_open_post()
             return
 
+        if parsed.path == "/api/open/link":
+            self._open_link_post()
+            return
+
         if parsed.path == "/api/phone/screenshot":
             self._phone_screenshot_upload()
             return
@@ -1651,6 +1656,49 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             dedup_seconds=self.config.desktop_dedup_seconds,
             click_after_ms=click_after_ms,
             time_label=time_label,
+        )
+        status = 200 if result.get("ok") else 400
+        self._send_json(result, status=status)
+
+    def _open_link_post(self) -> None:
+        try:
+            payload = self._read_json_body()
+            url = str(payload.get("url") or "").strip()
+            context = str(payload.get("context") or "").strip()
+            if not context:
+                message = str(payload.get("message") or "").strip()
+                raw_payload = payload.get("payload")
+                context = item_context_from_parts(
+                    message,
+                    raw_payload if isinstance(raw_payload, dict) else {},
+                )
+            job_id = payload.get("job_id")
+            parsed_job_id = int(job_id) if job_id is not None else None
+            ttl_seconds = int(payload.get("ttl_seconds") or 30)
+            click_after_ms = int(payload.get("click_after_ms") or 0)
+            time_label = str(payload.get("time_label") or "").strip()
+            click_x = non_negative_int(payload.get("click_x"), 0)
+            click_y = non_negative_int(payload.get("click_y"), 0)
+            device_id = str(payload.get("device_id") or "").strip() or None
+            open_phone = payload.get("open_phone", True) is not False
+            open_desktop = payload.get("open_desktop", True) is not False
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+
+        result = open_link_for_queue(
+            url,
+            context=context,
+            job_id=parsed_job_id,
+            ttl_seconds=ttl_seconds,
+            dedup_seconds=self.config.desktop_dedup_seconds,
+            click_after_ms=click_after_ms,
+            time_label=time_label,
+            click_x=click_x,
+            click_y=click_y,
+            device_id=device_id,
+            open_phone=open_phone,
+            open_desktop=open_desktop,
         )
         status = 200 if result.get("ok") else 400
         self._send_json(result, status=status)
