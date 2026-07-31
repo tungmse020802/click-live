@@ -59,6 +59,68 @@ powershell -ExecutionPolicy Bypass -File desktop-tool\scripts\install-windows.ps
 
 **Yêu cầu Windows:** Windows 10+, PowerShell 5.1+, quyền cài app (winget). Desktop click dùng PowerShell (không cần cài thêm).
 
+## Đóng gói — chạy không cần Node.js (portable)
+
+Build trên **Mac** (ra `.dmg` / `.zip`) hoặc **Windows** (ra `.exe` portable + installer). Máy dùng chỉ cần **Google Chrome** + file **`.env`**.
+
+### macOS (build trên Mac)
+
+```bash
+cd desktop-tool
+chmod +x scripts/package-mac.sh
+./scripts/package-mac.sh
+```
+
+Hoặc: `npm install && npm run dist:mac`
+
+File: `dist/ClickLiveDesktopTool-0.1.0-mac.dmg` (hoặc `.zip`).
+
+**Cấu hình:** đặt `.env` **cùng thư mục** với `Click Live Desktop Tool.app` (không bên trong `.app`):
+
+```text
+Applications/
+  Click Live Desktop Tool.app
+  .env                    ← copy từ .env.example, điền DESKTOP_TOOL_PULL_TOKEN
+```
+
+### Windows (build trên Windows)
+
+```bat
+cd desktop-tool\scripts
+package-windows.bat
+```
+
+Hoặc: `npm install && npm run dist:win`
+
+| File | Mô tả |
+|------|--------|
+| `ClickLiveDesktopTool-*-portable.exe` | **Portable** — copy sang USB/máy khác, không cần cài |
+| `ClickLiveDesktopTool-*-setup.exe` | Cài qua installer |
+
+**Cấu hình portable:** đặt `.env` **cùng folder** với file `.exe` khi chạy:
+
+```text
+D:\ClickLive\
+  ClickLiveDesktopTool-0.1.0-portable.exe
+  .env
+```
+
+Nội dung `.env` (copy từ `.env.example` trong repo):
+
+```env
+DESKTOP_TOOL_QUEUE_URL=http://160.30.19.215:8787
+DESKTOP_TOOL_PULL_TOKEN=your-token-from-server
+```
+
+### Test bản build (chưa đóng gói installer)
+
+```bash
+npm run pack
+# chạy thử: dist/mac-arm64/Click Live Desktop Tool.app
+```
+
+**Lưu ý:** Build Windows trên Mac cần Wine (phức tạp) — nên build Win trên máy Windows. Mac build trên Mac.
+
 API local: `http://127.0.0.1:8795` (fallback). Luồng chính: poll queue server.
 
 ## Cài đặt đếm giờ & click desktop

@@ -9,12 +9,18 @@
     "pull": "cd .. && git pull --ff-only",
     "run": "bash run.sh",
     "dev": "electron .",
-    "check": "node --check src/main.js && node --check src/server.js"
+    "check": "node --check src/main.js && node --check src/server.js",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
   },
   "dependencies": {
     "ws": "^8.18.3"
   },
   "devDependencies": {
-    "electron": "^33.4.11"
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
   }
 }

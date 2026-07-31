@@ -14,9 +14,10 @@ const { clickScreenPoint, warmUpWinClickHelper, shutdownWinClickHelper } = requi
 const { pickPointOnScreen } = require("./pick-point");
 const { ensureAccessibility } = require("./accessibility");
 const { computeCountdownSchedule, computeClickFireDelayMs, waitUntilClickTarget } = require("./junb-url");
+const { envFilePath, isPackaged } = require("./paths");
 
 function loadDotEnv() {
-  const envPath = path.join(__dirname, "..", ".env");
+  const envPath = envFilePath();
   if (!fs.existsSync(envPath)) return;
   for (const line of fs.readFileSync(envPath, "utf-8").split("\n")) {
     const trimmed = line.trim();
@@ -300,6 +301,9 @@ async function startServer() {
     getSettings: loadSettings,
   });
   console.log(`Desktop-tool API http://127.0.0.1:${port}`);
+  if (isPackaged()) {
+    console.log(`Config: ${envFilePath()}`);
+  }
   console.log(`Chrome: ${CHROME_APP} — 1 cửa sổ, click theo tab mở cuối, giữ tab cuối khi hết hạn`);
   return port;
 }

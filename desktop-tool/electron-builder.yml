@@ -1,0 +1,47 @@
+appId: com.clicklive.desktop-tool
+productName: Click Live Desktop Tool
+copyright: Copyright © Click Live
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - src/**/*
+  - ui/**/*
+  - package.json
+
+extraResources:
+  - from: src/windows-click-helper.ps1
+    to: windows-click-helper.ps1
+  - from: .env.example
+    to: .env.example
+
+asar: true
+
+mac:
+  category: public.app-category.utilities
+  target:
+    - dmg
+    - zip
+  artifactName: ClickLiveDesktopTool-${version}-mac.${ext}
+
+win:
+  target:
+    - portable
+    - nsis
+  artifactName: ClickLiveDesktopTool-${version}-win-${os}-${arch}.${ext}
+
+portable:
+  artifactName: ClickLiveDesktopTool-${version}-portable.exe
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: ClickLiveDesktopTool-${version}-setup.exe
+
+linux:
+  target:
+    - AppImage
+  category: Utility
+  artifactName: ClickLiveDesktopTool-${version}-linux.${ext}

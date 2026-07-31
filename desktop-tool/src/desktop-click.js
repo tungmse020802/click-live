@@ -5,6 +5,7 @@ const os = require("os");
 const path = require("path");
 
 const execFileAsync = promisify(execFile);
+const { windowsClickHelperPath } = require("./paths");
 
 let winClickHelper = null;
 let winClickReady = null;
@@ -28,7 +29,7 @@ function resolveCliclickBin() {
 }
 
 function helperScriptPath() {
-  return path.join(__dirname, "windows-click-helper.ps1");
+  return windowsClickHelperPath();
 }
 
 function ensureWinClickHelper() {
