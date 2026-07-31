@@ -1,14 +1,6 @@
-#Requires -Version 5.1
-<#
-.SYNOPSIS
-  Cài Click Live desktop-tool từ đầu trên Windows (A-Z) và chạy client.
+# Click Live desktop-tool - Windows install
+# Run: scripts\install-windows.bat
 
-.EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
-
-.EXAMPLE
-  powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -PullToken "your-token-here"
-#>
 param(
   [string]$RepoUrl = "https://github.com/tungmse020802/click-live.git",
   [string]$Branch = "feature/pipeline-optimize",
@@ -16,18 +8,34 @@ param(
   [string]$QueueUrl = "http://160.30.19.215:8787",
   [string]$PullToken = "",
   [switch]$SkipClone,
+  [switch]$ForceClone,
   [switch]$SkipStart
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 
-function Write-Step([string]$Message) {
+function Write-Step {
+  param([string]$Message)
   Write-Host ""
   Write-Host "==> $Message" -ForegroundColor Cyan
 }
 
-function Test-Command([string]$Name) {
+function Write-Err {
+  param([string]$Message)
+  Write-Host "[ERROR] $Message" -ForegroundColor Red
+}
+
+function Test-Cmd {
+  param([string]$Name)
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
+}
+
+function Test-WingetInstalled {
+  param([string]$Id)
+  if (-not (Test-Cmd winget)) { return $false }
+  $out = & winget list --id $Id --accept-source-agreements 2>&1
+  if ($LASTEXITCODE -ne 0) { return $false }
+  return [bool]($out | Select-String -SimpleMatch $Id -Quiet)
 }
 
 function Ensure-WingetPackage {
@@ -36,64 +44,77 @@ function Ensure-WingetPackage {
     [Parameter(Mandatory = $true)][string]$Label
   )
 
-  if (-not (Test-Command winget)) {
-    Write-Host "  ! winget không có — bỏ qua cài $Label (cài thủ công nếu thiếu)" -ForegroundColor Yellow
+  if (-not (Test-Cmd winget)) {
+    Write-Host "  ! winget missing - skip $Label" -ForegroundColor Yellow
     return
   }
 
-  $installed = winget list --id $Id --accept-source-agreements 2>$null | Select-String -Pattern $Id -Quiet
-  if ($installed) {
-    Write-Host "  OK $Label đã có"
+  if (Test-WingetInstalled -Id $Id) {
+    Write-Host "  OK $Label already installed"
     return
   }
 
-  Write-Host "  Đang cài $Label ..."
-  winget install --id $Id -e --accept-source-agreements --accept-package-agreements
+  Write-Host "  Installing $Label ..."
+  & winget install --id $Id -e --accept-source-agreements --accept-package-agreements
+  if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+    Write-Host "  ! winget returned $LASTEXITCODE for $Label" -ForegroundColor Yellow
+  }
+}
+
+function Add-ToPath {
+  param([string]$Dir)
+  if ($Dir -and (Test-Path $Dir) -and ($env:Path -notlike "*$Dir*")) {
+    $env:Path = "$Dir;$env:Path"
+  }
 }
 
 function Ensure-NodeJs {
-  if (Test-Command node) {
-    $ver = node -v
-    Write-Host "  OK Node.js $ver"
+  if (Test-Cmd node) {
+    Write-Host "  OK Node.js $(node -v)"
     return
   }
 
-  Write-Step "Cài Node.js LTS (cần cho Electron)"
+  Write-Step "Install Node.js LTS"
   Ensure-WingetPackage -Id "OpenJS.NodeJS.LTS" -Label "Node.js LTS"
+  Add-ToPath "$env:ProgramFiles\nodejs"
+  Add-ToPath "${env:ProgramFiles(x86)}\nodejs"
 
-  if (-not (Test-Command node)) {
-    throw "Node.js chưa sẵn sàng. Đóng/mở lại terminal rồi chạy lại script, hoặc cài từ https://nodejs.org"
+  if (-not (Test-Cmd node)) {
+    throw "Node.js not found. Install from https://nodejs.org then rerun."
   }
+  Write-Host "  OK Node.js $(node -v)"
 }
 
 function Ensure-Git {
-  if (Test-Command git) {
-    Write-Host "  OK Git $(git --version)"
+  if (Test-Cmd git) {
+    Write-Host "  OK $(git --version)"
     return
   }
 
-  Write-Step "Cài Git"
+  Write-Step "Install Git"
   Ensure-WingetPackage -Id "Git.Git" -Label "Git"
+  Add-ToPath "$env:ProgramFiles\Git\cmd"
+  Add-ToPath "${env:ProgramFiles(x86)}\Git\cmd"
 
-  if (-not (Test-Command git)) {
-    throw "Git chưa sẵn sàng. Cài từ https://git-scm.com/download/win"
+  if (-not (Test-Cmd git)) {
+    throw "Git not found. Install from https://git-scm.com/download/win"
   }
+  Write-Host "  OK $(git --version)"
 }
 
 function Ensure-Chrome {
-  $chromePaths = @(
+  $paths = @(
     "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
     "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
     "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
   )
-  foreach ($p in $chromePaths) {
+  foreach ($p in $paths) {
     if (Test-Path $p) {
-      Write-Host "  OK Google Chrome: $p"
+      Write-Host "  OK Chrome: $p"
       return
     }
   }
-
-  Write-Host "  ! Chưa thấy Google Chrome — đang thử cài qua winget ..." -ForegroundColor Yellow
+  Write-Host "  ! Chrome not found - trying winget ..." -ForegroundColor Yellow
   Ensure-WingetPackage -Id "Google.Chrome" -Label "Google Chrome"
 }
 
@@ -104,24 +125,26 @@ function Ensure-Repo {
     [string]$GitBranch
   )
 
-  if ($SkipClone -and (Test-Path (Join-Path $Root "desktop-tool\package.json"))) {
-    Write-Host "  OK Dùng repo có sẵn: $Root"
-    return
-  }
-
   if (Test-Path (Join-Path $Root ".git")) {
-    Write-Step "Cập nhật repo $Root"
+    Write-Step "Update repo at $Root"
     Push-Location $Root
-    git fetch origin
-    git checkout $GitBranch
-    git pull origin $GitBranch
+    & git fetch origin
+    & git checkout $GitBranch
+    if ($LASTEXITCODE -ne 0) {
+      Pop-Location
+      throw "git checkout failed for branch $GitBranch"
+    }
+    & git pull origin $GitBranch
     Pop-Location
     return
   }
 
   Write-Step "Clone repo"
   New-Item -ItemType Directory -Force -Path $Root | Out-Null
-  git clone --branch $GitBranch --single-branch $Url $Root
+  & git clone --branch $GitBranch --single-branch $Url $Root
+  if ($LASTEXITCODE -ne 0) {
+    throw "git clone failed - check network or branch $GitBranch"
+  }
 }
 
 function Ensure-EnvFile {
@@ -133,34 +156,55 @@ function Ensure-EnvFile {
 
   $envFile = Join-Path $DesktopToolDir ".env"
   $example = Join-Path $DesktopToolDir ".env.example"
-
   if (-not (Test-Path $example)) {
-    throw "Không tìm thấy .env.example trong $DesktopToolDir"
+    throw ".env.example not found in $DesktopToolDir"
   }
 
   if (-not (Test-Path $envFile)) {
     Copy-Item $example $envFile
-    Write-Host "  Đã tạo .env từ .env.example"
+    Write-Host "  Created .env from .env.example"
   }
 
-  $content = Get-Content $envFile -Raw
-  $content = $content -replace '(?m)^DESKTOP_TOOL_QUEUE_URL=.*$', "DESKTOP_TOOL_QUEUE_URL=$Queue"
-
-  if ($Token) {
-    $content = $content -replace '(?m)^DESKTOP_TOOL_PULL_TOKEN=.*$', "DESKTOP_TOOL_PULL_TOKEN=$Token"
-  } elseif ($content -match '(?m)^DESKTOP_TOOL_PULL_TOKEN=\s*$') {
-    Write-Host ""
-    Write-Host "Nhập DESKTOP_PULL_TOKEN (copy từ server telegram_bot/.env trên VPS):" -ForegroundColor Yellow
-    $secure = Read-Host "DESKTOP_TOOL_PULL_TOKEN"
-    if ($secure) {
-      $content = $content -replace '(?m)^DESKTOP_TOOL_PULL_TOKEN=.*$', "DESKTOP_TOOL_PULL_TOKEN=$secure"
+  $lines = Get-Content $envFile
+  $out = @()
+  foreach ($line in $lines) {
+    if ($line -match '^\s*DESKTOP_TOOL_QUEUE_URL=') {
+      $out += "DESKTOP_TOOL_QUEUE_URL=$Queue"
+    } elseif ($line -match '^\s*DESKTOP_TOOL_PULL_TOKEN=') {
+      if ($Token) {
+        $out += "DESKTOP_TOOL_PULL_TOKEN=$Token"
+      } else {
+        $out += $line
+      }
     } else {
-      Write-Host "  ! Chưa có token — app chạy được nhưng không poll queue. Sửa .env sau." -ForegroundColor Yellow
+      $out += $line
+    }
+  }
+  Set-Content -Path $envFile -Value $out -Encoding ASCII
+
+  if (-not $Token) {
+    $tokenLine = $out | Where-Object { $_ -match '^\s*DESKTOP_TOOL_PULL_TOKEN=' } | Select-Object -First 1
+    if ($tokenLine -match '^\s*DESKTOP_TOOL_PULL_TOKEN=\s*$') {
+      Write-Host ""
+      Write-Host "Enter DESKTOP_PULL_TOKEN from server telegram_bot/.env:" -ForegroundColor Yellow
+      $typed = Read-Host "DESKTOP_TOOL_PULL_TOKEN"
+      if ($typed) {
+        $fixed = @()
+        foreach ($line in $out) {
+          if ($line -match '^\s*DESKTOP_TOOL_PULL_TOKEN=') {
+            $fixed += "DESKTOP_TOOL_PULL_TOKEN=$typed"
+          } else {
+            $fixed += $line
+          }
+        }
+        Set-Content -Path $envFile -Value $fixed -Encoding ASCII
+      } else {
+        Write-Host "  ! No token - app runs but will not poll queue." -ForegroundColor Yellow
+      }
     }
   }
 
-  Set-Content -Path $envFile -Value $content -Encoding UTF8
-  Write-Host "  OK .env tại $envFile"
+  Write-Host "  OK .env: $envFile"
 }
 
 function New-RunShortcut {
@@ -169,73 +213,115 @@ function New-RunShortcut {
   $runBat = Join-Path $DesktopToolDir "scripts\run-windows.bat"
   if (-not (Test-Path $runBat)) { return }
 
-  $shortcutPath = Join-Path ([Environment]::GetFolderPath("Desktop")) "Click Live Desktop Tool.lnk"
-  $wsh = New-Object -ComObject WScript.Shell
-  $shortcut = $wsh.CreateShortcut($shortcutPath)
-  $shortcut.TargetPath = $runBat
-  $shortcut.WorkingDirectory = $DesktopToolDir
-  $shortcut.WindowStyle = 1
-  $shortcut.Description = "Click Live desktop-tool"
-  $shortcut.Save()
-  Write-Host "  OK Shortcut: $shortcutPath"
+  try {
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    $shortcutPath = Join-Path $desktop "Click Live Desktop Tool.lnk"
+    $wsh = New-Object -ComObject WScript.Shell
+    $sc = $wsh.CreateShortcut($shortcutPath)
+    $sc.TargetPath = $runBat
+    $sc.WorkingDirectory = $DesktopToolDir
+    $sc.WindowStyle = 1
+    $sc.Description = "Click Live desktop-tool"
+    $sc.Save()
+    Write-Host "  OK shortcut: $shortcutPath"
+  } catch {
+    Write-Host "  ! shortcut skipped: $($_.Exception.Message)" -ForegroundColor Yellow
+  }
 }
 
-Write-Host ""
-Write-Host "Click Live — Cài desktop-tool trên Windows" -ForegroundColor Green
-Write-Host "Repo: $RepoUrl ($Branch)"
+function Get-DesktopToolDir {
+  $scriptDir = $PSScriptRoot
+  if (-not $scriptDir) {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+  }
 
-Write-Step "Kiểm tra / cài phụ thuộc"
-Ensure-Git
-Ensure-NodeJs
-Ensure-Chrome
+  $parent = Join-Path $scriptDir ".."
+  $resolved = Resolve-Path $parent -ErrorAction SilentlyContinue
+  if ($resolved) {
+    $localDir = $resolved.Path
+    $pkg = Join-Path $localDir "package.json"
+    if ((Test-Path $pkg) -and (-not $ForceClone)) {
+      Write-Host "  OK use current folder: $localDir"
+      return $localDir
+    }
+  }
 
-Write-Step "Chuẩn bị mã nguồn"
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$localDesktopTool = Resolve-Path (Join-Path $scriptDir "..") -ErrorAction SilentlyContinue
+  if ($SkipClone) {
+    $dt = Join-Path $InstallRoot "desktop-tool"
+    if (Test-Path (Join-Path $dt "package.json")) {
+      return $dt
+    }
+  }
 
-if ($SkipClone -and $localDesktopTool -and (Test-Path (Join-Path $localDesktopTool "package.json"))) {
-  $desktopToolDir = $localDesktopTool.Path
-  Write-Host "  OK Dùng thư mục hiện tại: $desktopToolDir"
-} else {
   Ensure-Repo -Root $InstallRoot -Url $RepoUrl -GitBranch $Branch
-  $desktopToolDir = Join-Path $InstallRoot "desktop-tool"
+  return (Join-Path $InstallRoot "desktop-tool")
 }
 
-if (-not (Test-Path (Join-Path $desktopToolDir "package.json"))) {
-  throw "Không tìm thấy desktop-tool tại $desktopToolDir"
+$exitCode = 0
+$dirPushed = $false
+
+try {
+  Write-Host ""
+  Write-Host "Click Live - install desktop-tool on Windows" -ForegroundColor Green
+  Write-Host "Repo: $RepoUrl"
+  Write-Host "Branch: $Branch"
+
+  Write-Step "Check dependencies"
+  Ensure-Git
+  Ensure-NodeJs
+  Ensure-Chrome
+
+  Write-Step "Prepare source"
+  $desktopToolDir = Get-DesktopToolDir
+  $pkgJson = Join-Path $desktopToolDir "package.json"
+  if (-not (Test-Path $pkgJson)) {
+    throw "desktop-tool not found at $desktopToolDir"
+  }
+
+  Write-Step "Configure .env"
+  Ensure-EnvFile -DesktopToolDir $desktopToolDir -Queue $QueueUrl -Token $PullToken
+
+  Write-Step "npm install"
+  Push-Location $desktopToolDir
+  $dirPushed = $true
+
+  & npm install
+  if ($LASTEXITCODE -ne 0) {
+    throw "npm install failed with code $LASTEXITCODE"
+  }
+
+  Write-Step "Syntax check"
+  & npm run check
+  if ($LASTEXITCODE -ne 0) {
+    throw "npm run check failed with code $LASTEXITCODE"
+  }
+
+  New-RunShortcut -DesktopToolDir $desktopToolDir
+
+  Write-Host ""
+  Write-Host "Install complete." -ForegroundColor Green
+  Write-Host "  Folder : $desktopToolDir"
+  Write-Host "  Run    : scripts\run-windows.bat"
+  Write-Host "  Health : http://127.0.0.1:8795/health"
+  Write-Host ""
+
+  if (-not $SkipStart) {
+    Write-Step "Start desktop-tool"
+    & npm start
+    if ($LASTEXITCODE -ne 0) {
+      throw "npm start failed with code $LASTEXITCODE"
+    }
+  }
+} catch {
+  Write-Err $_.Exception.Message
+  if ($_.ScriptStackTrace) {
+    Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+  }
+  $exitCode = 1
+} finally {
+  if ($dirPushed) {
+    Pop-Location -ErrorAction SilentlyContinue
+  }
 }
 
-Write-Step "Cấu hình .env"
-Ensure-EnvFile -DesktopToolDir $desktopToolDir -Queue $QueueUrl -Token $PullToken
-
-Write-Step "npm install (Electron — có thể mất vài phút lần đầu)"
-Push-Location $desktopToolDir
-npm install
-if ($LASTEXITCODE -ne 0) {
-  Pop-Location
-  throw "npm install thất bại"
-}
-
-Write-Step "Kiểm tra syntax"
-npm run check
-if ($LASTEXITCODE -ne 0) {
-  Pop-Location
-  throw "npm run check thất bại"
-}
-
-New-RunShortcut -DesktopToolDir $desktopToolDir
-
-Write-Host ""
-Write-Host "Cài xong!" -ForegroundColor Green
-Write-Host "  Thư mục : $desktopToolDir"
-Write-Host "  Chạy lại: scripts\run-windows.bat"
-Write-Host "  API     : http://127.0.0.1:8795/health"
-Write-Host ""
-Write-Host "Lần đầu: mở app → Chọn điểm trên màn hình → Test click → bật Tự click sau khi hết giờ." -ForegroundColor Yellow
-
-if (-not $SkipStart) {
-  Write-Step "Khởi động desktop-tool"
-  npm start
-}
-
-Pop-Location
+exit $exitCode

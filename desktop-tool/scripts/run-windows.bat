@@ -1,26 +1,42 @@
 @echo off
-setlocal
+setlocal EnableExtensions
 cd /d "%~dp0.."
+
+echo.
+echo Click Live desktop-tool
+echo.
 
 where node >nul 2>&1
 if errorlevel 1 (
-  echo Node.js chua cai. Chay scripts\install-windows.bat truoc.
+  echo [ERROR] Node.js not installed. Run scripts\install-windows.bat first.
+  echo.
   pause
   exit /b 1
 )
 
 if not exist "node_modules\electron\package.json" (
-  echo Chua npm install. Chay scripts\install-windows.bat truoc.
+  echo [ERROR] Run npm install first - scripts\install-windows.bat
+  echo.
   pause
   exit /b 1
 )
 
 if not exist ".env" (
   if exist ".env.example" copy /Y ".env.example" ".env" >nul
-  echo Da tao .env - hay sua DESKTOP_TOOL_PULL_TOKEN roi chay lai.
+  echo [WARN] Created .env - set DESKTOP_TOOL_PULL_TOKEN then rerun.
+  echo.
 )
 
-echo Starting Click Live desktop-tool ...
-npm start
+echo Starting desktop-tool ...
+echo.
+call npm start
+set ERR=%ERRORLEVEL%
+
+echo.
+if %ERR% NEQ 0 (
+  echo [ERROR] npm start failed with code %ERR%
+  pause
+  exit /b %ERR%
+)
 
 endlocal
