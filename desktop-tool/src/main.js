@@ -50,18 +50,24 @@ let tray = null;
 let settingsWindow = null;
 let stopPoller = null;
 
-const gotSingleInstanceLock = app.requestSingleInstanceLock();
-if (!gotSingleInstanceLock) {
-  console.error(
-    "Desktop-tool da chay (instance cu trong Task Manager).\n"
-    + "  Chay: scripts\\stop-windows.bat roi run-windows.bat lai.\n"
-    + "  Hoac mo cua so tu icon tray (gooc man hinh)."
-  );
-  app.quit();
-} else {
-  app.on("second-instance", () => {
-    showSettingsWindow();
-  });
+let gotSingleInstanceLock = true;
+if (isPackaged()) {
+  gotSingleInstanceLock = app.requestSingleInstanceLock();
+  if (!gotSingleInstanceLock) {
+    console.error(
+      "Desktop-tool da chay.\n"
+      + "  Dong ban portable cu hoac chay scripts\\stop-windows.bat"
+    );
+    app.quit();
+  } else {
+    app.on("second-instance", () => {
+      showSettingsWindow();
+      if (settingsWindow && !settingsWindow.isDestroyed()) {
+        if (settingsWindow.isMinimized()) settingsWindow.restore();
+        settingsWindow.focus();
+      }
+    });
+  }
 }
 
 function notifySchedule(payload) {
