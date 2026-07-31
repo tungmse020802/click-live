@@ -10,7 +10,7 @@ const {
 const { startDesktopPoller } = require("./poll");
 const { openChromeUrl, focusChromeTab, closeChromeTab, CHROME_APP } = require("./chrome");
 const { loadSettings, saveSettings, adjustDelayOffset } = require("./settings");
-const { clickScreenPoint } = require("./desktop-click");
+const { clickScreenPoint, warmUpWinClickHelper, shutdownWinClickHelper } = require("./desktop-click");
 const { pickPointOnScreen } = require("./pick-point");
 const { ensureAccessibility } = require("./accessibility");
 const { computeCountdownSchedule } = require("./junb-url");
@@ -280,6 +280,7 @@ app.whenReady().then(async () => {
     if (queueUrl && pullToken) {
       console.log(`Polling queue ${queueUrl} every ${POLL_MS}ms`);
     }
+    warmUpWinClickHelper();
   } catch (err) {
     if (err && err.code === "EADDRINUSE") {
       console.error(`Port ${PORT} đang được dùng — desktop-tool có thể đã chạy.`);
@@ -298,6 +299,7 @@ app.on("window-all-closed", (event) => {
 });
 
 app.on("before-quit", () => {
+  shutdownWinClickHelper();
   if (stopPoller) stopPoller();
   for (const entry of openEntries.values()) {
     clearEntryTimers(entry);
