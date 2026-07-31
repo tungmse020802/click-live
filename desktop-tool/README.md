@@ -1,6 +1,6 @@
 # Desktop Tool
 
-App Electron chạy nền — mở **countdown link trong Google Chrome** từ queue UI. Mỗi lần nhấn **Mở link** → **1 tab Chrome**, tự đóng sau 30 giây.
+App Electron chạy nền — mở **countdown link trong Google Chrome** từ queue UI. Mỗi lần nhấn **Mở link** → **tab mới trong cùng một cửa sổ Chrome** (không mở thêm cửa sổ), tự đóng tab sau 30 giây.
 
 ## Cài & chạy
 

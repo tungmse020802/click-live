@@ -99,6 +99,8 @@ upsert_env "TELEGRAM_CLIENT_QUEUE_ONLY_NEWEST" "true"
 upsert_env "TELEGRAM_CLIENT_SUPERSEDE_PENDING" "false"
 upsert_env "TELEGRAM_CLIENT_FILTER_ENABLED" "true"
 upsert_env "TELEGRAM_CLIENT_FILTER_CONFIG_PATH" "data/message_filters.json"
+upsert_env "PHONE_SYNC_BROADCAST" "true"
+upsert_env "PHONE_SYNC_LEAD_SECONDS" "2.5"
 
 TUNNEL_URL="$("${SSH[@]}" 'cat /root/click-live/tunnel/public.url 2>/dev/null' || true)"
 TUNNEL_URL="$(echo "$TUNNEL_URL" | tr -d '\r\n' | sed 's:/*$::')"

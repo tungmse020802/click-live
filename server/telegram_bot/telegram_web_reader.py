@@ -375,7 +375,12 @@ class TelegramWebReader:
                 )
                 continue
 
-            filter_result = self.filter_engine.evaluate(message.text, message.signal)
+            filter_result = self.filter_engine.evaluate(
+                message.text,
+                message.signal,
+                chat_id=room_key,
+                chat_label=target.label,
+            )
             if not filter_result.matched:
                 logger.debug(
                     "Skipped Telegram Web message room=%s message=%s reason=%s",

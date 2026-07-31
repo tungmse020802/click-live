@@ -274,7 +274,12 @@ class TelethonReader:
                 return
 
             signal = parse_box_signal(text)
-            filter_result = self.filter_engine.evaluate(text, signal)
+            filter_result = self.filter_engine.evaluate(
+                text,
+                signal,
+                chat_id=target.room_key,
+                chat_label=target.label,
+            )
             if not filter_result.matched:
                 logger.debug(
                     "Skipped Telegram client message room=%s message=%s reason=%s",

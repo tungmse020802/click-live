@@ -1,7 +1,6 @@
 const { execFile, spawn } = require("child_process");
 const { promisify } = require("util");
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 
 const execFileAsync = promisify(execFile);
@@ -13,16 +12,10 @@ const CHROME_BIN =
 /** Incognito tránh localStorage app_link (TikTok @junb...) từ Chrome thường */
 const USE_INCOGNITO = process.env.DESKTOP_CHROME_INCOGNITO !== "false";
 
-const chromeSessionsByUrl = new Map();
-
 function escapeAppleScript(value) {
   return String(value || "")
     .replace(/\\/g, "\\\\")
     .replace(/"/g, '\\"');
-}
-
-function urlSessionKey(url) {
-  return String(url || "").trim().split("#")[0];
 }
 
 function resolveChromeBin() {
@@ -63,6 +56,84 @@ async function runOsascript(script) {
   return stdout.trim();
 }
 
+function spawnChrome(args) {
+  const child = spawn(resolveChromeBin(), args, {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  child.unref();
+}
+
+/** Mở tab mới trong cửa sổ Chrome đầu tiên (không tạo cửa sổ mới). */
+async function openChromeTabDarwin(url, { incognito = false } = {}) {
+  const theUrl = escapeAppleScript(url);
+  const ensureWindow = incognito
+    ? `
+      set hasIncognito to false
+      repeat with w in windows
+        if mode of w is "incognito" then
+          set hasIncognito to true
+          exit repeat
+        end if
+      end repeat
+      if hasIncognito is false then
+        return "need_window"
+      end if
+    `
+    : `
+      if (count of windows) = 0 then
+        make new window
+      end if
+    `;
+
+  const openInWindow = incognito
+    ? `
+      repeat with w in windows
+        if mode of w is "incognito" then
+          tell w
+            make new tab with properties {URL:"${theUrl}"}
+            set active tab index to (count of tabs)
+          end tell
+          set index of w to 1
+          activate
+          return "opened"
+        end if
+      end repeat
+    `
+    : `
+      tell window 1
+        make new tab with properties {URL:"${theUrl}"}
+        set active tab index to (count of tabs)
+      end tell
+      set index of window 1 to 1
+      activate
+    `;
+
+  const script = `
+    tell application "${CHROME_APP}"
+      ${ensureWindow}
+      ${openInWindow}
+    end tell
+  `;
+
+  try {
+    const result = await runOsascript(script);
+    if (incognito && result === "need_window") {
+      spawnChrome(["--incognito", url]);
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      await openChromeTabDarwin(url, { incognito: true });
+      return;
+    }
+    if (!incognito || result === "opened") return;
+  } catch {
+    /* fall through to CLI */
+  }
+
+  const args = incognito ? ["--incognito", "--new-tab", url] : ["--new-tab", url];
+  spawnChrome(args);
+}
+
 async function focusChromeTab(url) {
   if (process.platform !== "darwin") return "focused";
 
@@ -91,51 +162,25 @@ async function focusChromeTab(url) {
 
 async function openChromeUrl(url) {
   if (process.platform === "darwin") {
-    if (USE_INCOGNITO) {
-      await execFileAsync(resolveChromeBin(), ["--incognito", url]);
-      return;
-    }
-    await execFileAsync("open", ["-a", CHROME_APP, url]);
+    await openChromeTabDarwin(url, { incognito: USE_INCOGNITO });
     return;
   }
 
   if (process.platform === "win32") {
-    const bin = resolveChromeBin();
-    const profileDir = path.join(os.tmpdir(), `click-live-chrome-${Date.now()}`);
-    fs.mkdirSync(profileDir, { recursive: true });
     const args = USE_INCOGNITO
-      ? ["--incognito", `--user-data-dir=${profileDir}`, "--new-window", url]
-      : ["--new-window", url];
-    const child = spawn(bin, args, { detached: true, stdio: "ignore", windowsHide: true });
-    child.unref();
-    chromeSessionsByUrl.set(urlSessionKey(url), { pid: child.pid, profileDir });
+      ? ["--incognito", "--new-tab", url]
+      : ["--new-tab", url];
+    spawnChrome(args);
     return;
   }
 
-  await execFileAsync("xdg-open", [url]);
+  const args = USE_INCOGNITO
+    ? ["--incognito", "--new-tab", url]
+    : ["--new-tab", url];
+  spawnChrome(args);
 }
 
 async function closeChromeTab(url) {
-  if (process.platform === "win32") {
-    const session = chromeSessionsByUrl.get(urlSessionKey(url));
-    if (session?.pid) {
-      try {
-        await execFileAsync("taskkill", ["/PID", String(session.pid), "/T", "/F"]);
-      } catch {
-        /* tab may already be closed */
-      }
-      chromeSessionsByUrl.delete(urlSessionKey(url));
-      if (session.profileDir) {
-        try {
-          fs.rmSync(session.profileDir, { recursive: true, force: true });
-        } catch {
-          /* ignore */
-        }
-      }
-    }
-    return;
-  }
-
   if (process.platform !== "darwin") return;
 
   const theUrl = escapeAppleScript(url);

@@ -232,7 +232,7 @@ async function startServer() {
     getSettings: loadSettings,
   });
   console.log(`Desktop-tool API http://127.0.0.1:${port}`);
-  console.log(`Chrome: ${CHROME_APP} — click lúc 0.0s, đóng tab +30s sau 0.0s`);
+  console.log(`Chrome: ${CHROME_APP} — 1 cửa sổ, mỗi link = tab mới, đóng tab +30s sau 0.0s`);
   return port;
 }
 

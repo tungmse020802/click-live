@@ -132,8 +132,11 @@ Ghi chú:
   các tin chưa lưu trong cửa sổ 5 phút; SQLite tự chống trùng theo message ID.
 - Reader tự reload file filter theo `TELEGRAM_WEB_FILTER_RELOAD_SECONDS`, nên có thể sửa filter mà không cần restart.
 - Mỗi filter dùng AND logic bên trong filter đó. Nhiều filter dùng OR logic: match một filter bất kỳ là được enqueue.
-- Nếu file filter không có rule (`"filters": []`) hoặc toàn bộ rule bị tắt, reader sẽ nhận tất cả message.
-- `BOX: 100/25` là một BOX; các field `min_box1/max_box1` lọc giá trị 1 (`100`), `min_box2/max_box2` lọc giá trị 2 (`25`).
+- Nếu file filter không có rule bật, reader **không lọc nội dung** (vẫn áp dụng `reject` và `exclude_telegram_groups` nếu có).
+- Trong mỗi filter: trường min/max để trống = không giới hạn phía đó; filter không điền tiêu chí nào = cho qua mọi tin (trừ nhóm bị loại).
+- Mỗi filter có thể giới hạn `telegram_groups` (allow list trong JSON, nâng cao).
+- **`exclude_telegram_groups`**: trên panel `/filters`, **tick = đang lắng nghe** (nhận tin vào queue); bỏ tick = tắt nhóm.
+- `BOX: 100/25` — BAG nhập **một số** mỗi phía (`min_box1` = `max_box1`, `min_box2` = `max_box2`), vd. chỉ lấy đúng `50/1`.
 - `reply_transport=none` nghĩa là job sẽ được xử lý và lưu trace, nhưng không gửi reply ngược bằng Bot API.
 
 Telegram client reader (ổn định hơn Telegram Web):

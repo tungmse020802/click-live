@@ -19,7 +19,13 @@ from open_link import open_link_for_queue
 from desktop_relay import desktop_status, enqueue_open, pull_pending
 from logging_setup import setup_logging
 from db import ChatDatabase, QueueJob
-from phone_push import pop_phone_open
+from phone_push import pop_phone_open, push_phone_open
+from phone_jobs import phone_config, phone_job_from_claimed_job, phone_job_from_queue_item
+from phone_registry import (
+    next_pending_job_for_device,
+    register_device,
+    sync_broadcast_enabled,
+)
 from deeplink_resolve import (
     DEEPLINK_PREFIX,
     build_thanhtai_countdown_url,
@@ -118,7 +124,13 @@ FILTERS_HTML = r"""<!doctype html>
     body { margin:0; min-height:100vh; background:linear-gradient(180deg,#101722,#0b1016); color:var(--text); font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
     button,input { font:inherit; }
     .shell { min-height:100vh; display:grid; grid-template-rows:auto 1fr; }
-    .topbar { min-height:58px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:0 20px; background:#0c1118; border-bottom:1px solid #1f2937; }
+    .topbar { min-height:58px; display:flex; align-items:center; justify-content:space-between; gap:16px; padding:0 20px; background:#0c1118; border-bottom:1px solid #1f2937; flex-wrap:wrap; }
+    .topbar-main { display:flex; align-items:center; gap:10px; min-width:0; flex:1 1 auto; }
+    .header-collapse-btn { width:34px; padding:0; flex:0 0 auto; }
+    .header-collapsible { display:block; }
+    .shell.header-collapsed .header-collapsible { display:none !important; }
+    .shell.header-collapsed .topbar { min-height:46px; border-bottom-color:transparent; }
+    .shell.header-collapsed .brand span { display:none; }
     .brand { display:flex; align-items:baseline; gap:12px; min-width:0; }
     h1 { margin:0; font-size:18px; }
     .brand span { color:var(--muted); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -160,6 +172,33 @@ FILTERS_HTML = r"""<!doctype html>
     .reject-box { border:1px dashed #3b4a5f; border-radius:12px; padding:12px; background:#121925; }
     .reject-box label { display:block; margin-bottom:6px; color:var(--muted); font-size:11px; font-weight:700; text-transform:uppercase; }
     .reject-box input { width:100%; height:38px; border:1px solid var(--line); border-radius:8px; background:var(--input); color:var(--text); padding:0 10px; }
+    .content-filter-box { border:1px solid #2a3544; border-radius:12px; padding:14px; background:#121925; }
+    .content-filter-box label { display:block; margin-bottom:8px; color:#e2e8f0; font-size:13px; font-weight:700; }
+    .content-filter-box input { width:100%; min-height:42px; border:1px solid var(--line); border-radius:10px; background:var(--input); color:var(--text); padding:10px 12px; }
+    .content-filter-box input:focus { outline:2px solid rgba(59,130,246,.35); border-color:#3b82f6; }
+    .content-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
+    .content-chip { display:inline-flex; align-items:center; height:26px; padding:0 10px; border-radius:999px; background:#1a2740; border:1px solid #334155; color:#bfdbfe; font-size:12px; }
+    .groups-panel { border:1px solid #2a3544; border-radius:16px; background:linear-gradient(180deg,#151d28 0%,#101722 100%); padding:16px; box-shadow:0 12px 32px rgba(0,0,0,.22); }
+    .groups-panel-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:14px; }
+    .groups-panel-title { margin:0; font-size:15px; font-weight:700; }
+    .groups-panel-sub { margin:4px 0 0; color:var(--muted); font-size:12px; line-height:1.4; }
+    .groups-count { display:inline-flex; align-items:center; height:28px; padding:0 10px; border-radius:999px; background:#0a1a12; border:1px solid #166534; color:#86efac; font-size:12px; font-weight:700; white-space:nowrap; }
+    .group-toolbar { display:flex; gap:8px; flex-wrap:wrap; }
+    .group-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; max-height:320px; overflow:auto; padding-right:2px; }
+    .group-card { display:flex; align-items:flex-start; gap:12px; padding:12px 14px; border-radius:12px; border:1px solid #2a3544; background:#0d1218; cursor:pointer; transition:border-color .15s,background .15s,opacity .15s; user-select:none; }
+    .group-card:hover { border-color:#3b82f6; }
+    .group-card.on { border-color:#166534; background:linear-gradient(180deg,#0c1a13,#0a1410); }
+    .group-card.off { opacity:.62; border-color:#3f1d24; background:#121018; }
+    .group-card input { width:18px; height:18px; margin-top:2px; flex:0 0 auto; accent-color:var(--green); cursor:pointer; }
+    .group-card-body { min-width:0; flex:1; }
+    .group-card-top { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .group-card-name { font-weight:700; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .group-badge { font-size:10px; font-weight:700; letter-spacing:.03em; text-transform:uppercase; white-space:nowrap; }
+    .group-badge.on { color:#86efac; }
+    .group-badge.off { color:#fca5a5; }
+    .group-card-id { color:var(--muted); font-size:11px; margin-top:6px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; word-break:break-all; }
+    .groups-empty { color:var(--muted); font-size:13px; line-height:1.5; padding:8px 0; }
+    .groups-empty a { color:var(--blue); text-decoration:none; }
     .empty { color:var(--muted); padding:40px 12px; text-align:center; }
     @media (max-width:920px) {
       .main { grid-template-columns:1fr; }
@@ -170,10 +209,13 @@ FILTERS_HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <div class="shell">
+  <div class="shell" id="filterShell">
     <header class="topbar">
-      <div class="brand"><h1>Setup Filter</h1><span id="filterPath"></span></div>
-      <div class="toolbar">
+      <div class="topbar-main">
+        <button type="button" id="headerCollapseBtn" class="button header-collapse-btn" title="Thu gọn header" aria-expanded="true">▲</button>
+        <div class="brand"><h1>Setup Filter</h1><span id="filterPath"></span></div>
+      </div>
+      <div class="toolbar header-collapsible">
         <button id="queueBtn" class="button">Hàng đợi</button>
         <button id="reloadBtn" class="button">Tải lại</button>
         <button id="saveBtn" class="button primary">Lưu</button>
@@ -191,7 +233,24 @@ FILTERS_HTML = r"""<!doctype html>
       </section>
       <section class="editor">
         <div class="editor-wrap">
-          <div id="status" class="status">Sẵn sàng</div>
+          <div id="status" class="status header-collapsible">Sẵn sàng</div>
+
+          <section class="groups-panel header-collapsible" aria-label="Nhóm lắng nghe">
+            <div class="groups-panel-head">
+              <div>
+                <h2 class="groups-panel-title">Nhóm đang lắng nghe</h2>
+                <p class="groups-panel-sub">Tick nhóm cần nhận tin vào queue. Bỏ tick = tắt nhóm đó (không giải mã, không enqueue).</p>
+              </div>
+              <span id="listenCount" class="groups-count">0/0 đang bật</span>
+            </div>
+            <div class="group-toolbar">
+              <button type="button" id="listenAllBtn" class="button primary">Chọn tất cả</button>
+              <button type="button" id="listenNoneBtn" class="button">Bỏ chọn tất cả</button>
+              <button type="button" id="watchGroupsBtn" class="button">Quản lý nhóm</button>
+            </div>
+            <div id="listenGroupGrid" class="group-grid"></div>
+          </section>
+
           <div id="editorEmpty" class="empty" hidden>Chưa có bộ lọc. Bấm Thêm để tạo.</div>
           <div id="editorBody">
             <div class="meta-bar">
@@ -220,15 +279,11 @@ FILTERS_HTML = r"""<!doctype html>
               <div class="msg-line">
                 <span class="label">🟪  BAG :</span>
                 <span class="range">
-                  <input id="minBox1" type="number" min="0" step="1" placeholder="min">
-                  <span class="dash">-</span>
-                  <input id="maxBox1" type="number" min="0" step="1" placeholder="max">
+                  <input id="box1" type="number" min="0" step="1" placeholder="50">
                 </span>
                 <span class="sep">/</span>
                 <span class="range">
-                  <input id="minBox2" type="number" min="0" step="1" placeholder="min">
-                  <span class="dash">-</span>
-                  <input id="maxBox2" type="number" min="0" step="1" placeholder="max">
+                  <input id="box2" type="number" min="0" step="1" placeholder="1">
                 </span>
                 <span class="sep">🏅🇦🇪</span>
               </div>
@@ -254,7 +309,14 @@ FILTERS_HTML = r"""<!doctype html>
               </div>
             </div>
 
-            <p class="hint">Để trống min/max = không giới hạn phía đó. Ví dụ BAG <code>50-50 / 1-5</code>, Rate <code>10-50</code>, Level <code>1-3</code>.</p>
+            <p class="hint">BAG/Box nhập đúng một số mỗi phía (vd. <code>50 / 1</code> = chỉ lấy 50/1). Rate/Level vẫn dùng min–max; để trống = không giới hạn.</p>
+
+            <div class="content-filter-box">
+              <label for="textContainsInput">Tin phải chứa nội dung</label>
+              <input id="textContainsInput" type="text" autocomplete="off" placeholder='"có thể treo", "Rương treo"'>
+              <div id="textContainsPreview" class="content-chips"></div>
+              <p class="hint" style="margin:10px 0 0">Dùng <code>"..."</code> cho cụm từ (vd. <code>"có thể treo"</code>). Nhiều cụm cách nhau bởi dấu phẩy — khớp <strong>một</strong> cụm là qua. Để trống = không lọc theo chữ.</p>
+            </div>
 
             <div class="reject-box">
               <label for="rejectCommentInput">Chặn nếu dòng 💬 chứa</label>
@@ -267,20 +329,73 @@ FILTERS_HTML = r"""<!doctype html>
     </main>
   </div>
   <script>
-    const state = { filters: [], reject: [], selected: 0, path: '' };
+    const state = { filters: [], reject: [], excludeGroups: [], selected: 0, path: '', watchGroups: [] };
     const $ = (id) => document.getElementById(id);
     const els = {
       path:$('filterPath'), list:$('filterList'), status:$('status'),
       editorEmpty:$('editorEmpty'), editorBody:$('editorBody'),
       name:$('nameInput'), priority:$('priorityInput'), enabled:$('enabledInput'),
-      minBox1:$('minBox1'), maxBox1:$('maxBox1'), minBox2:$('minBox2'), maxBox2:$('maxBox2'),
+      box1:$('box1'), box2:$('box2'),
       minRate:$('minRate'), maxRate:$('maxRate'), minLevel:$('minLevel'), maxLevel:$('maxLevel'),
-      rejectComment:$('rejectCommentInput'),
+      rejectComment:$('rejectCommentInput'), textContains:$('textContainsInput'), textContainsPreview:$('textContainsPreview'),
+      listenGroupGrid:$('listenGroupGrid'), listenCount:$('listenCount'),
     };
+    function allWatchGroupIds() {
+      return state.watchGroups.map((g) => String(g.chat_id || '')).filter(Boolean);
+    }
+    function listeningGroupIds() {
+      const excluded = new Set((state.excludeGroups || []).map(String));
+      return allWatchGroupIds().filter((id) => !excluded.has(id));
+    }
+    function updateListenCount() {
+      const total = allWatchGroupIds().length;
+      const on = listeningGroupIds().length;
+      els.listenCount.textContent = total ? `${on}/${total} đang bật` : '0/0 đang bật';
+    }
     function esc(value) { return String(value ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
     function cleanKeyword(value) { return String(value || '').trim().replace(/^[\'\"]+|[\'\"]+$/g, '').trim(); }
     function fromCsv(value) { return String(value || '').split(',').map(cleanKeyword).filter(Boolean); }
+    function parseTextContains(value) {
+      const text = String(value || '');
+      const tokens = [];
+      const re = /"([^"]+)"|'([^']+)'/g;
+      let match;
+      while ((match = re.exec(text))) {
+        const token = (match[1] || match[2] || '').trim();
+        if (token) tokens.push(token);
+      }
+      if (tokens.length) return tokens;
+      return fromCsv(text);
+    }
+    function renderTextContainsPreview(phrases) {
+      const list = phrases || [];
+      els.textContainsPreview.innerHTML = list.length
+        ? list.map((p) => `<span class="content-chip">${esc(p)}</span>`).join('')
+        : '';
+    }
+    function textContainsToInput(values) {
+      return (values || []).map((v) => {
+        const s = String(v || '');
+        return (s.includes(',') || s.includes('"')) ? `"${s.replace(/"/g, '')}"` : s;
+      }).join(', ');
+    }
     function optionalNumber(value) { return value === '' || value === null || value === undefined ? undefined : Number(value); }
+    function boxExactFromFilter(filter, minKey, maxKey) {
+      const minV = filter[minKey];
+      const maxV = filter[maxKey];
+      if (minV === undefined && maxV === undefined) return undefined;
+      if (minV !== undefined) return minV;
+      return maxV;
+    }
+    function applyBoxExact(filter, minKey, maxKey, value) {
+      if (value === undefined) {
+        delete filter[minKey];
+        delete filter[maxKey];
+      } else {
+        filter[minKey] = value;
+        filter[maxKey] = value;
+      }
+    }
     function currentFilter() { return state.filters[state.selected] || null; }
     function compactFilter(filter) {
       ['priority','min_box1','max_box1','min_box2','max_box2','min_rate','max_rate','min_level','max_level','min_views','max_views','text_regex'].forEach((key) => {
@@ -309,36 +424,85 @@ FILTERS_HTML = r"""<!doctype html>
       filter.name = els.name.value.trim() || `filter_${state.selected + 1}`;
       filter.enabled = els.enabled.checked;
       filter.priority = optionalNumber(els.priority.value);
-      filter.min_box1 = optionalNumber(els.minBox1.value);
-      filter.max_box1 = optionalNumber(els.maxBox1.value);
-      filter.min_box2 = optionalNumber(els.minBox2.value);
-      filter.max_box2 = optionalNumber(els.maxBox2.value);
+      applyBoxExact(filter, 'min_box1', 'max_box1', optionalNumber(els.box1.value));
+      applyBoxExact(filter, 'min_box2', 'max_box2', optionalNumber(els.box2.value));
       filter.min_rate = optionalNumber(els.minRate.value);
       filter.max_rate = optionalNumber(els.maxRate.value);
       filter.min_level = optionalNumber(els.minLevel.value);
       filter.max_level = optionalNumber(els.maxLevel.value);
+      const phrases = parseTextContains(els.textContains.value);
+      if (phrases.length) filter.text_contains = phrases;
+      else delete filter.text_contains;
+      renderTextContainsPreview(phrases);
+      delete filter.telegram_groups;
       delete filter.boxes;
       delete filter.countries;
       delete filter.badges;
       delete filter.note_contains;
-      delete filter.text_contains;
       delete filter.text_regex;
       delete filter.min_views;
       delete filter.max_views;
       compactFilter(filter);
     }
+    function syncExcludeFromForm() {
+      const excluded = new Set();
+      els.listenGroupGrid.querySelectorAll('.group-card').forEach((card) => {
+        const input = card.querySelector('input[type=checkbox]');
+        if (input && !input.checked) excluded.add(String(input.value));
+      });
+      state.excludeGroups = Array.from(excluded);
+      updateListenCount();
+    }
+    function renderListenGroupGrid() {
+      const excluded = new Set((state.excludeGroups || []).map(String));
+      if (!state.watchGroups.length) {
+        els.listenGroupGrid.innerHTML = '<p class="groups-empty">Chưa có nhóm theo dõi. Thêm tại <a href="/watch-groups">Nhóm theo dõi</a> trước.</p>';
+        updateListenCount();
+        return;
+      }
+      els.listenGroupGrid.innerHTML = state.watchGroups.map((group) => {
+        const chatId = String(group.chat_id || '');
+        const name = esc(group.name || chatId);
+        const listening = !excluded.has(chatId);
+        const checked = listening ? 'checked' : '';
+        const cls = listening ? 'group-card on' : 'group-card off';
+        const badge = listening ? '<span class="group-badge on">Đang bật</span>' : '<span class="group-badge off">Tắt</span>';
+        return `<label class="${cls}"><input type="checkbox" value="${esc(chatId)}" ${checked}><div class="group-card-body"><div class="group-card-top"><div class="group-card-name">${name}</div>${badge}</div><div class="group-card-id">${esc(chatId)}</div></div></label>`;
+      }).join('');
+      els.listenGroupGrid.querySelectorAll('input[type=checkbox]').forEach((input) => {
+        input.addEventListener('change', () => {
+          const card = input.closest('.group-card');
+          if (card) {
+            card.classList.toggle('on', input.checked);
+            card.classList.toggle('off', !input.checked);
+            const badge = card.querySelector('.group-badge');
+            if (badge) {
+              badge.textContent = input.checked ? 'Đang bật' : 'Tắt';
+              badge.className = input.checked ? 'group-badge on' : 'group-badge off';
+            }
+          }
+          syncExcludeFromForm();
+        });
+      });
+      updateListenCount();
+    }
     function renderList() {
       els.list.innerHTML = state.filters.map((filter,index) => {
         const selected = index === state.selected ? 'selected' : '';
         const enabled = filter.enabled !== false;
-        const bagLeft = fmtRange(filter.min_box1, filter.max_box1, '');
-        const bagRight = fmtRange(filter.min_box2, filter.max_box2, '');
-        const bag = (bagLeft || bagRight) ? `BAG ${bagLeft || '*'}/${bagRight || '*'}` : '';
+        const bagLeft = boxExactFromFilter(filter, 'min_box1', 'max_box1');
+        const bagRight = boxExactFromFilter(filter, 'min_box2', 'max_box2');
+        const bag = (bagLeft !== undefined || bagRight !== undefined)
+          ? `BAG ${bagLeft ?? '*'}/${bagRight ?? '*'}`
+          : '';
         const meta = [
           bag,
           fmtRange(filter.min_rate, filter.max_rate, 'rate '),
           fmtRange(filter.min_level, filter.max_level, 'lv '),
           filter.priority !== undefined ? `p${filter.priority}` : '',
+          Array.isArray(filter.text_contains) && filter.text_contains.length
+            ? `"${filter.text_contains[0]}"${filter.text_contains.length > 1 ? ` +${filter.text_contains.length - 1}` : ''}`
+            : '',
         ].filter(Boolean).join(' | ');
         return `<li class="filter-row ${selected}" data-index="${index}"><div><div class="filter-name">${esc(filter.name || `filter_${index + 1}`)}</div><div class="filter-meta">${esc(meta || 'không giới hạn')}</div></div><span class="pill ${enabled ? 'on' : 'off'}">${enabled ? 'bật' : 'tắt'}</span></li>`;
       }).join('');
@@ -363,19 +527,21 @@ FILTERS_HTML = r"""<!doctype html>
           (rule.text_contains || []).forEach((v) => rejectTokens.push(v));
         });
         els.rejectComment.value = rejectTokens.join(',');
+        renderListenGroupGrid();
         return;
       }
       els.name.value = filter.name || '';
       els.priority.value = filter.priority ?? '';
       els.enabled.checked = filter.enabled !== false;
-      setVal(els.minBox1, filter.min_box1);
-      setVal(els.maxBox1, filter.max_box1);
-      setVal(els.minBox2, filter.min_box2);
-      setVal(els.maxBox2, filter.max_box2);
+      setVal(els.box1, boxExactFromFilter(filter, 'min_box1', 'max_box1'));
+      setVal(els.box2, boxExactFromFilter(filter, 'min_box2', 'max_box2'));
       setVal(els.minRate, filter.min_rate);
       setVal(els.maxRate, filter.max_rate);
       setVal(els.minLevel, filter.min_level);
       setVal(els.maxLevel, filter.max_level);
+      els.textContains.value = textContainsToInput(filter.text_contains || []);
+      renderTextContainsPreview(filter.text_contains || []);
+      renderListenGroupGrid();
       const rejectTokens = [];
       (state.reject || []).forEach((rule) => {
         if (rule.enabled === false) return;
@@ -390,37 +556,78 @@ FILTERS_HTML = r"""<!doctype html>
         name: `filter_${state.filters.length + 1}`,
         enabled: true,
         priority: 100,
-        min_box1: 50,
-        max_box1: 50,
-        min_box2: 1,
-        max_box2: 1,
-        min_rate: 50,
-        max_rate: 50,
-        min_level: 1,
-        max_level: 1,
       };
     }
+    async function loadWatchGroups() {
+      try {
+        const res = await fetch('/api/watch-groups?_=' + Date.now(), { cache:'no-store' });
+        const data = await res.json();
+        state.watchGroups = (data.groups || []).filter((g) => g.enabled !== false);
+      } catch (_) {
+        state.watchGroups = [];
+      }
+    }
     async function loadFilters() {
+      await loadWatchGroups();
       const res = await fetch('/api/filters?_=' + Date.now(), { cache:'no-store' });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       state.path = data.path || '';
       state.filters = Array.isArray(data.filters) ? data.filters : [];
       state.reject = Array.isArray(data.reject) ? data.reject : [];
+      state.excludeGroups = Array.isArray(data.exclude_telegram_groups) ? data.exclude_telegram_groups : [];
       state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1));
       els.path.textContent = state.path;
-      els.status.textContent = `Đã tải ${state.filters.length} bộ lọc` + (state.reject.length ? ` | chặn ${state.reject.length}` : '');
+      const listening = listeningGroupIds().length;
+      const excludeNote = state.excludeGroups.length ? ` | tắt ${state.excludeGroups.length} nhóm` : '';
+      els.status.textContent = `Đã tải ${state.filters.length} bộ lọc` + (state.reject.length ? ` | chặn ${state.reject.length}` : '') + (listening ? ` | lắng nghe ${listening} nhóm` : '') + excludeNote;
       render();
     }
     async function saveFilters() {
       syncFormToFilter();
-      const res = await fetch('/api/filters', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ filters:state.filters, reject:state.reject }) });
+      syncExcludeFromForm();
+      const res = await fetch('/api/filters', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ filters:state.filters, reject:state.reject, exclude_telegram_groups:state.excludeGroups }) });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Lưu thất bại');
       state.filters = data.filters || [];
       state.reject = data.reject || [];
+      state.excludeGroups = Array.isArray(data.exclude_telegram_groups) ? data.exclude_telegram_groups : [];
       state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1));
-      els.status.textContent = `Đã lưu ${state.filters.length} bộ lọc` + (state.reject.length ? ` | chặn ${state.reject.length}` : '');
+      const listening = listeningGroupIds().length;
+      const excludeNote = state.excludeGroups.length ? ` | tắt ${state.excludeGroups.length} nhóm` : '';
+      els.status.textContent = `Đã lưu ${state.filters.length} bộ lọc` + (state.reject.length ? ` | chặn ${state.reject.length}` : '') + (listening ? ` | lắng nghe ${listening} nhóm` : '') + excludeNote;
       render();
     }
+    $('listenAllBtn').addEventListener('click', () => {
+      state.excludeGroups = [];
+      renderListenGroupGrid();
+      els.status.textContent = 'Đã bật lắng nghe tất cả nhóm';
+    });
+    $('listenNoneBtn').addEventListener('click', () => {
+      state.excludeGroups = allWatchGroupIds();
+      renderListenGroupGrid();
+      els.status.textContent = 'Đã tắt lắng nghe tất cả nhóm';
+    });
+    $('watchGroupsBtn').addEventListener('click', () => { location.href = '/watch-groups'; });
+    els.textContains.addEventListener('input', () => {
+      renderTextContainsPreview(parseTextContains(els.textContains.value));
+    });
+    (function initHeaderCollapse() {
+      const shell = document.getElementById('filterShell');
+      const btn = document.getElementById('headerCollapseBtn');
+      if (!shell || !btn) return;
+      const storageKey = 'click-live-filter-header-collapsed';
+      function apply(collapsed) {
+        shell.classList.toggle('header-collapsed', collapsed);
+        btn.textContent = collapsed ? '▼' : '▲';
+        btn.title = collapsed ? 'Mở rộng header' : 'Thu gọn header';
+        btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      }
+      apply(localStorage.getItem(storageKey) === '1');
+      btn.addEventListener('click', () => {
+        const next = !shell.classList.contains('header-collapsed');
+        apply(next);
+        localStorage.setItem(storageKey, next ? '1' : '0');
+      });
+    })();
     $('queueBtn').addEventListener('click', () => window.location.href = '/');
     $('reloadBtn').addEventListener('click', () => loadFilters().catch((err) => els.status.textContent = err.message));
     $('saveBtn').addEventListener('click', () => saveFilters().catch((err) => els.status.textContent = err.message));
@@ -1426,6 +1633,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_headers("application/json; charset=utf-8", 0)
             return
 
+        if parsed.path == "/api/phone/register":
+            self._send_headers("application/json; charset=utf-8", 0)
+            return
+
         if parsed.path == "/api/phone/next-job":
             self._send_headers("application/json; charset=utf-8", 0)
             return
@@ -1615,6 +1826,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._phone_job_result()
             return
 
+        if parsed.path == "/api/phone/register":
+            self._phone_register()
+            return
+
         if parsed.path == "/api/queue/mark-done":
             self._queue_mark_done()
             return
@@ -1719,29 +1934,60 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         device_id = str((query.get("device_id") or ["phone"])[0] or "phone")
         wait_seconds = min(_int_query(query, "wait", 0), 25)
 
+        register_device(device_id)
+
         pushed = pop_phone_open(device_id)
         if pushed:
             return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": pushed}
 
-        claimed = self.db.claim_next_after(device_id, self.config.queue_lease_seconds, after_id)
-        if claimed:
-            job = _phone_job_from_claimed_job(claimed)
+        if sync_broadcast_enabled():
+            job = next_pending_job_for_device(device_id, after_id, self.db)
             if job:
                 return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": job}
-            self.db.mark_job_done(claimed.id, f"{device_id}: unsupported phone job")
-        deadline = time.time() + wait_seconds
-        while wait_seconds > 0 and time.time() < deadline:
-            time.sleep(1)
-            pushed = pop_phone_open(device_id)
-            if pushed:
-                return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": pushed}
+        else:
             claimed = self.db.claim_next_after(device_id, self.config.queue_lease_seconds, after_id)
             if claimed:
                 job = _phone_job_from_claimed_job(claimed)
                 if job:
                     return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": job}
                 self.db.mark_job_done(claimed.id, f"{device_id}: unsupported phone job")
+
+        deadline = time.time() + wait_seconds
+        while wait_seconds > 0 and time.time() < deadline:
+            time.sleep(1)
+            pushed = pop_phone_open(device_id)
+            if pushed:
+                return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": pushed}
+            if sync_broadcast_enabled():
+                job = next_pending_job_for_device(device_id, after_id, self.db)
+                if job:
+                    return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": job}
+            else:
+                claimed = self.db.claim_next_after(device_id, self.config.queue_lease_seconds, after_id)
+                if claimed:
+                    job = _phone_job_from_claimed_job(claimed)
+                    if job:
+                        return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": job}
+                    self.db.mark_job_done(claimed.id, f"{device_id}: unsupported phone job")
         return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": None}
+
+    def _phone_register(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+        device_id = str(payload.get("device_id") or "").strip()
+        result = register_device(
+            device_id,
+            label=str(payload.get("label") or device_id),
+            click_x=int(payload.get("click_x") or 0),
+            click_y=int(payload.get("click_y") or 0),
+            screen_w=int(payload.get("screen_w") or 0),
+            screen_h=int(payload.get("screen_h") or 0),
+        )
+        status = 200 if result.get("ok") else 400
+        self._send_json(result, status=status)
 
     def _send_events(self, query: Dict[str, List[str]]) -> None:
         self._prune_queue_ttl()
@@ -1970,12 +2216,13 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
     def _filters_snapshot(self) -> Dict[str, object]:
         path = Path(self.config.filter_config_path)
-        filters, reject = _load_filter_config(path)
+        filters, reject, exclude_groups = _load_filter_config(path)
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "path": str(path),
             "filters": filters,
             "reject": reject,
+            "exclude_telegram_groups": exclude_groups,
         }
 
     def _broadcast_groups_snapshot(self) -> Dict[str, object]:
@@ -2419,13 +2666,17 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             raw_body = self.rfile.read(length).decode("utf-8")
             payload = json.loads(raw_body)
             filters = _normalize_filter_rules(payload.get("filters", []))
+            path = Path(self.config.filter_config_path)
+            existing_filters, existing_reject, existing_exclude = _load_filter_config(path)
             if "reject" in payload:
                 reject = _normalize_reject_rules(payload.get("reject"))
             else:
-                # Preserve existing reject when UI only posts allow filters.
-                _, reject = _load_filter_config(Path(self.config.filter_config_path))
-            path = Path(self.config.filter_config_path)
-            _write_filter_config(path, filters, reject)
+                reject = existing_reject
+            if "exclude_telegram_groups" in payload:
+                exclude_groups = _normalize_exclude_groups(payload.get("exclude_telegram_groups"))
+            else:
+                exclude_groups = existing_exclude
+            _write_filter_config(path, filters, reject, exclude_groups)
         except Exception as exc:
             logger.exception("Failed to save message filters")
             self._send_json({"error": str(exc)}, status=400)
@@ -2437,6 +2688,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                 "path": str(path),
                 "filters": filters,
                 "reject": reject,
+                "exclude_telegram_groups": exclude_groups,
             }
         )
 
@@ -2487,14 +2739,7 @@ def non_negative_int(value: Any, default: int = 0) -> int:
 
 
 def _phone_config() -> Dict[str, object]:
-    return {
-        "poll_seconds": 0,
-        "long_poll_seconds": 25,
-        "click_x": 540,
-        "click_y": 1800,
-        "auto_open": True,
-        "auto_tap_requires_accessibility": True,
-    }
+    return phone_config()
 
 
 def _next_phone_job(db: ChatDatabase, after_id: int, limit: int) -> Optional[Dict[str, object]]:
@@ -2502,7 +2747,7 @@ def _next_phone_job(db: ChatDatabase, after_id: int, limit: int) -> Optional[Dic
     for item in reversed(items):
         if int(item.get("id") or 0) <= after_id:
             continue
-        job = _phone_job_from_queue_item(item)
+        job = phone_job_from_queue_item(item)
         if job:
             return job
     return None
@@ -2513,105 +2758,17 @@ def _latest_phone_job_id(db: ChatDatabase, limit: int) -> int:
     ids = [
         int(item.get("id") or 0)
         for item in items
-        if _phone_job_from_queue_item(item)
+        if phone_job_from_queue_item(item)
     ]
     return max(ids) if ids else 0
 
 
-def _extract_link_from_item(item: Dict[str, Any]) -> str:
-    payload = item.get("payload") or {}
-    message = item.get("message") or {}
-    message_text = str(message.get("text") or "")
-
-    deeplink = resolve_deeplink_for_broadcast(message_text, payload)
-    if deeplink and deeplink.startswith(DEEPLINK_PREFIX):
-        return deeplink
-
-    deeplink = str(payload.get("deeplink") or payload.get("deep_link") or "").strip()
-    if deeplink.startswith(DEEPLINK_PREFIX):
-        return deeplink
-
-    context = item_context_from_parts(message_text, payload)
-    source_url = (
-        find_first_convertible_url(context)
-        or str(payload.get("source_url") or "").strip()
-    )
-    if source_url:
-        resolved = resolve_link_for_open(source_url, context)
-        if resolved.get("ok"):
-            resolved_deeplink = str(resolved.get("deeplink") or "").strip()
-            if resolved_deeplink.startswith(DEEPLINK_PREFIX):
-                return resolved_deeplink
-
-    candidates = [
-        payload.get("url"), payload.get("link"),
-        payload.get("live_url"), payload.get("room_url"), message_text,
-    ]
-    for value in candidates:
-        match = re.search(r"(?:https?://|tiktok://|snssdk1180://)[^\s<>'\"]+", str(value or ""), re.I)
-        if match:
-            candidate = resolve_live_url(match.group(0), context)
-            if candidate.startswith(DEEPLINK_PREFIX):
-                return candidate
-    return ""
-
-
-def _parse_time_delay_ms(value: Any) -> int:
-    text = str(value or "").strip()
-    match = re.search(r"(\d{1,2}):(\d{2})\s*s?", text, re.I)
-    if match:
-        return (int(match.group(1)) * 60 + int(match.group(2))) * 1000
-    match = re.search(r"(\d+(?:\.\d+)?)\s*s", text, re.I)
-    if match:
-        return int(float(match.group(1)) * 1000)
-    return 0
-
-
-def _extract_time_from_item(item: Dict[str, Any]) -> Dict[str, object]:
-    payload = item.get("payload") or {}
-    message = item.get("message") or {}
-    candidates = [payload.get("TIME"), payload.get("time"), payload.get("Time"), payload.get("click_time"), payload.get("open_time"), message.get("text")]
-    for value in candidates:
-        text = str(value or "")
-        match = re.search(r"TIME\s*[:：]\s*([^\n\r]+)", text, re.I) or re.search(r"(\d{1,2}:\d{2}\s*s?\s*-\s*\d{1,2}:\d{2}:\d{2})", text, re.I) or re.search(r"(\d{1,2}:\d{2}\s*s?)", text, re.I)
-        if match:
-            label = match.group(1).strip()
-            target_match = re.search(r"-\s*(\d{1,2}:\d{2}:\d{2})", label)
-            return {
-                "label": label,
-                "click_after_ms": _parse_time_delay_ms(label),
-                "target_time_hhmmss": target_match.group(1).strip() if target_match else "",
-            }
-    return {"label": "", "click_after_ms": 0, "target_time_hhmmss": ""}
-
-
 def _phone_job_from_queue_item(item: Dict[str, Any]) -> Optional[Dict[str, object]]:
-    url = _extract_link_from_item(item)
-    if not url:
-        return None
-    time_meta = _extract_time_from_item(item)
-    config = _phone_config()
-    return {
-        "id": item.get("id"),
-        "url": url,
-        "time": time_meta["label"],
-        "click_after_ms": time_meta["click_after_ms"],
-        "target_time_hhmmss": time_meta.get("target_time_hhmmss", ""),
-        "click_x": config["click_x"],
-        "click_y": config["click_y"],
-        "message": (item.get("message") or {}).get("text", ""),
-        "payload": item.get("payload") or {},
-    }
+    return phone_job_from_queue_item(item)
 
 
 def _phone_job_from_claimed_job(claimed: QueueJob) -> Optional[Dict[str, object]]:
-    item = {
-        "id": claimed.id,
-        "payload": claimed.payload,
-        "message": {"text": claimed.message_text},
-        "room": {"chat_id": claimed.room_chat_id},
-    }
-    return _phone_job_from_queue_item(item)
+    return phone_job_from_claimed_job(claimed)
 
 
 def _adb_path() -> str:
@@ -2727,13 +2884,15 @@ def _statuses_query(query: Dict[str, List[str]]) -> List[str]:
 
 
 def _load_filter_rules(path: Path) -> List[Dict[str, Any]]:
-    filters, _reject = _load_filter_config(path)
+    filters, _reject, _exclude = _load_filter_config(path)
     return filters
 
 
-def _load_filter_config(path: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def _load_filter_config(
+    path: Path,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
     if not path.exists():
-        return [], []
+        return [], [], []
 
     with path.open(encoding="utf-8") as file:
         payload = json.load(file)
@@ -2741,11 +2900,17 @@ def _load_filter_config(path: Path) -> Tuple[List[Dict[str, Any]], List[Dict[str
     if isinstance(payload, dict):
         raw_filters = payload.get("filters", [])
         raw_reject = payload.get("reject", [])
+        raw_exclude = payload.get("exclude_telegram_groups") or payload.get("exclude_groups") or []
     else:
         raw_filters = payload
         raw_reject = []
+        raw_exclude = []
 
-    return _normalize_filter_rules(raw_filters), _normalize_reject_rules(raw_reject)
+    return (
+        _normalize_filter_rules(raw_filters),
+        _normalize_reject_rules(raw_reject),
+        _normalize_exclude_groups(raw_exclude),
+    )
 
 
 def _bot_tokens() -> List[str]:
@@ -2836,23 +3001,38 @@ def _bot_token() -> str:
 
 
 def _write_filter_rules(path: Path, filters: List[Dict[str, Any]]) -> None:
-    _, reject = _load_filter_config(path)
-    _write_filter_config(path, filters, reject)
+    _, reject, exclude_groups = _load_filter_config(path)
+    _write_filter_config(path, filters, reject, exclude_groups)
 
 
 def _write_filter_config(
     path: Path,
     filters: List[Dict[str, Any]],
     reject: List[Dict[str, Any]],
+    exclude_groups: Optional[List[str]] = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"filters": filters, "reject": reject}
+    payload: Dict[str, Any] = {"filters": filters, "reject": reject}
+    if exclude_groups is None:
+        _, _, exclude_groups = _load_filter_config(path)
+    if exclude_groups:
+        payload["exclude_telegram_groups"] = exclude_groups
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     tmp_path.replace(path)
+
+
+def _normalize_exclude_groups(raw_exclude: Any) -> List[str]:
+    if raw_exclude in (None, ""):
+        return []
+    if isinstance(raw_exclude, str):
+        return _string_list(raw_exclude)
+    if isinstance(raw_exclude, list):
+        return _string_list(raw_exclude)
+    raise ValueError("exclude_telegram_groups must be a list")
 
 
 def _normalize_filter_rules(raw_filters: Any) -> List[Dict[str, Any]]:
@@ -2916,7 +3096,7 @@ def _normalize_filter_rule(raw_filter: Any, index: int) -> Dict[str, Any]:
         if value is not None:
             rule[key] = value
 
-    for key in ("boxes", "countries", "badges", "note_contains", "text_contains"):
+    for key in ("boxes", "countries", "badges", "note_contains", "text_contains", "telegram_groups"):
         values = _string_list(raw_filter.get(key))
         if values:
             rule[key] = values
@@ -2925,7 +3105,20 @@ def _normalize_filter_rule(raw_filter: Any, index: int) -> Dict[str, Any]:
     if text_regex:
         rule["text_regex"] = text_regex
 
+    _apply_box_exact_pair(rule, "min_box1", "max_box1")
+    _apply_box_exact_pair(rule, "min_box2", "max_box2")
+
     return rule
+
+
+def _apply_box_exact_pair(rule: Dict[str, Any], min_key: str, max_key: str) -> None:
+    min_v = rule.get(min_key)
+    max_v = rule.get(max_key)
+    if min_v is None and max_v is None:
+        return
+    exact = min_v if min_v is not None else max_v
+    rule[min_key] = exact
+    rule[max_key] = exact
 
 
 def _optional_number(value: Any, integer: bool) -> Any:

@@ -71,6 +71,7 @@ class MessageFilterRule:
     note_contains: Tuple[str, ...]
     text_contains: Tuple[str, ...]
     text_regex: Optional[str]
+    telegram_groups: Tuple[str, ...]
     order: int
 
     def priority_or(self, default_priority: int) -> int:
@@ -118,17 +119,28 @@ class MessageFilterEngine:
         self._last_mtime: Optional[float] = None
         self._rules: Tuple[MessageFilterRule, ...] = ()
         self._reject_rules: Tuple[RejectFilterRule, ...] = ()
+        self._exclude_groups: Tuple[str, ...] = ()
 
     def evaluate(
         self,
         text: str,
         signal: Optional[BoxSignal] = None,
+        *,
+        chat_id: Optional[str] = None,
+        chat_label: Optional[str] = None,
     ) -> FilterResult:
         signal = signal or parse_box_signal(text)
         if not self.enabled:
             return FilterResult(True, "disabled", signal, None, self.default_priority)
 
         self._reload_if_needed()
+
+        if self._exclude_groups and _chat_matches_groups(
+            chat_id,
+            chat_label,
+            self._exclude_groups,
+        ):
+            return FilterResult(False, "excluded_telegram_group", signal, None, None)
 
         for reject in self._reject_rules:
             if not reject.enabled:
@@ -139,12 +151,26 @@ class MessageFilterEngine:
 
         enabled_rules = [rule for rule in self._rules if rule.enabled]
         if not enabled_rules:
-            return FilterResult(True, "no_enabled_filters", signal, None, self.default_priority)
+            if any(reject.enabled for reject in self._reject_rules):
+                return FilterResult(
+                    True,
+                    "reject_only",
+                    signal,
+                    None,
+                    self.default_priority,
+                )
+            return FilterResult(True, "no_filters", signal, None, self.default_priority)
 
         matched_rules = []
         last_reason = "not_matched"
         for rule in enabled_rules:
-            matched, reason = _evaluate_rule(text, signal, rule)
+            matched, reason = _evaluate_rule(
+                text,
+                signal,
+                rule,
+                chat_id=chat_id,
+                chat_label=chat_label,
+            )
             if matched:
                 matched_rules.append(rule)
             else:
@@ -178,6 +204,7 @@ class MessageFilterEngine:
                 logger.warning("Message filter config missing path=%s", self.config_path)
             self._rules = ()
             self._reject_rules = ()
+            self._exclude_groups = ()
             self._last_mtime = None
             return
 
@@ -185,14 +212,15 @@ class MessageFilterEngine:
             return
 
         self._last_mtime = mtime
-        self._rules, self._reject_rules = _load_rules(self.config_path)
+        self._rules, self._reject_rules, self._exclude_groups = _load_rules(self.config_path)
         enabled_count = sum(1 for rule in self._rules if rule.enabled)
         reject_count = sum(1 for rule in self._reject_rules if rule.enabled)
         logger.info(
-            "Loaded message filters path=%s allow=%s reject=%s",
+            "Loaded message filters path=%s allow=%s reject=%s exclude_groups=%s",
             self.config_path,
             enabled_count,
             reject_count,
+            len(self._exclude_groups),
         )
 
 
@@ -229,16 +257,24 @@ def parse_box_signal(text: str) -> Optional[BoxSignal]:
     )
 
 
-def _load_rules(path: Path) -> Tuple[Tuple[MessageFilterRule, ...], Tuple[RejectFilterRule, ...]]:
+def _load_rules(
+    path: Path,
+) -> Tuple[Tuple[MessageFilterRule, ...], Tuple[RejectFilterRule, ...], Tuple[str, ...]]:
     with path.open(encoding="utf-8") as file:
         raw_config = json.load(file)
 
     if isinstance(raw_config, dict):
         raw_rules = raw_config.get("filters", [])
         raw_reject = raw_config.get("reject", [])
+        raw_exclude = (
+            raw_config.get("exclude_telegram_groups")
+            or raw_config.get("exclude_groups")
+            or []
+        )
     else:
         raw_rules = raw_config
         raw_reject = []
+        raw_exclude = []
 
     if not isinstance(raw_rules, list):
         raise RuntimeError("message filter config must be a list or object with filters=[]")
@@ -249,7 +285,8 @@ def _load_rules(path: Path) -> Tuple[Tuple[MessageFilterRule, ...], Tuple[Reject
     reject = tuple(
         _parse_reject_rule(raw_rule, index) for index, raw_rule in enumerate(raw_reject)
     )
-    return allow, reject
+    exclude = _as_tuple(raw_exclude)
+    return allow, reject, exclude
 
 
 def _parse_rule(raw_rule: Dict[str, Any], index: int) -> MessageFilterRule:
@@ -279,6 +316,11 @@ def _parse_rule(raw_rule: Dict[str, Any], index: int) -> MessageFilterRule:
             str(raw_rule.get("text_regex")).strip()
             if raw_rule.get("text_regex") not in (None, "")
             else None
+        ),
+        telegram_groups=_as_tuple(
+            raw_rule.get("telegram_groups")
+            or raw_rule.get("watch_groups")
+            or raw_rule.get("groups")
         ),
         order=index,
     )
@@ -332,7 +374,40 @@ def _evaluate_rule(
     text: str,
     signal: Optional[BoxSignal],
     rule: MessageFilterRule,
+    *,
+    chat_id: Optional[str] = None,
+    chat_label: Optional[str] = None,
 ) -> Tuple[bool, str]:
+    if rule.telegram_groups and not _chat_matches_groups(
+        chat_id,
+        chat_label,
+        rule.telegram_groups,
+    ):
+        return False, "telegram_group"
+
+    if not _rule_has_constraints(rule):
+        return True, "matched"
+
+    lowered_text = text.lower()
+
+    if rule.text_contains:
+        if not any(
+            value and value.lower() in lowered_text for value in rule.text_contains
+        ):
+            return False, "text"
+
+    missing_notes = [
+        value for value in rule.note_contains if value and value.lower() not in lowered_text
+    ]
+    if missing_notes:
+        return False, "note"
+
+    if rule.text_regex and not re.search(rule.text_regex, text, re.IGNORECASE):
+        return False, "regex"
+
+    if not _rule_has_signal_constraints(rule):
+        return True, "matched"
+
     if signal is None:
         return False, "missing_box"
 
@@ -386,23 +461,47 @@ def _evaluate_rule(
     ):
         return False, "max_views"
 
-    lowered_text = text.lower()
-    missing_notes = [
-        value for value in rule.note_contains if value and value.lower() not in lowered_text
-    ]
-    if missing_notes:
-        return False, "note"
-
-    missing_text = [
-        value for value in rule.text_contains if value and value.lower() not in lowered_text
-    ]
-    if missing_text:
-        return False, "text"
-
-    if rule.text_regex and not re.search(rule.text_regex, text, re.IGNORECASE):
-        return False, "regex"
-
     return True, "matched"
+
+
+def _rule_has_box_constraints(rule: MessageFilterRule) -> bool:
+    if rule.boxes:
+        return True
+    return any(
+        value is not None
+        for value in (
+            rule.min_box1,
+            rule.max_box1,
+            rule.min_box2,
+            rule.max_box2,
+            rule.min_rate,
+            rule.max_rate,
+            rule.min_level,
+            rule.max_level,
+            rule.min_views,
+            rule.max_views,
+        )
+    )
+
+
+def _rule_has_signal_constraints(rule: MessageFilterRule) -> bool:
+    if _rule_has_box_constraints(rule):
+        return True
+    if rule.countries or rule.badges:
+        return True
+    return False
+
+
+def _rule_has_constraints(rule: MessageFilterRule) -> bool:
+    if rule.telegram_groups:
+        return True
+    if _rule_has_box_constraints(rule):
+        return True
+    if rule.countries or rule.badges or rule.note_contains or rule.text_contains:
+        return True
+    if rule.text_regex:
+        return True
+    return False
 
 
 def _as_tuple(value: Any) -> Tuple[str, ...]:
@@ -418,6 +517,46 @@ def _as_tuple(value: Any) -> Tuple[str, ...]:
 
 def _clean_keyword(value: Any) -> str:
     return str(value).strip().strip("'\"").strip()
+
+
+def _chat_id_aliases(chat_id: str) -> Tuple[str, ...]:
+    value = str(chat_id or "").strip()
+    if not value:
+        return ()
+    aliases = [value]
+    if value.lstrip("-").isdigit():
+        numeric = int(value)
+        text = str(numeric)
+        if text.startswith("-100") and len(text) > 4:
+            aliases.append(str(-int(text[4:])))
+        elif numeric < 0:
+            aliases.append(f"-100{abs(numeric)}")
+        elif numeric > 0:
+            aliases.append(f"-100{numeric}")
+    return tuple(dict.fromkeys(item for item in aliases if item))
+
+
+def _chat_matches_groups(
+    chat_id: Optional[str],
+    chat_label: Optional[str],
+    groups: Tuple[str, ...],
+) -> bool:
+    if not groups:
+        return True
+
+    tokens = {_clean_keyword(item).lower() for item in groups if _clean_keyword(item)}
+    if not tokens:
+        return True
+
+    label = _clean_keyword(chat_label or "").lower()
+    if label and label in tokens:
+        return True
+
+    for alias in _chat_id_aliases(str(chat_id or "")):
+        if alias.lower() in tokens:
+            return True
+
+    return False
 
 
 def _first_present(raw_rule: Dict[str, Any], *keys: str) -> Any:

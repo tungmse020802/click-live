@@ -56,6 +56,42 @@
       flex-wrap: wrap;
     }
 
+    .topbar-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      min-width: 0;
+    }
+
+    .header-collapse-btn {
+      flex: 0 0 auto;
+      width: 36px;
+      padding: 0;
+      font-size: 14px;
+      line-height: 1;
+    }
+
+    .shell.header-collapsed {
+      grid-template-rows: auto 1fr;
+    }
+
+    .shell.header-collapsed .stats-bar,
+    .shell.header-collapsed .toolbar,
+    .shell.header-collapsed .live-status,
+    .shell.header-collapsed .brand .sub {
+      display: none !important;
+    }
+
+    .shell.header-collapsed .topbar {
+      padding: 8px 12px;
+      border-bottom-color: transparent;
+    }
+
+    .shell.header-collapsed .brand h1 {
+      font-size: 15px;
+    }
+
     .brand { min-width: 0; flex: 1 1 auto; }
     .brand h1 {
       margin: 0;
@@ -347,9 +383,12 @@
 <body>
   <div class="shell">
     <header class="topbar">
-      <div class="brand">
-        <h1>Nhóm theo dõi</h1>
-        <div class="sub" id="dbPath">Đang tải...</div>
+      <div class="topbar-row">
+        <button type="button" id="headerCollapseBtn" class="button header-collapse-btn" title="Thu gọn header" aria-expanded="true">▲</button>
+        <div class="brand">
+          <h1>Nhóm theo dõi</h1>
+          <div class="sub" id="dbPath">Đang tải...</div>
+        </div>
       </div>
       <div class="toolbar">
         <select id="statusFilter" class="control" aria-label="Trạng thái">
@@ -1073,6 +1112,25 @@
       updateJumpNewestButton();
       state.wasPinnedToTop = pinned;
     }, { passive: true });
+
+    (function initHeaderCollapse() {
+      const shell = document.querySelector('.shell');
+      const btn = document.getElementById('headerCollapseBtn');
+      if (!shell || !btn) return;
+      const storageKey = 'click-live-queue-header-collapsed';
+      function apply(collapsed) {
+        shell.classList.toggle('header-collapsed', collapsed);
+        btn.textContent = collapsed ? '▼' : '▲';
+        btn.title = collapsed ? 'Mở rộng header' : 'Thu gọn header';
+        btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      }
+      apply(localStorage.getItem(storageKey) === '1');
+      btn.addEventListener('click', () => {
+        const next = !shell.classList.contains('header-collapsed');
+        apply(next);
+        localStorage.setItem(storageKey, next ? '1' : '0');
+      });
+    })();
 
     loadQueue().then(schedule).catch((err) => {
       els.liveStatus.textContent = err.message;
