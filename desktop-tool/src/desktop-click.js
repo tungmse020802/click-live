@@ -1,6 +1,7 @@
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const execFileAsync = promisify(execFile);
@@ -24,27 +25,40 @@ function resolveCliclickBin() {
 
 async function clickScreenPointWindows(px, py) {
   const script = [
-    "Add-Type @\"",
-    "using System;",
-    "using System.Runtime.InteropServices;",
-    "public class WinMouse {",
-    "  [DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int X, int Y);",
-    "  [DllImport(\"user32.dll\")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);",
-    "}",
-    "\"@",
-    `[WinMouse]::SetCursorPos(${px}, ${py}) | Out-Null`,
+    "$sig = @'",
+    "[DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int X, int Y);",
+    "[DllImport(\"user32.dll\")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);",
+    "'@",
+    '$null = Add-Type -MemberDefinition $sig -Name WinMouse -Namespace ClickLive -PassThru',
+    `[ClickLive.WinMouse]::SetCursorPos(${px}, ${py}) | Out-Null`,
     "Start-Sleep -Milliseconds 30",
-    "[WinMouse]::mouse_event(0x0002, 0, 0, 0, 0)",
-    "[WinMouse]::mouse_event(0x0004, 0, 0, 0, 0)",
-  ].join("; ");
+    "[ClickLive.WinMouse]::mouse_event(0x0002, 0, 0, 0, 0)",
+    "[ClickLive.WinMouse]::mouse_event(0x0004, 0, 0, 0, 0)",
+    "",
+  ].join("\r\n");
 
-  await execFileAsync("powershell.exe", [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    script,
-  ]);
+  const ps1 = path.join(os.tmpdir(), `click-live-click-${process.pid}-${Date.now()}.ps1`);
+  fs.writeFileSync(ps1, script, "utf8");
+
+  try {
+    await execFileAsync("powershell.exe", [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      ps1,
+    ]);
+  } catch (err) {
+    const detail = String(err.stderr || err.message || err).trim();
+    throw new Error(detail || "Windows click failed");
+  } finally {
+    try {
+      fs.unlinkSync(ps1);
+    } catch {
+      /* ignore */
+    }
+  }
+
   return { method: "powershell", x: px, y: py };
 }
 
