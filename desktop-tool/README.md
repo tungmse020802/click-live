@@ -4,6 +4,8 @@ App Electron chạy nền — mở **countdown link trong Google Chrome** từ q
 
 ## Cài & chạy
 
+### macOS / Linux
+
 ```bash
 cd desktop-tool
 cp .env.example .env
@@ -11,6 +13,42 @@ cp .env.example .env
 npm install
 npm start
 ```
+
+### Windows (cài từ đầu A-Z)
+
+Double-click hoặc chạy trong **PowerShell / CMD**:
+
+```bat
+cd desktop-tool\scripts
+install-windows.bat
+```
+
+Script tự làm:
+1. Cài **Git**, **Node.js LTS**, **Google Chrome** (qua `winget` nếu thiếu)
+2. Clone repo `https://github.com/tungmse020802/click-live.git` → `%USERPROFILE%\click-live`
+3. Tạo `.env`, hỏi `DESKTOP_TOOL_PULL_TOKEN`
+4. `npm install` + `npm start`
+5. Tạo shortcut **Click Live Desktop Tool** trên Desktop
+
+**Chạy lại sau này:**
+
+```bat
+desktop-tool\scripts\run-windows.bat
+```
+
+**Tuỳ chọn — cài không clone (đã có repo):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File desktop-tool\scripts\install-windows.ps1 -SkipClone
+```
+
+**Truyền token sẵn:**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File desktop-tool\scripts\install-windows.ps1 -PullToken "your-token"
+```
+
+**Yêu cầu Windows:** Windows 10+, PowerShell 5.1+, quyền cài app (winget). Desktop click dùng PowerShell (không cần cài thêm).
 
 API local: `http://127.0.0.1:8795` (fallback). Luồng chính: poll queue server.
 
