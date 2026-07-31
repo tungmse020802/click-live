@@ -51,7 +51,7 @@ function startDesktopPoller({ queueUrl, pullToken, queueUsername, intervalMs, on
       );
       if (!data?.ok) {
         if (data?.error) {
-          console.warn("Desktop poll rejected:", data.error, "— kiểm tra token / đăng nhập đúng user");
+          console.warn("Desktop poll rejected:", data.error, "— đăng nhập desktop đúng user (admin1…)");
         }
         return;
       }

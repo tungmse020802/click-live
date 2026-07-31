@@ -59,8 +59,9 @@ set ERR=%ERRORLEVEL%
 echo.
 if %ERR% NEQ 0 (
   echo [ERROR] npm start failed with code %ERR%
-  pause
-  exit /b %ERR%
+) else (
+  echo Desktop-tool da thoat.
 )
-
-endlocal
+echo.
+pause
+exit /b %ERR%

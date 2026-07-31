@@ -48,6 +48,7 @@ let stopPoller = null;
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
+  console.error("Desktop-tool đã chạy — mở cửa sổ từ icon tray hoặc tắt process cũ trong Task Manager.");
   app.quit();
 } else {
   app.on("second-instance", () => {
@@ -367,6 +368,9 @@ function showSettingsWindow() {
   settingsWindow.on("closed", () => {
     settingsWindow = null;
   });
+  settingsWindow.webContents.on("did-fail-load", (_event, code, desc) => {
+    console.error("Settings UI load failed:", code, desc);
+  });
 }
 
 async function startServer() {
@@ -386,9 +390,29 @@ async function startServer() {
   return port;
 }
 
+function createTrayImage() {
+  const size = 16;
+  const bytes = Buffer.alloc(size * size * 4);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const i = (y * size + x) * 4;
+      bytes[i] = 59;
+      bytes[i + 1] = 130;
+      bytes[i + 2] = 246;
+      bytes[i + 3] = 255;
+    }
+  }
+  return nativeImage.createFromBuffer(bytes, { width: size, height: size });
+}
+
 function createTray(port) {
-  const icon = nativeImage.createEmpty();
-  tray = new Tray(icon);
+  try {
+    const icon = createTrayImage();
+    tray = new Tray(icon);
+  } catch (err) {
+    console.warn("Tray icon failed (app vẫn chạy — dùng cửa sổ cài đặt):", err.message || err);
+    return;
+  }
   tray.setToolTip("Click Live Desktop Tool");
 
   const rebuild = () => {
@@ -413,6 +437,13 @@ function createTray(port) {
   setInterval(rebuild, 3000);
 }
 
+process.on("uncaughtException", (err) => {
+  console.error("uncaughtException:", err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("unhandledRejection:", err);
+});
+
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return;
 
@@ -420,15 +451,19 @@ app.whenReady().then(async () => {
 
   try {
     const port = await startServer();
-    createTray(port);
     showSettingsWindow();
+    try {
+      createTray(port);
+    } catch (err) {
+      console.warn("Tray failed:", err.message || err);
+    }
     restartPoller();
     warmUpWinClickHelper();
   } catch (err) {
     if (err && err.code === "EADDRINUSE") {
-      console.error(`Port ${PORT} đang được dùng — desktop-tool có thể đã chạy.`);
+      console.error(`Port ${PORT} đang được dùng — tắt desktop-tool cũ hoặc đổi DESKTOP_TOOL_PORT trong .env`);
     } else {
-      console.error(err);
+      console.error("Desktop-tool startup failed:", err);
     }
     app.quit();
     return;

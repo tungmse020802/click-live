@@ -74,8 +74,18 @@ async function loadUserList(queueUrl) {
   const url = String(queueUrl || queueUrlInput.value || '').trim();
   if (!url) return;
   userListHint.textContent = 'Đang tải danh sách user…';
-  const users = await window.desktopTool.fetchUsers(url);
-  fillUserSelect(users, loginUsername.value);
+  try {
+    const users = await window.desktopTool.fetchUsers(url);
+    fillUserSelect(users, loginUsername.value);
+  } catch (err) {
+    const msg = String(err.message || err);
+    if (/401|403|Chưa đăng nhập|Not found|404/i.test(msg)) {
+      userListHint.textContent = 'Server chưa cập nhật — admin cần deploy queue UI mới (git pull + deploy VPS).';
+    } else {
+      userListHint.textContent = msg || 'Không tải được user list';
+    }
+    throw err;
+  }
 }
 
 async function persistPartial(partial) {
