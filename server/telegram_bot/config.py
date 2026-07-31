@@ -1,7 +1,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -121,8 +121,12 @@ class QueueUiConfig:
     auth_username: str
     auth_password: str
     auth_secret: str
-    desktop_pull_token: str
+    queue_users: Tuple[Tuple[str, str], ...]
     desktop_dedup_seconds: int
+
+
+def queue_users_map(config: QueueUiConfig) -> Dict[str, str]:
+    return dict(config.queue_users)
 
 
 def _parse_user_ids(raw_value: str) -> FrozenSet[int]:
@@ -503,15 +507,39 @@ def load_queue_ui_config() -> QueueUiConfig:
     load_dotenv(BASE_DIR / ".env")
 
     from ui_auth import load_or_create_auth_secret
+    from desktop_auth import parse_queue_users, seed_queue_users
 
     auth_password = os.environ.get("QUEUE_UI_PASSWORD", "").strip()
     auth_username = (os.environ.get("QUEUE_UI_USERNAME", "admin").strip() or "admin")
-    auth_enabled = bool(auth_password)
+    raw_users = os.environ.get("QUEUE_UI_USERS", "").strip()
+    seed_count = _parse_int("QUEUE_UI_SEED_ACCOUNT_COUNT", 0, 0)
+    auth_enabled = bool(auth_password) or bool(raw_users) or seed_count > 0
     auth_secret = load_or_create_auth_secret(BASE_DIR, auth_enabled)
-    desktop_pull_token = (
-        os.environ.get("DESKTOP_PULL_TOKEN", "").strip()
-        or auth_secret[:40]
-    )
+    if raw_users:
+        users_dict = parse_queue_users(
+            raw_users,
+            fallback_username=auth_username,
+            fallback_password=auth_password,
+        )
+    elif seed_count > 0:
+        seed_password = (
+            os.environ.get("QUEUE_UI_DEFAULT_PASSWORD", "Admin123@").strip() or "Admin123@"
+        )
+        seed_prefix = os.environ.get("QUEUE_UI_SEED_PREFIX", "admin").strip() or "admin"
+        users_dict = seed_queue_users(
+            seed_count,
+            prefix=seed_prefix,
+            password=seed_password,
+        )
+    else:
+        users_dict = parse_queue_users(
+            "",
+            fallback_username=auth_username,
+            fallback_password=auth_password,
+        )
+    if not users_dict and auth_password:
+        users_dict = {auth_username: auth_password}
+    queue_users = tuple(users_dict.items())
 
     return QueueUiConfig(
         log_level=os.environ.get("BOT_LOG_LEVEL", "INFO").strip().upper(),
@@ -531,6 +559,6 @@ def load_queue_ui_config() -> QueueUiConfig:
         auth_username=auth_username,
         auth_password=auth_password,
         auth_secret=auth_secret,
-        desktop_pull_token=desktop_pull_token,
+        queue_users=queue_users,
         desktop_dedup_seconds=_parse_int("DESKTOP_OPEN_DEDUP_SECONDS", 90, 10),
     )

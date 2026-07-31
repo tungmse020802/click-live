@@ -13,7 +13,7 @@ cd "$TOOL"
 
 if [[ ! -f .env ]] && [[ -f .env.example ]]; then
   cp .env.example .env
-  echo "[warn] Created .env — set DESKTOP_TOOL_PULL_TOKEN if queue poll fails."
+  echo "[info] Created .env — chỉ cần DESKTOP_TOOL_QUEUE_URL. Login user trong app."
 fi
 
 if [[ ! -d node_modules/electron ]] || [[ package-lock.json -nt node_modules/.package-lock.json ]]; then

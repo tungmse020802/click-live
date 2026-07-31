@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld("desktopTool", {
   pickPoint: () => ipcRenderer.invoke("settings:pick-point"),
   testClick: () => ipcRenderer.invoke("settings:test-click"),
   ensureAccessibility: () => ipcRenderer.invoke("settings:ensure-accessibility"),
+  getSession: () => ipcRenderer.invoke("auth:session"),
+  fetchUsers: (queueUrl) => ipcRenderer.invoke("auth:fetch-users", queueUrl),
+  login: (payload) => ipcRenderer.invoke("auth:login", payload),
+  logout: () => ipcRenderer.invoke("auth:logout"),
   onSchedule: (callback) => {
     ipcRenderer.on("countdown-schedule", (_event, payload) => callback(payload));
   },

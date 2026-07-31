@@ -30,9 +30,12 @@ function httpGetJson(urlStr, timeoutMs = 8000) {
   });
 }
 
-function startDesktopPoller({ queueUrl, pullToken, intervalMs, onOpen }) {
-  if (!queueUrl || !pullToken) {
-    console.warn("Desktop poller disabled — set DESKTOP_TOOL_QUEUE_URL + DESKTOP_TOOL_PULL_TOKEN");
+function startDesktopPoller({ queueUrl, pullToken, queueUsername, intervalMs, onOpen }) {
+  if (!queueUrl || !pullToken || !queueUsername) {
+    console.warn(
+      "Desktop poller DISABLED — chọn user và đăng nhập trong app (Tài khoản queue).\n"
+      + "  Cùng user/mật khẩu với web queue UI (admin1…admin10 / Admin123@)."
+    );
     return () => {};
   }
 
@@ -46,7 +49,17 @@ function startDesktopPoller({ queueUrl, pullToken, intervalMs, onOpen }) {
       const data = await httpGetJson(
         `${base}/api/desktop/pull?token=${encodeURIComponent(pullToken)}`
       );
-      if (!data?.ok || !Array.isArray(data.opens)) return;
+      if (!data?.ok) {
+        if (data?.error) {
+          console.warn("Desktop poll rejected:", data.error, "— kiểm tra token / đăng nhập đúng user");
+        }
+        return;
+      }
+      if (!Array.isArray(data.opens)) return;
+      if (data.opens.length > 0) {
+        const who = data.queue_user ? ` user=${data.queue_user}` : "";
+        console.log(`Desktop poll: ${data.opens.length} link(s)${who}`);
+      }
       for (const item of data.opens) {
         const target = String(item.url || "").trim();
         if (!target) continue;

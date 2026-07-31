@@ -48,6 +48,15 @@
       padding: 8px 10px;
       font: inherit;
     }
+    input[type="text"], input[type="password"], input[type="url"], select {
+      width: 100%;
+      background: #0d1218;
+      border: 1px solid var(--line);
+      color: var(--text);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font: inherit;
+    }
     .row { display: flex; gap: 10px; align-items: end; }
     .row > * { flex: 1; }
     .delay-box {
@@ -96,12 +105,54 @@
     }
     .status strong { color: var(--text); }
     .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    .auth-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      background: #1a3a2a;
+      color: var(--green);
+      border: 1px solid #2d5a3d;
+    }
+    .auth-badge.off {
+      background: #2a1a1a;
+      color: #f87171;
+      border-color: #5a2d2d;
+    }
+    .auth-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+    #loginPanel.hidden, #loggedInPanel.hidden { display: none; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Click Live Desktop Tool</h1>
     <p class="sub">Mở countdown Chrome → đếm giờ → click trên màn hình desktop</p>
+
+    <section>
+      <h2>Tài khoản queue</h2>
+      <p class="hint" style="margin-top:0">Chọn user (admin1…admin10) — cùng tài khoản web queue UI. Web login <strong>admin3</strong> chỉ mở tab trên desktop đã login <strong>admin3</strong>.</p>
+      <div id="loggedInPanel" class="hidden">
+        <p>Đang đăng nhập: <span class="auth-badge" id="loggedInUser">—</span></p>
+        <p class="hint" id="loggedInUrl"></p>
+        <div class="auth-row">
+          <button id="logoutBtn">Đăng xuất</button>
+        </div>
+      </div>
+      <div id="loginPanel">
+        <label>URL queue server</label>
+        <input id="queueUrl" type="url" placeholder="http://160.30.19.215:8787" autocomplete="off">
+        <label style="margin-top:10px">Tài khoản</label>
+        <select id="loginUsername">
+          <option value="">— chọn user —</option>
+        </select>
+        <p class="hint" id="userListHint">Nhập URL server rồi tab ra để tải danh sách user.</p>
+        <label style="margin-top:10px">Mật khẩu</label>
+        <input id="loginPassword" type="password" autocomplete="current-password">
+        <div class="auth-row">
+          <button id="loginBtn" class="primary">Đăng nhập desktop</button>
+        </div>
+      </div>
+    </section>
 
     <section>
       <h2>Đếm giờ &amp; delay ±</h2>

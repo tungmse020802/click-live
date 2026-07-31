@@ -6,7 +6,6 @@ param(
   [string]$Branch = "feature/pipeline-optimize",
   [string]$InstallRoot = "$env:USERPROFILE\click-live",
   [string]$QueueUrl = "http://160.30.19.215:8787",
-  [string]$PullToken = "",
   [switch]$SkipClone,
   [switch]$ForceClone,
   [switch]$SkipStart
@@ -150,8 +149,7 @@ function Ensure-Repo {
 function Ensure-EnvFile {
   param(
     [string]$DesktopToolDir,
-    [string]$Queue,
-    [string]$Token
+    [string]$Queue
   )
 
   $envFile = Join-Path $DesktopToolDir ".env"
@@ -171,40 +169,13 @@ function Ensure-EnvFile {
     if ($line -match '^\s*DESKTOP_TOOL_QUEUE_URL=') {
       $out += "DESKTOP_TOOL_QUEUE_URL=$Queue"
     } elseif ($line -match '^\s*DESKTOP_TOOL_PULL_TOKEN=') {
-      if ($Token) {
-        $out += "DESKTOP_TOOL_PULL_TOKEN=$Token"
-      } else {
-        $out += $line
-      }
+      continue
     } else {
       $out += $line
     }
   }
   Set-Content -Path $envFile -Value $out -Encoding ASCII
-
-  if (-not $Token) {
-    $tokenLine = $out | Where-Object { $_ -match '^\s*DESKTOP_TOOL_PULL_TOKEN=' } | Select-Object -First 1
-    if ($tokenLine -match '^\s*DESKTOP_TOOL_PULL_TOKEN=\s*$') {
-      Write-Host ""
-      Write-Host "Enter DESKTOP_PULL_TOKEN from server telegram_bot/.env:" -ForegroundColor Yellow
-      $typed = Read-Host "DESKTOP_TOOL_PULL_TOKEN"
-      if ($typed) {
-        $fixed = @()
-        foreach ($line in $out) {
-          if ($line -match '^\s*DESKTOP_TOOL_PULL_TOKEN=') {
-            $fixed += "DESKTOP_TOOL_PULL_TOKEN=$typed"
-          } else {
-            $fixed += $line
-          }
-        }
-        Set-Content -Path $envFile -Value $fixed -Encoding ASCII
-      } else {
-        Write-Host "  ! No token - app runs but will not poll queue." -ForegroundColor Yellow
-      }
-    }
-  }
-
-  Write-Host "  OK .env: $envFile"
+  Write-Host "  OK .env: $envFile (login user in app — no pull token)"
 }
 
 function New-RunShortcut {
@@ -279,7 +250,7 @@ try {
   }
 
   Write-Step "Configure .env"
-  Ensure-EnvFile -DesktopToolDir $desktopToolDir -Queue $QueueUrl -Token $PullToken
+  Ensure-EnvFile -DesktopToolDir $desktopToolDir -Queue $QueueUrl
 
   Write-Step "npm install"
   Push-Location $desktopToolDir

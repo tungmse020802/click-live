@@ -51,18 +51,66 @@ function resolveChromeBin() {
   return CHROME_BIN;
 }
 
+function chromeBinReady(bin) {
+  if (fs.existsSync(bin)) return bin;
+  if (process.platform === "win32" && !bin.includes("\\") && !bin.includes("/")) {
+    throw new Error(
+      `Không tìm thấy Google Chrome (${bin}). Cài Chrome hoặc thêm vào .env:\nDESKTOP_CHROME_BIN=C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe`
+    );
+  }
+  if (process.platform !== "win32" && bin.includes("/") && !fs.existsSync(bin)) {
+    throw new Error(`Không tìm thấy Chrome tại: ${bin}`);
+  }
+  return bin;
+}
+
+function spawnDetached(bin, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    child.once("error", (err) => {
+      reject(new Error(`${err.message} (bin=${bin})`));
+    });
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
+/** Windows: fallback qua cmd start khi spawn trực tiếp thất bại (PATH / quyền). */
+function spawnWindowsCmdStart(bin, args) {
+  return spawnDetached("cmd.exe", ["/c", "start", "", bin, ...args]);
+}
+
 async function runOsascript(script) {
   const { stdout } = await execFileAsync("osascript", ["-e", script]);
   return stdout.trim();
 }
 
-function spawnChrome(args) {
-  const child = spawn(resolveChromeBin(), args, {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
-  });
-  child.unref();
+function buildWindowsChromeArgs(url) {
+  const cleanUrl = String(url || "").trim();
+  const flags = ["--no-first-run", "--no-default-browser-check"];
+  if (USE_INCOGNITO) {
+    // Trên Windows, truyền URL trực tiếp ổn định hơn --new-tab (Chrome tự mở tab mới).
+    return [...flags, "--incognito", cleanUrl];
+  }
+  return [...flags, "--new-tab", cleanUrl];
+}
+
+async function spawnChrome(args) {
+  const bin = chromeBinReady(resolveChromeBin());
+  try {
+    await spawnDetached(bin, args);
+    return;
+  } catch (err) {
+    if (process.platform !== "win32") throw err;
+    console.warn("Chrome spawn direct failed, retry cmd start:", err.message);
+    await spawnWindowsCmdStart(bin, args);
+  }
 }
 
 /** Mở tab mới trong cửa sổ Chrome đầu tiên (không tạo cửa sổ mới). */
@@ -120,7 +168,7 @@ async function openChromeTabDarwin(url, { incognito = false } = {}) {
   try {
     const result = await runOsascript(script);
     if (incognito && result === "need_window") {
-      spawnChrome(["--incognito", url]);
+      await spawnChrome([ "--incognito", url]);
       await new Promise((resolve) => setTimeout(resolve, 800));
       await openChromeTabDarwin(url, { incognito: true });
       return;
@@ -131,7 +179,7 @@ async function openChromeTabDarwin(url, { incognito = false } = {}) {
   }
 
   const args = incognito ? ["--incognito", "--new-tab", url] : ["--new-tab", url];
-  spawnChrome(args);
+  await spawnChrome(args);
 }
 
 async function focusChromeTab(url) {
@@ -161,23 +209,24 @@ async function focusChromeTab(url) {
 }
 
 async function openChromeUrl(url) {
+  const target = String(url || "").trim();
+  if (!target) throw new Error("Missing url");
+
   if (process.platform === "darwin") {
-    await openChromeTabDarwin(url, { incognito: USE_INCOGNITO });
+    await openChromeTabDarwin(target, { incognito: USE_INCOGNITO });
     return;
   }
 
   if (process.platform === "win32") {
-    const args = USE_INCOGNITO
-      ? ["--incognito", "--new-tab", url]
-      : ["--new-tab", url];
-    spawnChrome(args);
+    await spawnChrome(buildWindowsChromeArgs(target));
+    console.log(`Chrome opened (Windows): ${target.slice(0, 96)}${target.length > 96 ? "…" : ""}`);
     return;
   }
 
   const args = USE_INCOGNITO
-    ? ["--incognito", "--new-tab", url]
-    : ["--new-tab", url];
-  spawnChrome(args);
+    ? ["--incognito", "--new-tab", target]
+    : ["--new-tab", target];
+  await spawnChrome(args);
 }
 
 async function closeChromeTab(url) {

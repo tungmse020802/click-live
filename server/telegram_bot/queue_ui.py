@@ -14,7 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, urlparse
 
 from bot_broadcast import discover_all_bot_groups, list_configured_bots, register_discovered_groups
-from config import QueueUiConfig, _parse_client_targets, load_config, load_queue_ui_config
+from desktop_auth import desktop_pull_token_for_user, list_queue_usernames
+from config import QueueUiConfig, _parse_client_targets, load_config, load_queue_ui_config, queue_users_map
 from open_link import open_link_for_queue
 from desktop_relay import desktop_status, enqueue_open, pull_pending
 from logging_setup import setup_logging
@@ -54,6 +55,7 @@ from ui_auth import (
     create_session_token,
     is_authenticated,
     parse_cookie_header,
+    session_username_from_token,
     verify_credentials,
 )
 
@@ -1479,6 +1481,17 @@ class QueueUiHandler(BaseHTTPRequestHandler):
     def _session_cookie_value(self) -> Optional[str]:
         return parse_cookie_header(self.headers.get("Cookie", ""), SESSION_COOKIE)
 
+    def _session_username(self) -> Optional[str]:
+        return session_username_from_token(self._session_cookie_value(), self.config)
+
+    def _effective_queue_user(self) -> str:
+        user = self._session_username() or ""
+        if user:
+            return user
+        if not self.config.auth_enabled:
+            return self.config.auth_username or ""
+        return ""
+
     def _is_user_authenticated(self) -> bool:
         return is_authenticated(self._session_cookie_value(), self.config)
 
@@ -1486,6 +1499,8 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         return (
             path in PUBLIC_PATHS
             or path.startswith("/api/auth/")
+            or path == "/api/desktop/auth/login"
+            or path == "/api/desktop/auth/users"
             or path == "/api/desktop/pull"
             or path.startswith("/api/phone/")
         )
@@ -1511,8 +1526,8 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         self.send_header("Location", location)
         self.end_headers()
 
-    def _set_session_cookie_header(self) -> None:
-        token = create_session_token(self.config.auth_secret)
+    def _set_session_cookie_header(self, username: str = "") -> None:
+        token = create_session_token(self.config.auth_secret, username)
         self.send_header(
             "Set-Cookie",
             f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}",
@@ -1525,11 +1540,12 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         )
 
     def _auth_status(self) -> None:
+        username = self._session_username() if self._is_user_authenticated() else None
         self._send_json(
             {
                 "auth_enabled": self.config.auth_enabled,
                 "authenticated": self._is_user_authenticated(),
-                "username": self.config.auth_username if self._is_user_authenticated() else None,
+                "username": username,
             }
         )
 
@@ -1545,16 +1561,46 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             return
 
         body = json.dumps(
-            {"ok": True, "username": self.config.auth_username},
+            {"ok": True, "username": username},
             ensure_ascii=False,
         ).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         if self.config.auth_enabled:
-            self._set_session_cookie_header()
+            self._set_session_cookie_header(username)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _desktop_auth_users(self) -> None:
+        users = list_queue_usernames(queue_users_map(self.config))
+        self._send_json({"ok": True, "users": users})
+
+    def _desktop_auth_login(self) -> None:
+        try:
+            payload = self._read_json_body()
+            username = str(payload.get("username") or "").strip()
+            password = str(payload.get("password") or "")
+            if not verify_credentials(username, password, self.config):
+                raise ValueError("Sai tên đăng nhập hoặc mật khẩu")
+            pull_token = desktop_pull_token_for_user(username, self.config.auth_secret)
+            if not pull_token:
+                raise ValueError("Desktop auth chưa bật trên server")
+        except Exception as exc:
+            self._send_json({"ok": False, "error": str(exc)}, status=401)
+            return
+
+        host = self.headers.get("Host", f"{self.config.host}:{self.config.port}")
+        scheme = "https" if str(host).endswith(":443") else "http"
+        queue_url = f"{scheme}://{host}"
+        self._send_json(
+            {
+                "ok": True,
+                "username": username,
+                "pull_token": pull_token,
+                "queue_url": queue_url,
+            }
+        )
 
     def _auth_logout(self) -> None:
         body = b'{"ok":true}'
@@ -1656,7 +1702,11 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/desktop/pull":
             query = parse_qs(parsed.query)
             token = str((query.get("token") or [""])[0])
-            self._send_json(pull_pending(token, self.config.desktop_pull_token))
+            self._send_json(pull_pending(token, self.config))
+            return
+
+        if parsed.path == "/api/desktop/auth/users":
+            self._desktop_auth_users()
             return
 
         if not self._ensure_auth():
@@ -1752,7 +1802,11 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/desktop/status":
-            self._send_json(desktop_status())
+            query = parse_qs(parsed.query)
+            user = str((query.get("user") or [""])[0]).strip()
+            if not user:
+                user = self._effective_queue_user()
+            self._send_json(desktop_status(queue_user=user))
             return
 
         self.send_error(404)
@@ -1765,6 +1819,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/auth/logout":
             self._auth_logout()
+            return
+
+        if parsed.path == "/api/desktop/auth/login":
+            self._desktop_auth_login()
             return
 
         if not self._ensure_auth():
@@ -1881,6 +1939,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             dedup_seconds=self.config.desktop_dedup_seconds,
             click_after_ms=click_after_ms,
             time_label=time_label,
+            queue_user=self._effective_queue_user(),
         )
         status = 200 if result.get("ok") else 400
         self._send_json(result, status=status)
@@ -1924,6 +1983,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             device_id=device_id,
             open_phone=open_phone,
             open_desktop=open_desktop,
+            queue_user=self._effective_queue_user(),
         )
         status = 200 if result.get("ok") else 400
         self._send_json(result, status=status)

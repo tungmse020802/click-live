@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 
 from config import QueueUiConfig
+from desktop_auth import verify_queue_user
 
 
 SESSION_COOKIE = "queue_ui_session"
@@ -36,37 +37,64 @@ def load_or_create_auth_secret(base_dir: Path, auth_enabled: bool) -> str:
 def verify_credentials(username: str, password: str, config: QueueUiConfig) -> bool:
     if not config.auth_enabled:
         return True
+    users = getattr(config, "queue_users", None) or {}
+    if users:
+        return verify_queue_user(username, password, users)
     return hmac.compare_digest(username, config.auth_username) and hmac.compare_digest(
         password, config.auth_password
     )
 
 
-def create_session_token(secret: str) -> str:
+def create_session_token(secret: str, username: str = "") -> str:
     expires = int(time.time()) + SESSION_TTL_SECONDS
-    payload = str(expires)
+    user = str(username or "").strip()
+    payload = f"{expires}:{user}" if user else str(expires)
     signature = hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}.{signature}"
+
+
+def _session_payload(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    parts = token.split(".", 1)
+    if len(parts) != 2:
+        return None
+    return parts[0]
 
 
 def verify_session_token(token: Optional[str], secret: str) -> bool:
     if not secret or not token:
         return False
 
-    parts = token.split(".", 1)
-    if len(parts) != 2:
+    payload = _session_payload(token)
+    if payload is None:
         return False
-
-    payload, signature = parts
+    signature = token.split(".", 1)[1]
     expected = hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(signature, expected):
         return False
 
+    expires_text = payload.split(":", 1)[0]
     try:
-        expires = int(payload)
+        expires = int(expires_text)
     except ValueError:
         return False
 
     return expires >= int(time.time())
+
+
+def session_username_from_token(token: Optional[str], config: QueueUiConfig) -> Optional[str]:
+    if not verify_session_token(token, config.auth_secret):
+        return None
+    payload = _session_payload(token)
+    if payload and ":" in payload:
+        return payload.split(":", 1)[1].strip() or None
+    if config.auth_username:
+        return config.auth_username
+    users = getattr(config, "queue_users", None) or {}
+    if len(users) == 1:
+        return next(iter(users))
+    return None
 
 
 def is_authenticated(cookie_value: Optional[str], config: QueueUiConfig) -> bool:

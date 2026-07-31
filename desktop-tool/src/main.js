@@ -8,7 +8,8 @@ const {
   DEFAULT_PORT,
 } = require("./server");
 const { startDesktopPoller } = require("./poll");
-const { openChromeUrl, focusChromeTab, closeChromeTab, CHROME_APP } = require("./chrome");
+const { desktopLogin } = require("./auth");
+const { openChromeUrl, focusChromeTab, closeChromeTab, CHROME_APP, resolveChromeBin } = require("./chrome");
 const { loadSettings, saveSettings, adjustDelayOffset } = require("./settings");
 const { clickScreenPoint, warmUpWinClickHelper, shutdownWinClickHelper } = require("./desktop-click");
 const { pickPointOnScreen } = require("./pick-point");
@@ -34,7 +35,6 @@ loadDotEnv();
 
 const PORT = Number(process.env.DESKTOP_TOOL_PORT) || DEFAULT_PORT;
 const QUEUE_URL = process.env.DESKTOP_TOOL_QUEUE_URL || "";
-const PULL_TOKEN = process.env.DESKTOP_TOOL_PULL_TOKEN || "";
 const POLL_MS = Number(process.env.DESKTOP_TOOL_POLL_MS) || 2000;
 const TAB_CLOSE_AFTER_END_MS = Number(process.env.DESKTOP_TAB_CLOSE_AFTER_END_MS) || 30_000;
 
@@ -246,6 +246,36 @@ async function openCountdownTab({
   return { tabId: urlKey, deduplicated: false, schedule };
 }
 
+function getPollerCredentials() {
+  const settings = loadSettings();
+  const queueUrl = (
+    settings.queueUrl
+    || process.env.DESKTOP_TOOL_QUEUE_URL
+    || QUEUE_URL
+    || ""
+  ).trim();
+  const queueUsername = String(settings.queueUsername || "").trim();
+  const pullToken = String(settings.pullToken || "").trim();
+  return { queueUrl, pullToken, queueUsername };
+}
+
+function restartPoller() {
+  if (stopPoller) stopPoller();
+  const { queueUrl, pullToken, queueUsername } = getPollerCredentials();
+  stopPoller = startDesktopPoller({
+    queueUrl,
+    pullToken,
+    queueUsername,
+    intervalMs: POLL_MS,
+    onOpen: openCountdownTab,
+  });
+  if (queueUrl && pullToken && queueUsername) {
+    console.log(`Polling queue ${queueUrl} as ${queueUsername} every ${POLL_MS}ms`);
+  } else {
+    console.warn("Desktop poller disabled — mở app → Tài khoản queue → chọn user và đăng nhập");
+  }
+}
+
 function registerIpcHandlers() {
   ipcMain.handle("settings:get", () => loadSettings());
   ipcMain.handle("settings:save", (_event, partial) => saveSettings(partial || {}));
@@ -264,6 +294,51 @@ function registerIpcHandlers() {
     return clickScreenPoint(settings.clickX, settings.clickY);
   });
   ipcMain.handle("settings:ensure-accessibility", async () => ensureAccessibility(true));
+  ipcMain.handle("auth:session", () => {
+    const creds = getPollerCredentials();
+    return {
+      loggedIn: Boolean(creds.pullToken && creds.queueUsername),
+      queueUsername: creds.queueUsername,
+      queueUrl: creds.queueUrl,
+    };
+  });
+  ipcMain.handle("auth:fetch-users", async (_event, queueUrl) => {
+    const base = String(
+      queueUrl
+      || loadSettings().queueUrl
+      || process.env.DESKTOP_TOOL_QUEUE_URL
+      || QUEUE_URL
+      || ""
+    ).trim();
+    const { fetchQueueUsers } = require("./auth");
+    return fetchQueueUsers(base);
+  });
+  ipcMain.handle("auth:login", async (_event, payload = {}) => {
+    const queueUrl = String(
+      payload.queueUrl
+      || loadSettings().queueUrl
+      || process.env.DESKTOP_TOOL_QUEUE_URL
+      || QUEUE_URL
+      || ""
+    ).trim();
+    const data = await desktopLogin(queueUrl, payload.username, payload.password);
+    saveSettings({
+      queueUrl,
+      queueUsername: String(data.username || payload.username || "").trim(),
+      pullToken: String(data.pull_token || "").trim(),
+    });
+    restartPoller();
+    return {
+      ok: true,
+      username: String(data.username || payload.username || "").trim(),
+      queueUrl,
+    };
+  });
+  ipcMain.handle("auth:logout", async () => {
+    saveSettings({ queueUsername: "", pullToken: "" });
+    restartPoller();
+    return { ok: true };
+  });
 }
 
 function showSettingsWindow() {
@@ -275,7 +350,7 @@ function showSettingsWindow() {
 
   settingsWindow = new BrowserWindow({
     width: 460,
-    height: 680,
+    height: 760,
     minWidth: 400,
     minHeight: 520,
     show: true,
@@ -305,6 +380,9 @@ async function startServer() {
     console.log(`Config: ${envFilePath()}`);
   }
   console.log(`Chrome: ${CHROME_APP} — 1 cửa sổ, click theo tab mở cuối, giữ tab cuối khi hết hạn`);
+  if (process.platform === "win32") {
+    console.log(`Chrome bin: ${resolveChromeBin()}`);
+  }
   return port;
 }
 
@@ -315,9 +393,12 @@ function createTray(port) {
 
   const rebuild = () => {
     const tabs = openEntries.size;
+    const { queueUsername } = getPollerCredentials();
+    const userLabel = queueUsername ? ` · ${queueUsername}` : "";
     tray.setContextMenu(
       Menu.buildFromTemplate([
         { label: `API :${port}`, enabled: false },
+        { label: `Queue${userLabel}`, enabled: false },
         { label: `Chrome tab: ${tabs}`, enabled: false },
         { type: "separator" },
         { label: "Cài đặt đếm giờ & click", click: () => showSettingsWindow() },
@@ -341,17 +422,7 @@ app.whenReady().then(async () => {
     const port = await startServer();
     createTray(port);
     showSettingsWindow();
-    const queueUrl = process.env.DESKTOP_TOOL_QUEUE_URL || QUEUE_URL;
-    const pullToken = process.env.DESKTOP_TOOL_PULL_TOKEN || PULL_TOKEN;
-    stopPoller = startDesktopPoller({
-      queueUrl,
-      pullToken,
-      intervalMs: POLL_MS,
-      onOpen: openCountdownTab,
-    });
-    if (queueUrl && pullToken) {
-      console.log(`Polling queue ${queueUrl} every ${POLL_MS}ms`);
-    }
+    restartPoller();
     warmUpWinClickHelper();
   } catch (err) {
     if (err && err.code === "EADDRINUSE") {

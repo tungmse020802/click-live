@@ -18,7 +18,7 @@ Hoặc thủ công:
 ```bash
 cd desktop-tool
 cp .env.example .env
-# Sửa .env: copy DESKTOP_PULL_TOKEN từ server (telegram_bot/.env)
+# Chỉ cần DESKTOP_TOOL_QUEUE_URL — login user trong app
 npm install
 npm start
 ```
@@ -35,7 +35,7 @@ install-windows.bat
 Script tự làm:
 1. Cài **Git**, **Node.js LTS**, **Google Chrome** (qua `winget` nếu thiếu)
 2. Clone repo `https://github.com/tungmse020802/click-live.git` → `%USERPROFILE%\click-live`
-3. Tạo `.env`, hỏi `DESKTOP_TOOL_PULL_TOKEN`
+3. Tạo `.env` (URL queue), login user trong app
 4. `npm install` + `npm start`
 5. Tạo shortcut **Click Live Desktop Tool** trên Desktop
 
@@ -49,12 +49,6 @@ desktop-tool\scripts\run-windows.bat
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File desktop-tool\scripts\install-windows.ps1 -SkipClone
-```
-
-**Truyền token sẵn:**
-
-```powershell
-powershell -ExecutionPolicy Bypass -File desktop-tool\scripts\install-windows.ps1 -PullToken "your-token"
 ```
 
 **Yêu cầu Windows:** Windows 10+, PowerShell 5.1+, quyền cài app (winget). Desktop click dùng PowerShell (không cần cài thêm).
@@ -80,7 +74,7 @@ File: `dist/ClickLiveDesktopTool-0.1.0-mac.dmg` (hoặc `.zip`).
 ```text
 Applications/
   Click Live Desktop Tool.app
-  .env                    ← copy từ .env.example, điền DESKTOP_TOOL_PULL_TOKEN
+  .env                    ← DESKTOP_TOOL_QUEUE_URL; login user trong app
 ```
 
 ### Windows (build trên Windows)
@@ -109,8 +103,9 @@ Nội dung `.env` (copy từ `.env.example` trong repo):
 
 ```env
 DESKTOP_TOOL_QUEUE_URL=http://160.30.19.215:8787
-DESKTOP_TOOL_PULL_TOKEN=your-token-from-server
 ```
+
+Sau khi mở app: **Tài khoản queue** → chọn user (admin1…admin10) → mật khẩu `Admin123@`.
 
 ### Test bản build (chưa đóng gói installer)
 

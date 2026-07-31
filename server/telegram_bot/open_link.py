@@ -144,6 +144,7 @@ def open_link_for_queue(
     device_id: Optional[str] = None,
     open_phone: bool = True,
     open_desktop: bool = True,
+    queue_user: str = "",
 ) -> Dict[str, Any]:
     source_url = html_module.unescape(str(url or "").strip())
     queue_payload = dict(queue_payload or {})
@@ -190,6 +191,7 @@ def open_link_for_queue(
             dedup_seconds=dedup_seconds,
             click_after_ms=click_after_ms,
             time_label=time_label,
+            queue_user=str(queue_user or "").strip(),
         )
 
     phone: Dict[str, Any] = {"ok": False, "skipped": True}

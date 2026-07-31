@@ -10,6 +10,10 @@ const DEFAULTS = {
   delayOffsetMs: 0,
   /** Chờ mặc định nếu tin không có TIME */
   defaultWaitMs: 0,
+  /** Queue server + desktop login (ưu tiên hơn .env sau khi đăng nhập) */
+  queueUrl: "",
+  queueUsername: "",
+  pullToken: "",
 };
 
 let cache = null;
