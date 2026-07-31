@@ -1,6 +1,9 @@
-# Secrets
+# Secrets (tracked .env files allowed in private repo)
 .env
 *.env
+!desktop-tool/.env
+!server/telegram_bot/.env
+!ios_wda_controller/config.env
 
 # Python
 __pycache__/

@@ -14,8 +14,9 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist "node_modules\electron\package.json" (
-  echo [ERROR] Run npm install first - scripts\install-windows.bat
+where npm >nul 2>&1
+if errorlevel 1 (
+  echo [ERROR] npm not found. Reinstall Node.js from https://nodejs.org
   echo.
   pause
   exit /b 1
@@ -23,7 +24,23 @@ if not exist "node_modules\electron\package.json" (
 
 if not exist ".env" (
   if exist ".env.example" copy /Y ".env.example" ".env" >nul
-  echo [WARN] Created .env - set DESKTOP_TOOL_PULL_TOKEN then rerun.
+  echo [WARN] Created .env - set DESKTOP_TOOL_PULL_TOKEN if queue poll fails.
+  echo.
+)
+
+if not exist "node_modules\electron\package.json" (
+  echo node_modules not found - running npm install ...
+  echo This may take a few minutes on first run.
+  echo.
+  call npm install
+  if errorlevel 1 (
+    echo.
+    echo [ERROR] npm install failed.
+    pause
+    exit /b 1
+  )
+  echo.
+  echo npm install OK.
   echo.
 )
 
