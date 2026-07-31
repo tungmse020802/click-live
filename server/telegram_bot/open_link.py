@@ -25,20 +25,16 @@ logger = logging.getLogger(__name__)
 
 
 def phone_open_url(deeplink: str) -> str:
-    """Phone app opens TikTok directly — use snssdk, not HTTP /open/live wrapper."""
+    """Same URL as broadcast link — HTTP /open/live (redirects to TikTok app)."""
     text = str(deeplink or "").strip()
     if not text:
         return ""
+    href = deeplink_open_href(text)
+    if href.startswith("http://") or href.startswith("https://") or href.startswith("snssdk"):
+        return href
     room_id = extract_room_id(text)
     if room_id:
         return f"{DEEPLINK_PREFIX}{room_id}"
-    if text.startswith(DEEPLINK_PREFIX):
-        return text
-    href = deeplink_open_href(text)
-    if href.startswith("snssdk"):
-        return href
-    if href.startswith("http://") or href.startswith("https://"):
-        return href
     return text
 
 

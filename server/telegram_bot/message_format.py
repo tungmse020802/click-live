@@ -31,11 +31,5 @@ def broadcast_text_from_payload(message_text: str, payload: dict) -> Tuple[str, 
 
 
 def queue_display_from_payload(message_text: str, payload: dict) -> Tuple[str, Optional[str]]:
-    """Queue UI: giữ link countdown, không đổi sang TikTok /open/live."""
-    html_text = str(payload.get("telegram_html") or "").strip()
-    if html_text:
-        converted, _ = replace_urls_in_html_for_queue_display(html_text)
-        return converted, "HTML"
-
-    plain = (message_text or "").strip()
-    return plain, None
+    """Queue UI: hiển thị link đã giải mã giống bot broadcast."""
+    return broadcast_text_from_payload(message_text, payload)

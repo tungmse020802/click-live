@@ -77,8 +77,8 @@ def _enrich_queue_item(item: Dict[str, Any]) -> Dict[str, Any]:
         deeplink = str(enriched.get("deeplink") or "").strip()
         room_id = room_id or str(enriched.get("room_id") or "").strip() or (extract_room_id(deeplink) or "")
     combined = item_context_from_parts(message_text, payload)
-    countdown_url = find_countdown_url_for_open(display_html) or extract_countdown_url(
-        message_text, payload
+    countdown_url = extract_countdown_url(message_text, payload) or find_countdown_url_for_open(
+        str(payload.get("telegram_html") or "")
     )
     if not countdown_url and room_id.isdigit():
         countdown_url = build_thanhtai_countdown_url(room_id)

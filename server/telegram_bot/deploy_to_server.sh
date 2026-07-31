@@ -99,7 +99,16 @@ upsert_env "TELEGRAM_CLIENT_QUEUE_ONLY_NEWEST" "true"
 upsert_env "TELEGRAM_CLIENT_SUPERSEDE_PENDING" "false"
 upsert_env "TELEGRAM_CLIENT_FILTER_ENABLED" "true"
 upsert_env "TELEGRAM_CLIENT_FILTER_CONFIG_PATH" "data/message_filters.json"
-upsert_env "DEEPLINK_OPEN_BASE_URL" "http://${SERVER_HOST}:8792"
+
+TUNNEL_URL="$("${SSH[@]}" 'cat /root/click-live/tunnel/public.url 2>/dev/null' || true)"
+TUNNEL_URL="$(echo "$TUNNEL_URL" | tr -d '\r\n' | sed 's:/*$::')"
+if [[ -n "$TUNNEL_URL" ]]; then
+  echo "==> DEEPLINK_OPEN_BASE_URL from Cloudflare tunnel: ${TUNNEL_URL}"
+  upsert_env "DEEPLINK_OPEN_BASE_URL" "${TUNNEL_URL}"
+  upsert_env "PUBLIC_QUEUE_BASE_URL" "${TUNNEL_URL}"
+else
+  upsert_env "DEEPLINK_OPEN_BASE_URL" "http://${SERVER_HOST}:8792"
+fi
 upsert_env "DEEPLINK_API_BASE_URL" "http://127.0.0.1:8792"
 
 sshpass -p "$SERVER_PASS" scp "${SSH_OPTS[@]}" "$TMP_ENV" \
