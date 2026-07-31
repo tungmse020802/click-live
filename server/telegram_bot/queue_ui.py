@@ -30,7 +30,9 @@ from deeplink_resolve import (
     normalize_url_href,
     resolve_countdown_open_url,
     extract_room_id,
+    enrich_payload_with_deeplink,
     item_context_from_parts,
+    resolve_deeplink_for_broadcast,
     resolve_link_for_open,
     resolve_live_url,
 )
@@ -70,6 +72,10 @@ def _enrich_queue_item(item: Dict[str, Any]) -> Dict[str, Any]:
 
     deeplink = str(payload.get("deeplink") or payload.get("deep_link") or "").strip()
     room_id = str(payload.get("room_id") or "").strip() or (extract_room_id(deeplink) or "")
+    if not deeplink:
+        enriched = enrich_payload_with_deeplink(message_text, payload)
+        deeplink = str(enriched.get("deeplink") or "").strip()
+        room_id = room_id or str(enriched.get("room_id") or "").strip() or (extract_room_id(deeplink) or "")
     combined = item_context_from_parts(message_text, payload)
     countdown_url = find_countdown_url_for_open(display_html) or extract_countdown_url(
         message_text, payload
@@ -1668,15 +1674,13 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             url = str(payload.get("url") or "").strip()
             context = str(payload.get("context") or "").strip()
-            if not context:
-                message = str(payload.get("message") or "").strip()
-                raw_payload = payload.get("payload")
-                context = item_context_from_parts(
-                    message,
-                    raw_payload if isinstance(raw_payload, dict) else {},
-                )
             job_id = payload.get("job_id")
             parsed_job_id = int(job_id) if job_id is not None else None
+            message_text = str(payload.get("message") or payload.get("message_text") or "").strip()
+            raw_payload = payload.get("payload")
+            queue_payload = raw_payload if isinstance(raw_payload, dict) else {}
+            if not context:
+                context = item_context_from_parts(message_text, queue_payload)
             ttl_seconds = int(payload.get("ttl_seconds") or 30)
             click_after_ms = int(payload.get("click_after_ms") or 0)
             time_label = str(payload.get("time_label") or "").strip()
@@ -1692,6 +1696,8 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         result = open_link_for_queue(
             url,
             context=context,
+            message_text=message_text,
+            queue_payload=queue_payload,
             job_id=parsed_job_id,
             ttl_seconds=ttl_seconds,
             dedup_seconds=self.config.desktop_dedup_seconds,
@@ -2514,19 +2520,17 @@ def _latest_phone_job_id(db: ChatDatabase, limit: int) -> int:
 def _extract_link_from_item(item: Dict[str, Any]) -> str:
     payload = item.get("payload") or {}
     message = item.get("message") or {}
+    message_text = str(message.get("text") or "")
+
+    deeplink = resolve_deeplink_for_broadcast(message_text, payload)
+    if deeplink and deeplink.startswith(DEEPLINK_PREFIX):
+        return deeplink
+
     deeplink = str(payload.get("deeplink") or payload.get("deep_link") or "").strip()
     if deeplink.startswith(DEEPLINK_PREFIX):
         return deeplink
 
-    message_text = str(message.get("text") or "")
     context = item_context_from_parts(message_text, payload)
-    if not deeplink:
-        from deeplink_resolve import resolve_deeplink_from_text
-
-        deeplink = str(resolve_deeplink_from_text(context) or "").strip()
-        if deeplink.startswith(DEEPLINK_PREFIX):
-            return deeplink
-
     source_url = (
         find_first_convertible_url(context)
         or str(payload.get("source_url") or "").strip()
@@ -2545,10 +2549,10 @@ def _extract_link_from_item(item: Dict[str, Any]) -> str:
     for value in candidates:
         match = re.search(r"(?:https?://|tiktok://|snssdk1180://)[^\s<>'\"]+", str(value or ""), re.I)
         if match:
-            candidate = resolve_live_url(match.group(0))
+            candidate = resolve_live_url(match.group(0), context)
             if candidate.startswith(DEEPLINK_PREFIX):
                 return candidate
-    return deeplink if deeplink.startswith(DEEPLINK_PREFIX) else ""
+    return ""
 
 
 def _parse_time_delay_ms(value: Any) -> int:

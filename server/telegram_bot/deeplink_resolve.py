@@ -614,6 +614,55 @@ def item_context_from_parts(message_text: str = "", payload: Optional[dict] = No
     return "\n".join(parts)
 
 
+def resolve_deeplink_for_broadcast(message_text: str = "", payload: Optional[dict] = None) -> Optional[str]:
+    """Same deeplink resolution as broadcast worker (replace_urls_in_html / enrich)."""
+    payload = dict(payload or {})
+    message_text = message_text or ""
+
+    enriched = enrich_payload_with_deeplink(message_text, payload)
+    pre_resolved = str(enriched.get("deeplink") or "").strip()
+    if pre_resolved.startswith(DEEPLINK_PREFIX):
+        return pre_resolved
+
+    source_url = str(enriched.get("source_url") or payload.get("source_url") or "").strip() or None
+    html_text = str(payload.get("telegram_html") or "").strip()
+    if html_text:
+        replace_urls_in_html(
+            html_text,
+            resolved_deeplink=pre_resolved if pre_resolved.startswith(DEEPLINK_PREFIX) else None,
+            source_url=source_url,
+        )
+        for match in ANCHOR_PATTERN.finditer(html_text):
+            url = normalize_url_href(match.group(1))
+            if is_countdown_page_url(url):
+                room_id = extract_thanhtai_countdown_room_id(url) or ""
+                if room_id:
+                    return f"{DEEPLINK_PREFIX}{room_id}"
+            resolved = resolve_live_url(url, html_text)
+            if resolved.startswith(DEEPLINK_PREFIX):
+                return resolved
+        for match in URL_PATTERN.finditer(html_text):
+            if _is_inside_href(html_text, match.start()):
+                continue
+            resolved = resolve_live_url(match.group(0), html_text)
+            if resolved.startswith(DEEPLINK_PREFIX):
+                return resolved
+
+    plain = (message_text or "").strip()
+    if plain:
+        converted, link_count = replace_urls_as_deeplink_hyperlinks(plain)
+        if link_count:
+            room_id = extract_room_id(converted)
+            if room_id:
+                return f"{DEEPLINK_PREFIX}{room_id}"
+
+    combined = item_context_from_parts(message_text, payload)
+    fallback = resolve_deeplink_from_text(combined)
+    if fallback and fallback.startswith(DEEPLINK_PREFIX):
+        return fallback
+    return None
+
+
 def resolve_link_for_open(url: str, context: str = "") -> dict[str, Any]:
     """Resolve queue link via profile_playwright API and build countdown open URL."""
     source_url = (url or "").strip()

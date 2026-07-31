@@ -11,14 +11,19 @@ class OpenLinkTests(unittest.TestCase):
         self.assertEqual(url, "snssdk1180://live?room_id=7660546312748108566")
 
     @patch("open_link.enqueue_open")
+    @patch("open_link.push_phone_open")
     @patch("open_link._try_open_phone")
+    @patch("open_link.resolve_deeplink_for_broadcast")
     @patch("open_link.resolve_link_for_open")
     def test_open_link_for_queue_desktop_and_phone(
         self,
         resolve_mock,
+        broadcast_mock,
         phone_mock,
+        push_mock,
         desktop_mock,
     ) -> None:
+        broadcast_mock.return_value = "snssdk1180://live?room_id=7660546312748108566"
         resolve_mock.return_value = {
             "ok": True,
             "source_url": "https://thanhtai.io/r/abc",
@@ -29,10 +34,13 @@ class OpenLinkTests(unittest.TestCase):
         }
         desktop_mock.return_value = {"ok": True, "queued": True}
         phone_mock.return_value = {"ok": True, "method": "phone_monitor"}
+        push_mock.return_value = {"ok": True, "push_id": -1}
 
         result = open_link_for_queue(
             "https://thanhtai.io/r/abc",
             context="ctx",
+            message_text="ctx",
+            queue_payload={"telegram_html": "<a>test</a>"},
             job_id=42,
             click_after_ms=1000,
         )

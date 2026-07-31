@@ -646,6 +646,8 @@
         body: JSON.stringify({
           url: link,
           context: itemContext(item),
+          message: item.message?.text || '',
+          payload: item.payload || {},
           job_id: item.id,
           ttl_seconds: TAB_TTL_SECONDS,
           click_after_ms: timeMeta.click_after_ms,

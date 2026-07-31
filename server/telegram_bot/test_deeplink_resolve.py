@@ -11,6 +11,7 @@ from deeplink_resolve import (
     replace_urls_in_html,
     replace_urls_in_text,
     resolve_countdown_open_url,
+    resolve_deeplink_for_broadcast,
     resolve_link_for_open,
     resolve_live_url,
 )
@@ -112,6 +113,10 @@ class DeeplinkResolveTest(unittest.TestCase):
             build_thanhtai_countdown_url("7660546312748108566"),
             "https://thanhtai.io/countdow?data=NzY2MDU0NjMxMjc0ODEwODU2Ng",
         )
+
+    def test_resolve_deeplink_for_broadcast_junb(self) -> None:
+        deeplink = resolve_deeplink_for_broadcast("", {"telegram_html": f'<a href="{JUNB}">{JUNB}</a>'})
+        self.assertEqual(deeplink, DEEPLINK)
 
     def test_resolve_link_for_open_countdown_passthrough(self) -> None:
         url = "https://thanhtai.io/countdow?data=NzY2MDU0NjMxMjc0ODEwODU2Ng"
