@@ -11,7 +11,6 @@ const loggedInUrl = document.getElementById('loggedInUrl');
 const queueUrlInput = document.getElementById('queueUrl');
 const loginUsername = document.getElementById('loginUsername');
 const loginPassword = document.getElementById('loginPassword');
-const userListHint = document.getElementById('userListHint');
 
 function formatOffset(ms) {
   const sec = ms / 1000;
@@ -30,6 +29,9 @@ function applySettings(s) {
   if (s.queueUrl) {
     queueUrlInput.value = s.queueUrl;
   }
+  if (s.queueUsername && !loginUsername.value) {
+    loginUsername.value = s.queueUsername;
+  }
 }
 
 function renderAuthSession(session) {
@@ -42,50 +44,15 @@ function renderAuthSession(session) {
   } else if (session?.queueUrl) {
     queueUrlInput.value = session.queueUrl;
   }
-  if (!loggedIn && session?.queueUrl) {
-    loadUserList(session.queueUrl).catch(() => {});
-  }
 }
 
 async function refreshAuthSession() {
   const session = await window.desktopTool.getSession();
   renderAuthSession(session);
   if (!session.loggedIn) {
-    statusEl.textContent = 'Chọn user và đăng nhập để nhận lệnh Mở link từ web.';
+    statusEl.textContent = 'Nhập user/mật khẩu queue UI rồi bấm Đăng nhập desktop.';
   }
   return session;
-}
-
-function fillUserSelect(users, selected = '') {
-  loginUsername.innerHTML = '<option value="">— chọn user —</option>';
-  for (const name of users) {
-    const opt = document.createElement('option');
-    opt.value = name;
-    opt.textContent = name;
-    if (name === selected) opt.selected = true;
-    loginUsername.appendChild(opt);
-  }
-  userListHint.textContent = users.length
-    ? `${users.length} tài khoản từ server`
-    : 'Server chưa cấu hình user — kiểm tra QUEUE_UI_USERS trên VPS.';
-}
-
-async function loadUserList(queueUrl) {
-  const url = String(queueUrl || queueUrlInput.value || '').trim();
-  if (!url) return;
-  userListHint.textContent = 'Đang tải danh sách user…';
-  try {
-    const users = await window.desktopTool.fetchUsers(url);
-    fillUserSelect(users, loginUsername.value);
-  } catch (err) {
-    const msg = String(err.message || err);
-    if (/401|403|Chưa đăng nhập|Not found|404/i.test(msg)) {
-      userListHint.textContent = 'Server chưa cập nhật — admin cần deploy queue UI mới (git pull + deploy VPS).';
-    } else {
-      userListHint.textContent = msg || 'Không tải được user list';
-    }
-    throw err;
-  }
 }
 
 async function persistPartial(partial) {
@@ -146,7 +113,8 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
   try {
     const queueUrl = queueUrlInput.value.trim();
     const username = loginUsername.value.trim();
-    if (!username) throw new Error('Chọn tài khoản');
+    if (!username) throw new Error('Nhập tên đăng nhập');
+    if (!loginPassword.value) throw new Error('Nhập mật khẩu');
     const result = await window.desktopTool.login({
       queueUrl,
       username,
@@ -163,17 +131,18 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
 document.getElementById('logoutBtn').addEventListener('click', async () => {
   await window.desktopTool.logout();
   await refreshAuthSession();
-  statusEl.textContent = 'Đã đăng xuất — chọn user và đăng nhập lại để nhận lệnh mở link.';
+  statusEl.textContent = 'Đã đăng xuất — nhập user/mật khẩu và đăng nhập lại.';
 });
 
-queueUrlInput.addEventListener('change', async () => {
-  const url = queueUrlInput.value.trim();
-  if (url) {
-    await persistPartial({ queueUrl: url });
-    loadUserList(url).catch((err) => {
-      userListHint.textContent = err.message || 'Không tải được user list';
-    });
+loginPassword.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    document.getElementById('loginBtn').click();
   }
+});
+
+queueUrlInput.addEventListener('change', () => {
+  const url = queueUrlInput.value.trim();
+  if (url) persistPartial({ queueUrl: url });
 });
 
 window.desktopTool.onSchedule((payload) => {
@@ -189,9 +158,6 @@ window.desktopTool.onSchedule((payload) => {
 Promise.all([
   window.desktopTool.getSettings().then(applySettings),
   refreshAuthSession(),
-]).then(async () => {
-  const url = queueUrlInput.value.trim();
-  if (url) await loadUserList(url).catch(() => {});
-}).catch((err) => {
+]).catch((err) => {
   statusEl.textContent = `Lỗi tải settings: ${err.message}`;
 });
