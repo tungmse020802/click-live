@@ -1,5 +1,8 @@
 # FRP tunnel — VPS ↔ Phone (VPN-safe)
 
+> **Điện thoại nước ngoài không vào được IP VPS?** Dùng **Cloudflare Tunnel** (`server/tunnel/`) — không phải FRP.  
+> FRP chỉ để VPS **gọi ngược** về phone ở nhà (LAN + VPN).
+
 Phone bật VPN → VPS **không gọi thẳng** được phone. PC nhà chạy **frpc** (outbound → VPS), VPS forward về phone qua WiFi LAN.
 
 ## Truy cập từ nước ngoài (port 80)
