@@ -20,9 +20,11 @@ from desktop_relay import desktop_status, enqueue_open, pull_pending
 from logging_setup import setup_logging
 from db import ChatDatabase, QueueJob
 from deeplink_resolve import (
+    DEEPLINK_PREFIX,
     build_thanhtai_countdown_url,
     extract_countdown_url,
     find_countdown_url_for_open,
+    find_first_convertible_url,
     find_first_countdown_url,
     normalize_url_href,
     resolve_countdown_open_url,
@@ -2504,18 +2506,40 @@ def _extract_link_from_item(item: Dict[str, Any]) -> str:
     payload = item.get("payload") or {}
     message = item.get("message") or {}
     deeplink = str(payload.get("deeplink") or payload.get("deep_link") or "").strip()
-    if deeplink:
+    if deeplink.startswith(DEEPLINK_PREFIX):
         return deeplink
+
+    message_text = str(message.get("text") or "")
+    context = item_context_from_parts(message_text, payload)
+    if not deeplink:
+        from deeplink_resolve import resolve_deeplink_from_text
+
+        deeplink = str(resolve_deeplink_from_text(context) or "").strip()
+        if deeplink.startswith(DEEPLINK_PREFIX):
+            return deeplink
+
+    source_url = (
+        find_first_convertible_url(context)
+        or str(payload.get("source_url") or "").strip()
+    )
+    if source_url:
+        resolved = resolve_link_for_open(source_url, context)
+        if resolved.get("ok"):
+            resolved_deeplink = str(resolved.get("deeplink") or "").strip()
+            if resolved_deeplink.startswith(DEEPLINK_PREFIX):
+                return resolved_deeplink
 
     candidates = [
         payload.get("url"), payload.get("link"),
-        payload.get("live_url"), payload.get("room_url"), message.get("text"),
+        payload.get("live_url"), payload.get("room_url"), message_text,
     ]
     for value in candidates:
         match = re.search(r"(?:https?://|tiktok://|snssdk1180://)[^\s<>'\"]+", str(value or ""), re.I)
         if match:
-            return resolve_live_url(match.group(0))
-    return ""
+            candidate = resolve_live_url(match.group(0))
+            if candidate.startswith(DEEPLINK_PREFIX):
+                return candidate
+    return deeplink if deeplink.startswith(DEEPLINK_PREFIX) else ""
 
 
 def _parse_time_delay_ms(value: Any) -> int:

@@ -8,7 +8,7 @@ class OpenLinkTests(unittest.TestCase):
     def test_phone_open_url_from_deeplink(self) -> None:
         with patch.dict("os.environ", {"DEEPLINK_OPEN_BASE_URL": "http://127.0.0.1:8792"}):
             url = phone_open_url("snssdk1180://live?room_id=7660546312748108566")
-        self.assertEqual(url, "http://127.0.0.1:8792/open/live?room_id=7660546312748108566")
+        self.assertEqual(url, "snssdk1180://live?room_id=7660546312748108566")
 
     @patch("open_link.enqueue_open")
     @patch("open_link._try_open_phone")

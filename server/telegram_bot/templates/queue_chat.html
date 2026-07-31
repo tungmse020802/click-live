@@ -527,6 +527,24 @@
       return '';
     }
 
+    /** Shortlink for server resolve (junb /i/ or thanhtai /r/) — not countdown page. */
+    function resolveSourceLink(item) {
+      const payload = item?.payload || {};
+      const message = item?.message || {};
+      const deeplink = String(item?.deeplink || payload.deeplink || '').trim();
+      if (/^snssdk1180:\/\//i.test(deeplink)) return deeplink;
+      const combined = [
+        payload.telegram_html, message.text,
+        payload.source_url, payload.url, payload.link
+      ].filter(Boolean).join('\n');
+      const junb = combined.match(/https?:\/\/[^\s<>'"]*junb\.io\.vn\/i\/[^\s<>'"]+/i);
+      if (junb) return decodeHtmlUrl(junb[0]);
+      const thanhtai = combined.match(/https?:\/\/[^\s<>'"]*thanhtai\.io\/r\/[^\s<>'"]+/i);
+      if (thanhtai) return decodeHtmlUrl(thanhtai[0]);
+      if (payload.source_url) return decodeHtmlUrl(String(payload.source_url));
+      return findLink(item);
+    }
+
     function itemContext(item) {
       const payload = item?.payload || {};
       const parts = [];
@@ -617,7 +635,7 @@
     async function openCountdownForItem(item) {
       if (!item) return;
       els.liveStatus.textContent = `Đang mở link job #${item.id}...`;
-      const link = findLink(item);
+      const link = resolveSourceLink(item);
       if (!link) throw new Error('Không phát hiện link');
       const timeMeta = findTimeMeta(item);
       const point = phoneClickPoint();
@@ -646,13 +664,15 @@
       if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
 
       const target = decodeHtmlUrl(data.countdown_url || '');
-      if (!target || /\/open\/live|snssdk1180:\/\//i.test(target)) {
-        throw new Error('Không có URL countdown hợp lệ');
+      const desktopQueued = Boolean(data.desktop?.ok || data.desktop?.queued);
+      const hasDeeplink = Boolean(data.deeplink && /^snssdk1180:\/\//i.test(data.deeplink));
+      if ((!target || /\/open\/live|snssdk1180:\/\//i.test(target)) && !desktopQueued && !data.phone?.ok && !hasDeeplink) {
+        throw new Error('Không giải mã được link (thiếu countdown + deeplink)');
       }
 
       let phoneNote = '';
       if (data.phone?.ok) {
-        phoneNote = ' · điện thoại ✓';
+        phoneNote = ` · TikTok ${data.room_id || 'deeplink'} ✓`;
       } else if (data.phone_open_url) {
         try {
           const localPhone = await openPhoneViaMonitor(data.phone_open_url, item, timeMeta);
