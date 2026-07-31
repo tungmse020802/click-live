@@ -673,12 +673,21 @@
       }
 
       let phoneNote = '';
+      if (data.phone_open_url) {
+        const mobile = /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent || '');
+        if (mobile) {
+          window.location.href = data.phone_open_url;
+          phoneNote = ' · mở TikTok trên thiết bị này';
+        }
+      }
       if (data.phone?.ok) {
         const via = data.phone.method === 'phone_poll' || data.phone.push ? 'poll' : 'relay';
-        phoneNote = via === 'poll'
-          ? ` · TikTok ${data.room_id || ''} → phone (poll)`
-          : ` · TikTok ${data.room_id || 'deeplink'} ✓`;
-      } else if (data.phone_open_url) {
+        if (!phoneNote) {
+          phoneNote = via === 'poll'
+            ? ` · TikTok ${data.room_id || ''} → phone (poll)`
+            : ` · TikTok ${data.room_id || 'deeplink'} ✓`;
+        }
+      } else if (data.phone_open_url && !phoneNote) {
         try {
           const localPhone = await openPhoneViaMonitor(data.phone_open_url, item, timeMeta);
           if (localPhone?.ok) phoneNote = ' · điện thoại ✓ (local)';

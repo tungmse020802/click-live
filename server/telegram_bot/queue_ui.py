@@ -1280,6 +1280,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             path in PUBLIC_PATHS
             or path.startswith("/api/auth/")
             or path == "/api/desktop/pull"
+            or path.startswith("/api/phone/")
         )
 
     def _ensure_auth(self) -> bool:

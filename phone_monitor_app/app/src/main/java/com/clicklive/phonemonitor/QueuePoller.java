@@ -81,12 +81,12 @@ final class QueuePoller {
     private void loop() {
         while (running) {
             try {
+                pollOnce();
                 if (activeJobId > 0) {
                     Thread.sleep(1000);
-                    continue;
+                } else {
+                    Thread.sleep(300);
                 }
-                pollOnce();
-                Thread.sleep(300);
             } catch (InterruptedException ignored) {
                 return;
             } catch (Exception exc) {
@@ -103,9 +103,12 @@ final class QueuePoller {
         if (job == null) return;
         long jobId = job.optLong("id", 0);
         if (jobId > 0 && jobId == lastJobId) return;
-        lastJobId = jobId;
-        activeJobId = jobId;
-        activeJobUrl = job.optString("url", "");
+        if (jobId > 0 && activeJobId > 0 && jobId != activeJobId) return;
+        if (jobId > 0) {
+            lastJobId = jobId;
+            activeJobId = jobId;
+            activeJobUrl = job.optString("url", "");
+        }
         handleJob(job);
     }
 
@@ -124,14 +127,19 @@ final class QueuePoller {
         int y = job.optInt("click_y", 0);
         log.addRawJson("queue_job", "{\"job_id\":" + jobId + ",\"url\":\"" + esc(url) + "\",\"time\":\"" + esc(time) + "\",\"click_after_ms\":" + delay + ",\"click_x\":" + x + ",\"click_y\":" + y + "}");
         main.post(() -> {
-            openUrl(url);
             PhoneMonitorAccessibilityService svc = PhoneMonitorAccessibilityService.instance;
-            if (svc != null && delay > 0 && x > 0 && y > 0) {
+            if (svc != null) {
                 svc.openDeeplink(url, "queue-poller", String.valueOf(jobId), time, delay, x, y);
-            } else if (delay > 0) {
+                return;
+            }
+            openUrl(url);
+            if (delay > 0) {
                 log.addRawJson("manual_click_required", "{\"job_id\":" + jobId + ",\"after_ms\":" + delay + ",\"x\":" + x + ",\"y\":" + y + "}");
             }
         });
+        if (jobId < 0) {
+            return;
+        }
         ack(jobId, "opened_waiting_complete", "");
     }
 
