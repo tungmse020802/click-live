@@ -2,14 +2,32 @@
 
 Phone bật VPN → VPS **không gọi thẳng** được phone. PC nhà chạy **frpc** (outbound → VPS), VPS forward về phone qua WiFi LAN.
 
+## Truy cập từ nước ngoài (port 80)
+
+Nhiều mạng nước ngoài **chặn port lẻ** (`8787`, `8792`). Dùng **nginx :80** (đã cài trên VPS):
+
+| Dịch vụ | URL (khuyên dùng) |
+|---------|-------------------|
+| **Queue UI** | http://160-30-19-215.sslip.io/login |
+| **Deeplink** | http://160-30-19-215.sslip.io/open/live?room_id=... |
+| **Health** | http://160-30-19-215.sslip.io/health |
+
+**DNS không resolve (sslip.io)?** Dùng IP trực tiếp (vẫn port 80):
+
+- http://160.30.19.215/login
+- Hoặc DNS dự phòng: http://160.30.19.215.nip.io/login
+
+Cài/cập nhật proxy: `bash server/nginx/setup-click-live-proxy.sh`
+
 ## Domain free (không đăng ký)
 
 | Dịch vụ | URL |
 |---------|-----|
-| **sslip.io** | `http://160-30-19-215.sslip.io:8787/login` (queue UI) |
-| IP gốc | `http://160.30.19.215:8787/login` |
+| **sslip.io** | `http://160-30-19-215.sslip.io/login` |
+| **nip.io** | `http://160.30.19.215.nip.io/login` |
+| IP gốc | `http://160.30.19.215/login` |
 
-`160-30-19-215.sslip.io` trỏ tự động tới `160.30.19.215` — không cần tạo tài khoản.
+`:8787` / `:8792` vẫn chạy nhưng **có thể bị chặn** ở một số quốc gia — ưu tiên **không ghi port** (mặc định 80).
 
 ## VPS — cài frps (đã chạy script)
 
