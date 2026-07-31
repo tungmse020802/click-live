@@ -36,7 +36,14 @@ function httpRequestJson(urlStr, { method = "GET", body = null, timeoutMs = 1200
             return;
           }
           if (res.statusCode >= 400) {
-            reject(new Error(data?.error || `HTTP ${res.statusCode}`));
+            const msg = data?.error || `HTTP ${res.statusCode}`;
+            if (/Chưa đăng nhập/i.test(msg)) {
+              reject(new Error(
+                "Server chua cap nhat API desktop login. Admin can deploy: server/telegram_bot/deploy_to_server.sh"
+              ));
+              return;
+            }
+            reject(new Error(msg));
             return;
           }
           resolve(data);
