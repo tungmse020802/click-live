@@ -1,10 +1,19 @@
 # Desktop Tool
 
-App Electron chạy nền — mở **countdown link trong Google Chrome** từ queue UI. Mỗi lần nhấn **Mở link** → **tab mới trong cùng một cửa sổ Chrome** (không mở thêm cửa sổ), tự đóng tab sau 30 giây.
+App Electron chạy nền — mở **countdown link trong Google Chrome** từ queue UI. Mỗi lần nhấn **Mở link** → **tab mới trong cùng một cửa sổ Chrome**. **Auto-click chỉ theo tab mở cuối cùng**; tab hết hạn đóng từng cái, **tab cuối được giữ lại**.
 
 ## Cài & chạy
 
 ### macOS / Linux
+
+**Combo pull → run (macOS / Linux):**
+
+```bash
+cd desktop-tool
+./run.sh
+```
+
+Hoặc thủ công:
 
 ```bash
 cd desktop-tool

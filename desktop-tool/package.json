@@ -6,6 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "electron .",
+    "pull": "cd .. && git pull --ff-only",
+    "run": "bash run.sh",
     "dev": "electron .",
     "check": "node --check src/main.js && node --check src/server.js"
   },

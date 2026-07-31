@@ -38,7 +38,9 @@ const POLL_MS = Number(process.env.DESKTOP_TOOL_POLL_MS) || 2000;
 const TAB_CLOSE_AFTER_END_MS = Number(process.env.DESKTOP_TAB_CLOSE_AFTER_END_MS) || 30_000;
 
 const openEntries = new Map();
-const clickTimers = new Map();
+/** Chỉ tab mở cuối cùng được auto-click. */
+let activeTabKey = null;
+let activeClickTimer = null;
 let tray = null;
 let settingsWindow = null;
 let stopPoller = null;
@@ -58,17 +60,57 @@ function notifySchedule(payload) {
   }
 }
 
-function clearEntryTimers(entry) {
-  if (entry?.closeTimer) clearTimeout(entry.closeTimer);
-  if (entry?.jobId != null && clickTimers.has(String(entry.jobId))) {
-    clearTimeout(clickTimers.get(String(entry.jobId)));
-    clickTimers.delete(String(entry.jobId));
+function clearEntryCloseTimer(entry) {
+  if (entry?.closeTimer) {
+    clearTimeout(entry.closeTimer);
+    entry.closeTimer = null;
   }
 }
 
-async function scheduleDesktopClick({ url, clickAfterMs = 0, jobId = null, timeLabel = "" } = {}) {
+function cancelActiveClickTimer() {
+  if (activeClickTimer) {
+    clearTimeout(activeClickTimer);
+    activeClickTimer = null;
+  }
+}
+
+function getLatestEntry() {
+  let latest = null;
+  for (const entry of openEntries.values()) {
+    if (!latest || entry.openedAt > latest.openedAt) latest = entry;
+  }
+  return latest;
+}
+
+function scheduleTabClose(entry, closeWaitMs) {
+  clearEntryCloseTimer(entry);
+  entry.closeTimer = setTimeout(() => {
+    entry.closeTimer = null;
+    if (openEntries.size <= 1) {
+      console.log(`Giữ tab cuối — không đóng: ${entry.urlKey}`);
+      return;
+    }
+    closeChromeTab(entry.url).finally(() => {
+      openEntries.delete(entry.urlKey);
+      if (activeTabKey === entry.urlKey) {
+        activeTabKey = getLatestEntry()?.urlKey ?? null;
+      }
+    });
+  }, closeWaitMs);
+}
+
+async function scheduleDesktopClick({
+  urlKey,
+  url,
+  clickAfterMs = 0,
+  jobId = null,
+  timeLabel = "",
+} = {}) {
   const settings = loadSettings();
   if (!settings.autoClickEnabled) return null;
+
+  cancelActiveClickTimer();
+  activeTabKey = urlKey;
 
   const schedule = await computeCountdownSchedule(url, {
     clickAfterMs,
@@ -79,8 +121,7 @@ async function scheduleDesktopClick({ url, clickAfterMs = 0, jobId = null, timeL
 
   if (schedule.clickWaitMs <= 0 && !schedule.endTimeMs) return schedule;
 
-  const key = jobId != null ? String(jobId) : `open-${Date.now()}`;
-  if (clickTimers.has(key)) clearTimeout(clickTimers.get(key));
+  const key = jobId != null ? String(jobId) : urlKey;
 
   const sec = (schedule.clickWaitMs / 1000).toFixed(2);
   const label = schedule.endTimeMs
@@ -96,8 +137,12 @@ async function scheduleDesktopClick({ url, clickAfterMs = 0, jobId = null, timeL
     endTimeMs: schedule.endTimeMs,
   });
 
-  const timer = setTimeout(async () => {
-    clickTimers.delete(key);
+  activeClickTimer = setTimeout(async () => {
+    activeClickTimer = null;
+    if (activeTabKey !== urlKey) {
+      console.log(`Skip click job #${key} — tab mới hơn đang active`);
+      return;
+    }
     try {
       ensureAccessibility(true);
       const latest = loadSettings();
@@ -116,8 +161,7 @@ async function scheduleDesktopClick({ url, clickAfterMs = 0, jobId = null, timeL
     }
   }, schedule.clickWaitMs);
 
-  clickTimers.set(key, timer);
-  console.log(`Click at countdown 0.0s in ${schedule.clickWaitMs}ms, close tab in ${schedule.closeWaitMs}ms (job ${key})`);
+  console.log(`Click tab active (${urlKey}) in ${schedule.clickWaitMs}ms, close tab in ${schedule.closeWaitMs}ms (job ${key})`);
   return schedule;
 }
 
@@ -139,16 +183,14 @@ async function openCountdownTab({
 
   const existing = openEntries.get(urlKey);
   if (existing) {
-    clearEntryTimers(existing);
     focusChromeTab(existing.url).catch((err) => {
       console.warn("Chrome focus failed:", err.message || err);
     });
-    existing.closeTimer = setTimeout(() => {
-      closeChromeTab(existing.url).finally(() => openEntries.delete(urlKey));
-    }, schedule.closeWaitMs);
     existing.openedAt = Date.now();
     existing.jobId = jobId;
-    scheduleDesktopClick({ url: cleanUrl, clickAfterMs, jobId, timeLabel }).catch((err) => {
+    activeTabKey = urlKey;
+    scheduleTabClose(existing, schedule.closeWaitMs);
+    scheduleDesktopClick({ urlKey, url: cleanUrl, clickAfterMs, jobId, timeLabel }).catch((err) => {
       console.warn("Schedule click failed:", err.message || err);
     });
     return { tabId: urlKey, deduplicated: true, schedule };
@@ -158,22 +200,21 @@ async function openCountdownTab({
     console.error("Chrome open failed:", err.message || err);
   });
 
-  const closeTimer = setTimeout(() => {
-    closeChromeTab(cleanUrl).finally(() => openEntries.delete(urlKey));
-  }, schedule.closeWaitMs);
-
-  openEntries.set(urlKey, {
+  const entry = {
     url: cleanUrl,
     urlKey,
     jobId,
-    closeTimer,
+    closeTimer: null,
     openedAt: Date.now(),
-  });
+  };
+  openEntries.set(urlKey, entry);
+  activeTabKey = urlKey;
+  scheduleTabClose(entry, schedule.closeWaitMs);
 
-  scheduleDesktopClick({ url: cleanUrl, clickAfterMs, jobId, timeLabel }).catch((err) => {
+  scheduleDesktopClick({ urlKey, url: cleanUrl, clickAfterMs, jobId, timeLabel }).catch((err) => {
     console.warn("Schedule click failed:", err.message || err);
   });
-  console.log(`Opened countdown — close ${(schedule.closeWaitMs / 1000).toFixed(1)}s after open (≈30s sau 0.0s)`);
+  console.log(`Opened countdown — tab active, close sau 0.0s nếu còn tab khác`);
   return { tabId: urlKey, deduplicated: false, schedule };
 }
 
@@ -232,7 +273,7 @@ async function startServer() {
     getSettings: loadSettings,
   });
   console.log(`Desktop-tool API http://127.0.0.1:${port}`);
-  console.log(`Chrome: ${CHROME_APP} — 1 cửa sổ, mỗi link = tab mới, đóng tab +30s sau 0.0s`);
+  console.log(`Chrome: ${CHROME_APP} — 1 cửa sổ, click theo tab mở cuối, giữ tab cuối khi hết hạn`);
   return port;
 }
 
@@ -301,12 +342,10 @@ app.on("window-all-closed", (event) => {
 app.on("before-quit", () => {
   shutdownWinClickHelper();
   if (stopPoller) stopPoller();
+  cancelActiveClickTimer();
   for (const entry of openEntries.values()) {
-    clearEntryTimers(entry);
-  }
-  for (const timer of clickTimers.values()) {
-    clearTimeout(timer);
+    clearEntryCloseTimer(entry);
   }
   openEntries.clear();
-  clickTimers.clear();
+  activeTabKey = null;
 });
