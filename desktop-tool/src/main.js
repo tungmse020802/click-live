@@ -9,12 +9,22 @@ const {
 } = require("./server");
 const { startDesktopPoller } = require("./poll");
 const { desktopLogin } = require("./auth");
-const { openChromeUrl, focusChromeTab, closeChromeTab, CHROME_APP, resolveChromeBin } = require("./chrome");
 const { loadSettings, saveSettings, adjustDelayOffset } = require("./settings");
 const { clickScreenPoint, warmUpWinClickHelper, shutdownWinClickHelper } = require("./desktop-click");
 const { pickPointOnScreen } = require("./pick-point");
 const { ensureAccessibility } = require("./accessibility");
-const { computeCountdownSchedule, computeClickFireDelayMs, waitUntilClickTarget } = require("./junb-url");
+const {
+  computeCountdownSchedule,
+  computeClickFireDelayMs,
+  waitUntilClickTarget,
+  resolveClickExecutionLeadMs,
+} = require("./junb-url");
+const {
+  ensureCountdownOverlay,
+  setCountdownOverlay,
+  clearCountdownOverlay,
+  destroyCountdownOverlay,
+} = require("./countdown-overlay");
 const { envFilePath, isPackaged } = require("./paths");
 
 function loadDotEnv() {
@@ -40,14 +50,15 @@ if (process.platform === "win32") {
 const PORT = Number(process.env.DESKTOP_TOOL_PORT) || DEFAULT_PORT;
 const QUEUE_URL = process.env.DESKTOP_TOOL_QUEUE_URL || "";
 const POLL_MS = Number(process.env.DESKTOP_TOOL_POLL_MS) || 2000;
-const TAB_CLOSE_AFTER_END_MS = Number(process.env.DESKTOP_TAB_CLOSE_AFTER_END_MS) || 30_000;
 
-const openEntries = new Map();
-/** Chỉ tab mở cuối cùng được auto-click. */
-let activeTabKey = null;
+const jobEntries = new Map();
+/** Chỉ job mở cuối cùng được auto-click. */
+let activeJobKey = null;
 let activeClickTimer = null;
-/** Tăng mỗi lần mở tab — timing/click chỉ áp dụng cho seq mới nhất. */
+/** Tăng mỗi lần mở job — timing/click chỉ áp dụng cho seq mới nhất. */
 let openSequence = 0;
+/** Overlay đếm giờ — cập nhật khi offset đổi. */
+let activeOverlayTiming = null;
 let tray = null;
 let settingsWindow = null;
 let stopPoller = null;
@@ -72,17 +83,27 @@ if (isPackaged()) {
   }
 }
 
-function notifySchedule(payload) {
-  if (settingsWindow && !settingsWindow.isDestroyed()) {
-    settingsWindow.webContents.send("countdown-schedule", payload);
+function syncCountdownOverlay() {
+  if (!activeOverlayTiming) {
+    clearCountdownOverlay();
+    return;
   }
+  const settings = loadSettings();
+  const offsetMs = Number(settings.delayOffsetMs) || 0;
+  const { schedule, fireDelayMs, scheduledAt } = activeOverlayTiming;
+  let targetAtMs;
+  if (schedule.endTimeMs) {
+    targetAtMs = schedule.endTimeMs + offsetMs;
+  } else {
+    const lead = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
+    targetAtMs = scheduledAt + Math.max(0, Number(fireDelayMs) || 0) + lead;
+  }
+  setCountdownOverlay({ active: true, targetAtMs });
 }
 
-function clearEntryCloseTimer(entry) {
-  if (entry?.closeTimer) {
-    clearTimeout(entry.closeTimer);
-    entry.closeTimer = null;
-  }
+function clearOverlayTiming() {
+  activeOverlayTiming = null;
+  clearCountdownOverlay();
 }
 
 function cancelActiveClickTimer() {
@@ -95,6 +116,7 @@ function cancelActiveClickTimer() {
 function beginOpenSequence() {
   openSequence += 1;
   cancelActiveClickTimer();
+  clearOverlayTiming();
   return openSequence;
 }
 
@@ -102,35 +124,24 @@ function isLatestOpenSequence(seq) {
   return seq === openSequence;
 }
 
-function isActiveLatestTab(urlKey, seq) {
+function isActiveLatestJob(urlKey, seq) {
   if (!isLatestOpenSequence(seq)) return false;
   const latest = getLatestEntry();
-  return latest?.urlKey === urlKey && activeTabKey === urlKey;
+  return latest?.urlKey === urlKey && activeJobKey === urlKey;
 }
 
 function getLatestEntry() {
   let latest = null;
-  for (const entry of openEntries.values()) {
+  for (const entry of jobEntries.values()) {
     if (!latest || entry.openedAt > latest.openedAt) latest = entry;
   }
   return latest;
 }
 
-function scheduleTabClose(entry, closeWaitMs) {
-  clearEntryCloseTimer(entry);
-  entry.closeTimer = setTimeout(() => {
-    entry.closeTimer = null;
-    if (openEntries.size <= 1) {
-      console.log(`Giữ tab cuối — không đóng: ${entry.urlKey}`);
-      return;
-    }
-    closeChromeTab(entry.url).finally(() => {
-      openEntries.delete(entry.urlKey);
-      if (activeTabKey === entry.urlKey) {
-        activeTabKey = getLatestEntry()?.urlKey ?? null;
-      }
-    });
-  }, closeWaitMs);
+function notifySchedule(payload) {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.webContents.send("countdown-schedule", payload);
+  }
 }
 
 async function scheduleDesktopClick({
@@ -145,21 +156,20 @@ async function scheduleDesktopClick({
   openSequence: seq = 0,
 } = {}) {
   const settings = loadSettings();
-  if (!settings.autoClickEnabled) return presetSchedule;
 
   if (!isLatestOpenSequence(seq)) {
-    console.log(`Skip schedule seq=${seq} — tab Chrome cuối là seq=${openSequence}`);
+    console.log(`Skip schedule seq=${seq} — job cuối là seq=${openSequence}`);
     return presetSchedule;
   }
 
   cancelActiveClickTimer();
-  activeTabKey = urlKey;
+  activeJobKey = urlKey;
 
   const schedule = presetSchedule || await computeCountdownSchedule(url, {
     clickAfterMs,
     delayOffsetMs: settings.delayOffsetMs,
     defaultWaitMs: settings.defaultWaitMs,
-    tabCloseAfterEndMs: TAB_CLOSE_AFTER_END_MS,
+    tabCloseAfterEndMs: 0,
     timeLabel,
     queuedAtMs,
     endTimeMs: presetEndTimeMs,
@@ -177,6 +187,12 @@ async function scheduleDesktopClick({
   const fireDelayMs = schedule.endTimeMs
     ? computeClickFireDelayMs(schedule, offsetMs)
     : Math.max(0, Number(schedule.clickWaitMs) || 0);
+
+  activeOverlayTiming = { schedule, fireDelayMs, scheduledAt: Date.now() };
+  syncCountdownOverlay();
+
+  if (!settings.autoClickEnabled) return schedule;
+
   const displaySec = schedule.endTimeMs
     ? ((schedule.endTimeMs - Date.now() + offsetMs) / 1000).toFixed(2)
     : null;
@@ -199,19 +215,19 @@ async function scheduleDesktopClick({
 
   activeClickTimer = setTimeout(async () => {
     activeClickTimer = null;
-    if (!isActiveLatestTab(urlKey, seq)) {
-      console.log(`Skip click job #${key} — chỉ tab Chrome cuối (seq=${openSequence})`);
+    if (!isActiveLatestJob(urlKey, seq)) {
+      console.log(`Skip click job #${key} — chỉ job cuối (seq=${openSequence})`);
       return;
     }
     try {
       const latest = loadSettings();
       if (schedule.endTimeMs) {
         await waitUntilClickTarget(schedule.endTimeMs, latest.delayOffsetMs, {
-          shouldAbort: () => !isActiveLatestTab(urlKey, seq),
+          shouldAbort: () => !isActiveLatestJob(urlKey, seq),
         });
       }
-      if (!isActiveLatestTab(urlKey, seq)) {
-        console.log(`Skip click job #${key} sau chờ timing — tab mới hơn`);
+      if (!isActiveLatestJob(urlKey, seq)) {
+        console.log(`Skip click job #${key} sau chờ timing — job mới hơn`);
         return;
       }
       if (process.platform === "darwin") ensureAccessibility(true);
@@ -224,13 +240,15 @@ async function scheduleDesktopClick({
         method: result.method,
       });
       console.log(`Desktop click job #${key} at ${result.x},${result.y} (${result.method}) offset=${latest.delayOffsetMs}ms`);
+      clearOverlayTiming();
     } catch (err) {
       console.error("Desktop click failed:", err.message || err);
       notifySchedule({ type: "error", jobId: key, error: String(err.message || err) });
+      clearOverlayTiming();
     }
   }, fireDelayMs);
 
-  console.log(`Click tab active (${urlKey}) fire in ${fireDelayMs}ms (display≈${displaySec ?? "?"}s + offset ${offsetMs}ms, lead ${schedule.executionLeadMs ?? "?"}ms)`);
+  console.log(`Click job active (${urlKey}) fire in ${fireDelayMs}ms (display≈${displaySec ?? "?"}s + offset ${offsetMs}ms, lead ${schedule.executionLeadMs ?? "?"}ms)`);
   return schedule;
 }
 
@@ -247,49 +265,34 @@ async function openCountdownTab({
   const urlKey = normalizeOpenUrl(cleanUrl) || cleanUrl;
   const settings = loadSettings();
 
-  const existing = openEntries.get(urlKey);
-  if (existing) {
-    focusChromeTab(existing.url).catch((err) => {
-      console.warn("Chrome focus failed:", err.message || err);
-    });
-    existing.openedAt = Date.now();
-    existing.jobId = jobId;
-    existing.openSequence = seq;
-  } else {
-    openChromeUrl(cleanUrl).catch((err) => {
-      console.error("Chrome open failed:", err.message || err);
-    });
-
-    const entry = {
-      url: cleanUrl,
-      urlKey,
-      jobId,
-      closeTimer: null,
-      openedAt: Date.now(),
-      openSequence: seq,
-    };
-    openEntries.set(urlKey, entry);
-  }
-
-  activeTabKey = urlKey;
+  const existing = jobEntries.get(urlKey);
+  const entry = existing || {
+    url: cleanUrl,
+    urlKey,
+    jobId,
+    openedAt: Date.now(),
+    openSequence: seq,
+  };
+  entry.openedAt = Date.now();
+  entry.jobId = jobId;
+  entry.openSequence = seq;
+  jobEntries.set(urlKey, entry);
+  activeJobKey = urlKey;
 
   const schedule = await computeCountdownSchedule(cleanUrl, {
     clickAfterMs,
     delayOffsetMs: settings.delayOffsetMs,
     defaultWaitMs: settings.defaultWaitMs,
-    tabCloseAfterEndMs: TAB_CLOSE_AFTER_END_MS,
+    tabCloseAfterEndMs: 0,
     timeLabel,
     queuedAtMs,
     endTimeMs: presetEndTimeMs,
   });
 
   if (!isLatestOpenSequence(seq)) {
-    console.log(`Bỏ timing tab seq=${seq} — tab Chrome cuối seq=${openSequence}`);
+    console.log(`Bỏ timing job seq=${seq} — job cuối seq=${openSequence}`);
     return { tabId: urlKey, deduplicated: Boolean(existing), skipped: true, schedule };
   }
-
-  const entry = openEntries.get(urlKey);
-  scheduleTabClose(entry, schedule.closeWaitMs);
 
   scheduleDesktopClick({
     urlKey,
@@ -305,13 +308,8 @@ async function openCountdownTab({
     console.warn("Schedule click failed:", err.message || err);
   });
 
-  if (existing) {
-    console.log(`Refocus tab active (${urlKey}) seq=${seq}`);
-    return { tabId: urlKey, deduplicated: true, schedule };
-  }
-
-  console.log(`Opened countdown — tab active seq=${seq}, close sau 0.0s nếu còn tab khác`);
-  return { tabId: urlKey, deduplicated: false, schedule };
+  console.log(`Countdown overlay seq=${seq}${existing ? " (dedup)" : ""}`);
+  return { tabId: urlKey, deduplicated: Boolean(existing), schedule };
 }
 
 function getPollerCredentials() {
@@ -347,7 +345,11 @@ function restartPoller() {
 function registerIpcHandlers() {
   ipcMain.handle("settings:get", () => loadSettings());
   ipcMain.handle("settings:save", (_event, partial) => saveSettings(partial || {}));
-  ipcMain.handle("settings:adjust-delay", (_event, deltaMs) => adjustDelayOffset(Number(deltaMs) || 0));
+  ipcMain.handle("settings:adjust-delay", async (_event, deltaMs) => {
+    const result = adjustDelayOffset(Number(deltaMs) || 0);
+    syncCountdownOverlay();
+    return result;
+  });
   ipcMain.handle("settings:pick-point", async () => {
     if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.hide();
     try {
@@ -450,10 +452,7 @@ async function startServer() {
   if (isPackaged()) {
     console.log(`Config: ${envFilePath()}`);
   }
-  console.log(`Chrome: ${CHROME_APP} — 1 cửa sổ, click theo tab mở cuối, giữ tab cuối khi hết hạn`);
-  if (process.platform === "win32") {
-    console.log(`Chrome bin: ${resolveChromeBin()}`);
-  }
+  console.log("Đếm giờ: overlay góc trái trên — không mở Chrome countdown");
   return port;
 }
 
@@ -483,14 +482,14 @@ function createTray(port) {
   tray.setToolTip("Click Live Desktop Tool");
 
   const rebuild = () => {
-    const tabs = openEntries.size;
+    const jobs = jobEntries.size;
     const { queueUsername } = getPollerCredentials();
     const userLabel = queueUsername ? ` · ${queueUsername}` : "";
     tray.setContextMenu(
       Menu.buildFromTemplate([
         { label: `API :${port}`, enabled: false },
         { label: `Queue${userLabel}`, enabled: false },
-        { label: `Chrome tab: ${tabs}`, enabled: false },
+        { label: `Job đang chờ: ${jobs}`, enabled: false },
         { type: "separator" },
         { label: "Cài đặt đếm giờ & click", click: () => showSettingsWindow() },
         { type: "separator" },
@@ -518,6 +517,7 @@ app.whenReady().then(async () => {
 
   try {
     const port = await startServer();
+    ensureCountdownOverlay();
     showSettingsWindow();
     try {
       createTray(port);
@@ -547,9 +547,8 @@ app.on("before-quit", () => {
   shutdownWinClickHelper();
   if (stopPoller) stopPoller();
   cancelActiveClickTimer();
-  for (const entry of openEntries.values()) {
-    clearEntryCloseTimer(entry);
-  }
-  openEntries.clear();
-  activeTabKey = null;
+  destroyCountdownOverlay();
+  jobEntries.clear();
+  activeJobKey = null;
+  activeOverlayTiming = null;
 });
