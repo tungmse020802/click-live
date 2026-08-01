@@ -46,6 +46,8 @@ const openEntries = new Map();
 /** Chỉ tab mở cuối cùng được auto-click. */
 let activeTabKey = null;
 let activeClickTimer = null;
+/** Tăng mỗi lần mở tab — timing/click chỉ áp dụng cho seq mới nhất. */
+let openSequence = 0;
 let tray = null;
 let settingsWindow = null;
 let stopPoller = null;
@@ -90,6 +92,22 @@ function cancelActiveClickTimer() {
   }
 }
 
+function beginOpenSequence() {
+  openSequence += 1;
+  cancelActiveClickTimer();
+  return openSequence;
+}
+
+function isLatestOpenSequence(seq) {
+  return seq === openSequence;
+}
+
+function isActiveLatestTab(urlKey, seq) {
+  if (!isLatestOpenSequence(seq)) return false;
+  const latest = getLatestEntry();
+  return latest?.urlKey === urlKey && activeTabKey === urlKey;
+}
+
 function getLatestEntry() {
   let latest = null;
   for (const entry of openEntries.values()) {
@@ -122,9 +140,17 @@ async function scheduleDesktopClick({
   clickAfterMs = 0,
   jobId = null,
   timeLabel = "",
+  queuedAtMs = null,
+  endTimeMs: presetEndTimeMs = null,
+  openSequence: seq = 0,
 } = {}) {
   const settings = loadSettings();
   if (!settings.autoClickEnabled) return presetSchedule;
+
+  if (!isLatestOpenSequence(seq)) {
+    console.log(`Skip schedule seq=${seq} — tab Chrome cuối là seq=${openSequence}`);
+    return presetSchedule;
+  }
 
   cancelActiveClickTimer();
   activeTabKey = urlKey;
@@ -135,20 +161,29 @@ async function scheduleDesktopClick({
     defaultWaitMs: settings.defaultWaitMs,
     tabCloseAfterEndMs: TAB_CLOSE_AFTER_END_MS,
     timeLabel,
+    queuedAtMs,
+    endTimeMs: presetEndTimeMs,
   });
+
+  if (!isLatestOpenSequence(seq)) {
+    console.log(`Skip timing seq=${seq} sau resolve — tab cuối seq=${openSequence}`);
+    return schedule;
+  }
 
   if (schedule.clickWaitMs <= 0 && !schedule.endTimeMs) return schedule;
 
   const key = jobId != null ? String(jobId) : urlKey;
   const offsetMs = Number(settings.delayOffsetMs) || 0;
-  const fireDelayMs = computeClickFireDelayMs(schedule, offsetMs);
+  const fireDelayMs = schedule.endTimeMs
+    ? computeClickFireDelayMs(schedule, offsetMs)
+    : Math.max(0, Number(schedule.clickWaitMs) || 0);
   const displaySec = schedule.endTimeMs
     ? ((schedule.endTimeMs - Date.now() + offsetMs) / 1000).toFixed(2)
     : null;
 
   const sec = (fireDelayMs / 1000).toFixed(2);
   const label = schedule.endTimeMs
-    ? `${schedule.source === "thanhtai_end_time" ? "thanhtai" : schedule.source === "junb_end_time" ? "junb" : schedule.source} click @ ${displaySec}s (offset ${offsetMs >= 0 ? "+" : ""}${(offsetMs / 1000).toFixed(2)}s)`
+    ? `${schedule.source === "thanhtai_end_time" ? "thanhtai" : schedule.source === "junb_end_time" ? "junb" : schedule.source === "server_end_time" ? "server" : schedule.source === "queued_click_after" ? "queue+after" : schedule.source} click @ ${displaySec}s (offset ${offsetMs >= 0 ? "+" : ""}${(offsetMs / 1000).toFixed(2)}s)`
     : (timeLabel || `${sec}s`);
 
   notifySchedule({
@@ -164,14 +199,20 @@ async function scheduleDesktopClick({
 
   activeClickTimer = setTimeout(async () => {
     activeClickTimer = null;
-    if (activeTabKey !== urlKey) {
-      console.log(`Skip click job #${key} — tab mới hơn đang active`);
+    if (!isActiveLatestTab(urlKey, seq)) {
+      console.log(`Skip click job #${key} — chỉ tab Chrome cuối (seq=${openSequence})`);
       return;
     }
     try {
       const latest = loadSettings();
       if (schedule.endTimeMs) {
-        await waitUntilClickTarget(schedule.endTimeMs, latest.delayOffsetMs);
+        await waitUntilClickTarget(schedule.endTimeMs, latest.delayOffsetMs, {
+          shouldAbort: () => !isActiveLatestTab(urlKey, seq),
+        });
+      }
+      if (!isActiveLatestTab(urlKey, seq)) {
+        console.log(`Skip click job #${key} sau chờ timing — tab mới hơn`);
+        return;
       }
       if (process.platform === "darwin") ensureAccessibility(true);
       const result = await clickScreenPoint(latest.clickX, latest.clickY);
@@ -198,17 +239,13 @@ async function openCountdownTab({
   jobId = null,
   clickAfterMs = 0,
   timeLabel = "",
+  queuedAtMs = null,
+  endTimeMs: presetEndTimeMs = null,
 } = {}) {
+  const seq = beginOpenSequence();
   const cleanUrl = decodeHtmlUrl(url);
   const urlKey = normalizeOpenUrl(cleanUrl) || cleanUrl;
   const settings = loadSettings();
-  const schedule = await computeCountdownSchedule(cleanUrl, {
-    clickAfterMs,
-    delayOffsetMs: settings.delayOffsetMs,
-    defaultWaitMs: settings.defaultWaitMs,
-    tabCloseAfterEndMs: TAB_CLOSE_AFTER_END_MS,
-    timeLabel,
-  });
 
   const existing = openEntries.get(urlKey);
   if (existing) {
@@ -217,34 +254,41 @@ async function openCountdownTab({
     });
     existing.openedAt = Date.now();
     existing.jobId = jobId;
-    activeTabKey = urlKey;
-    scheduleTabClose(existing, schedule.closeWaitMs);
-    scheduleDesktopClick({
-      urlKey,
-      url: cleanUrl,
-      schedule,
-      clickAfterMs,
-      jobId,
-      timeLabel,
-    }).catch((err) => {
-      console.warn("Schedule click failed:", err.message || err);
+    existing.openSequence = seq;
+  } else {
+    openChromeUrl(cleanUrl).catch((err) => {
+      console.error("Chrome open failed:", err.message || err);
     });
-    return { tabId: urlKey, deduplicated: true, schedule };
+
+    const entry = {
+      url: cleanUrl,
+      urlKey,
+      jobId,
+      closeTimer: null,
+      openedAt: Date.now(),
+      openSequence: seq,
+    };
+    openEntries.set(urlKey, entry);
   }
 
-  openChromeUrl(cleanUrl).catch((err) => {
-    console.error("Chrome open failed:", err.message || err);
+  activeTabKey = urlKey;
+
+  const schedule = await computeCountdownSchedule(cleanUrl, {
+    clickAfterMs,
+    delayOffsetMs: settings.delayOffsetMs,
+    defaultWaitMs: settings.defaultWaitMs,
+    tabCloseAfterEndMs: TAB_CLOSE_AFTER_END_MS,
+    timeLabel,
+    queuedAtMs,
+    endTimeMs: presetEndTimeMs,
   });
 
-  const entry = {
-    url: cleanUrl,
-    urlKey,
-    jobId,
-    closeTimer: null,
-    openedAt: Date.now(),
-  };
-  openEntries.set(urlKey, entry);
-  activeTabKey = urlKey;
+  if (!isLatestOpenSequence(seq)) {
+    console.log(`Bỏ timing tab seq=${seq} — tab Chrome cuối seq=${openSequence}`);
+    return { tabId: urlKey, deduplicated: Boolean(existing), skipped: true, schedule };
+  }
+
+  const entry = openEntries.get(urlKey);
   scheduleTabClose(entry, schedule.closeWaitMs);
 
   scheduleDesktopClick({
@@ -254,10 +298,19 @@ async function openCountdownTab({
     clickAfterMs,
     jobId,
     timeLabel,
+    queuedAtMs,
+    endTimeMs: presetEndTimeMs,
+    openSequence: seq,
   }).catch((err) => {
     console.warn("Schedule click failed:", err.message || err);
   });
-  console.log(`Opened countdown — tab active, close sau 0.0s nếu còn tab khác`);
+
+  if (existing) {
+    console.log(`Refocus tab active (${urlKey}) seq=${seq}`);
+    return { tabId: urlKey, deduplicated: true, schedule };
+  }
+
+  console.log(`Opened countdown — tab active seq=${seq}, close sau 0.0s nếu còn tab khác`);
   return { tabId: urlKey, deduplicated: false, schedule };
 }
 

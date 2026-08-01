@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from config import QueueUiConfig
+from config import QueueUiConfig, queue_users_map
 from desktop_auth import verify_queue_user
 
 
@@ -37,7 +37,7 @@ def load_or_create_auth_secret(base_dir: Path, auth_enabled: bool) -> str:
 def verify_credentials(username: str, password: str, config: QueueUiConfig) -> bool:
     if not config.auth_enabled:
         return True
-    users = getattr(config, "queue_users", None) or {}
+    users = queue_users_map(config)
     if users:
         return verify_queue_user(username, password, users)
     return hmac.compare_digest(username, config.auth_username) and hmac.compare_digest(

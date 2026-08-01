@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from config import QueueUiConfig, queue_users_map
+from countdown_timing import resolve_countdown_end_time_ms
 from desktop_auth import resolve_username_from_desktop_token
 
 _lock = threading.Lock()
@@ -94,6 +95,7 @@ def enqueue_open(
                     "url": target,
                     "queue_user": user,
                 }
+        end_time_ms = resolve_countdown_end_time_ms(target)
         _pending.append(
             {
                 "url": target,
@@ -104,6 +106,8 @@ def enqueue_open(
                 "time_label": str(time_label or "").strip(),
                 "queue_user": user,
                 "created_at": now,
+                "queued_at_ms": int(now * 1000),
+                "end_time_ms": end_time_ms,
             }
         )
         return {
@@ -151,6 +155,8 @@ def pull_pending(token: str, config: QueueUiConfig) -> Dict[str, Any]:
                     "click_after_ms": item.get("click_after_ms") or 0,
                     "time_label": item.get("time_label") or "",
                     "queue_user": queue_user,
+                    "queued_at_ms": item.get("queued_at_ms") or int(now * 1000),
+                    "end_time_ms": item.get("end_time_ms"),
                 }
             ],
         }

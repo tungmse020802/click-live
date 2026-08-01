@@ -56,21 +56,25 @@ function startDesktopPoller({ queueUrl, pullToken, queueUsername, intervalMs, on
         return;
       }
       if (!Array.isArray(data.opens)) return;
-      if (data.opens.length > 0) {
-        const who = data.queue_user ? ` user=${data.queue_user}` : "";
-        console.log(`Desktop poll: ${data.opens.length} link(s)${who}`);
-      }
-      for (const item of data.opens) {
-        const target = String(item.url || "").trim();
-        if (!target) continue;
-        onOpen({
-          url: target,
+      const opens = data.opens
+        .map((item) => ({
+          url: String(item.url || "").trim(),
           ttlMs: (Number(item.ttl_seconds) || 30) * 1000,
           jobId: item.job_id ?? null,
           clickAfterMs: Number(item.click_after_ms) || 0,
           timeLabel: String(item.time_label || "").trim(),
-        });
+          queuedAtMs: Number(item.queued_at_ms) || null,
+          endTimeMs: Number(item.end_time_ms) || null,
+        }))
+        .filter((item) => item.url);
+      if (opens.length === 0) return;
+      if (opens.length > 1) {
+        console.log(`Desktop poll: bỏ ${opens.length - 1} link cũ, chỉ timing tab cuối`);
       }
+      const item = opens[opens.length - 1];
+      const who = data.queue_user ? ` user=${data.queue_user}` : "";
+      console.log(`Desktop poll: 1 link${who}`);
+      onOpen(item);
     } catch (err) {
       console.warn("Desktop poll failed:", err.message || err);
     } finally {

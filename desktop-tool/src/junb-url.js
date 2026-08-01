@@ -38,10 +38,13 @@ function sleepMs(ms) {
 }
 
 /** Chờ tới đúng mốc end_time + offset (trừ lead) — dùng offset mới nhất lúc sắp click. */
-async function waitUntilClickTarget(endTimeMs, delayOffsetMs = 0) {
+async function waitUntilClickTarget(endTimeMs, delayOffsetMs = 0, { shouldAbort } = {}) {
   if (!endTimeMs) return;
   const targetAt = endTimeMs + (Number(delayOffsetMs) || 0) - resolveClickExecutionLeadMs();
-  await sleepMs(targetAt - Date.now());
+  while (Date.now() < targetAt) {
+    if (typeof shouldAbort === "function" && shouldAbort()) return;
+    await sleepMs(Math.min(50, targetAt - Date.now()));
+  }
 }
 
 /** @type {Map<string, { endTimeMs: number, source: string, expiresAt: number }>} */
@@ -212,7 +215,12 @@ function fetchThanhtaiEndTimeMs(roomId, { timeoutMs = THANHTAI_WS_TIMEOUT_MS } =
   });
 }
 
-async function resolveCountdownEndTimeMs(url) {
+async function resolveCountdownEndTimeMs(url, presetEndTimeMs = null) {
+  const preset = normalizeEndTimeMs(presetEndTimeMs);
+  if (preset) {
+    return { endTimeMs: preset, source: "server_end_time" };
+  }
+
   const cacheKey = cacheKeyForUrl(url);
   const cached = endTimeCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
@@ -257,13 +265,22 @@ async function computeCountdownSchedule(
     defaultWaitMs = 0,
     tabCloseAfterEndMs = 30_000,
     timeLabel = "",
+    queuedAtMs = null,
+    endTimeMs: presetEndTimeMs = null,
   } = {},
 ) {
   const now = Date.now();
   const offset = Number(delayOffsetMs) || 0;
   const closeAfterEnd = Number(tabCloseAfterEndMs) || 30_000;
-  const resolved = await resolveCountdownEndTimeMs(url);
-  const endTimeMs = resolved.endTimeMs;
+  const queuedAt = Number(queuedAtMs) > 0 ? Math.round(Number(queuedAtMs)) : null;
+  const resolved = await resolveCountdownEndTimeMs(url, presetEndTimeMs);
+  let endTimeMs = resolved.endTimeMs;
+  let source = resolved.source;
+
+  if (!endTimeMs && queuedAt && Number(clickAfterMs) > 0) {
+    endTimeMs = queuedAt + Math.round(Number(clickAfterMs));
+    source = "queued_click_after";
+  }
 
   if (endTimeMs) {
     const clickWaitMs = computeClickFireDelayMs(
@@ -281,7 +298,7 @@ async function computeCountdownSchedule(
       endTimeMs,
       displayRemainingMs: displayRemainingMs(endTimeMs, offset, now),
       executionLeadMs: resolveClickExecutionLeadMs(),
-      source: resolved.source || "countdown_end_time",
+      source: source || resolved.source || "countdown_end_time",
     };
   }
 
