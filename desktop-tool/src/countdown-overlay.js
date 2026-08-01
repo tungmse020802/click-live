@@ -1,8 +1,8 @@
 const { BrowserWindow, screen } = require("electron");
 const path = require("path");
 
-const OVERLAY_WIDTH = 220;
-const OVERLAY_HEIGHT = 72;
+const OVERLAY_WIDTH = 320;
+const OVERLAY_HEIGHT = 100;
 const OVERLAY_MARGIN = 10;
 
 let overlayWindow = null;
