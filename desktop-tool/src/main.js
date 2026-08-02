@@ -16,7 +16,9 @@ const { ensureAccessibility } = require("./accessibility");
 const {
   computeCountdownSchedule,
   computeClickFireDelayMs,
-  waitUntilClickTarget,
+  waitUntilTimestamp,
+  clickDisplayTargetMs,
+  clickExecuteAtMs,
   resolveClickExecutionLeadMs,
 } = require("./junb-url");
 const {
@@ -54,7 +56,8 @@ const POLL_MS = Number(process.env.DESKTOP_TOOL_POLL_MS) || 2000;
 const jobEntries = new Map();
 /** Chỉ job mở cuối cùng được auto-click. */
 let activeJobKey = null;
-let activeClickTimer = null;
+/** Task click đang chạy — hủy khi có job mới. */
+let activeClickTask = null;
 /** Tăng mỗi lần mở job — timing/click chỉ áp dụng cho seq mới nhất. */
 let openSequence = 0;
 /** Overlay đếm giờ — cập nhật khi offset đổi. */
@@ -90,13 +93,13 @@ function syncCountdownOverlay() {
   }
   const settings = loadSettings();
   const offsetMs = Number(settings.delayOffsetMs) || 0;
-  const { schedule, fireDelayMs, scheduledAt } = activeOverlayTiming;
+  const { schedule, scheduledAt } = activeOverlayTiming;
   let targetAtMs;
   if (schedule.endTimeMs) {
-    targetAtMs = schedule.endTimeMs + offsetMs;
+    targetAtMs = clickDisplayTargetMs(schedule.endTimeMs, offsetMs);
   } else {
     const lead = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
-    targetAtMs = scheduledAt + Math.max(0, Number(fireDelayMs) || 0) + lead;
+    targetAtMs = scheduledAt + Math.max(0, Number(schedule.clickWaitMs) || 0) + lead;
   }
   setCountdownOverlay({ active: true, targetAtMs });
 }
@@ -106,16 +109,13 @@ function clearOverlayTiming() {
   clearCountdownOverlay();
 }
 
-function cancelActiveClickTimer() {
-  if (activeClickTimer) {
-    clearTimeout(activeClickTimer);
-    activeClickTimer = null;
-  }
+function cancelActiveClickTask() {
+  activeClickTask = null;
 }
 
 function beginOpenSequence() {
   openSequence += 1;
-  cancelActiveClickTimer();
+  cancelActiveClickTask();
   clearOverlayTiming();
   return openSequence;
 }
@@ -162,7 +162,7 @@ async function scheduleDesktopClick({
     return presetSchedule;
   }
 
-  cancelActiveClickTimer();
+  cancelActiveClickTask();
   activeJobKey = urlKey;
 
   const schedule = presetSchedule || await computeCountdownSchedule(url, {
@@ -188,18 +188,19 @@ async function scheduleDesktopClick({
     ? computeClickFireDelayMs(schedule, offsetMs)
     : Math.max(0, Number(schedule.clickWaitMs) || 0);
 
-  activeOverlayTiming = { schedule, fireDelayMs, scheduledAt: Date.now() };
+  const scheduledAt = Date.now();
+  activeOverlayTiming = { schedule, scheduledAt };
   syncCountdownOverlay();
 
   if (!settings.autoClickEnabled) return schedule;
 
   const displaySec = schedule.endTimeMs
-    ? ((schedule.endTimeMs - Date.now() + offsetMs) / 1000).toFixed(2)
+    ? ((clickDisplayTargetMs(schedule.endTimeMs, offsetMs) - Date.now()) / 1000).toFixed(2)
     : null;
 
   const sec = (fireDelayMs / 1000).toFixed(2);
   const label = schedule.endTimeMs
-    ? `${schedule.source === "thanhtai_end_time" ? "thanhtai" : schedule.source === "junb_end_time" ? "junb" : schedule.source === "server_end_time" ? "server" : schedule.source === "queued_click_after" ? "queue+after" : schedule.source} click @ ${displaySec}s (offset ${offsetMs >= 0 ? "+" : ""}${(offsetMs / 1000).toFixed(2)}s)`
+    ? `${schedule.source === "thanhtai_end_time" ? "thanhtai" : schedule.source === "junb_end_time" ? "junb" : schedule.source === "server_end_time" ? "server" : schedule.source === "queued_click_after" ? "queue+after" : schedule.source === "message_clock" ? "TIME" : schedule.source} @ ${displaySec}s (offset ${offsetMs >= 0 ? "+" : ""}${(offsetMs / 1000).toFixed(2)}s)`
     : (timeLabel || `${sec}s`);
 
   notifySchedule({
@@ -213,24 +214,35 @@ async function scheduleDesktopClick({
     displayRemainingMs: displaySec != null ? Math.round(Number(displaySec) * 1000) : null,
   });
 
-  activeClickTimer = setTimeout(async () => {
-    activeClickTimer = null;
-    if (!isActiveLatestJob(urlKey, seq)) {
-      console.log(`Skip click job #${key} — chỉ job cuối (seq=${openSequence})`);
-      return;
-    }
+  const clickTask = {};
+  activeClickTask = clickTask;
+  const shouldAbort = () => activeClickTask !== clickTask || !isActiveLatestJob(urlKey, seq);
+
+  (async () => {
     try {
-      const latest = loadSettings();
-      if (schedule.endTimeMs) {
-        await waitUntilClickTarget(schedule.endTimeMs, latest.delayOffsetMs, {
-          shouldAbort: () => !isActiveLatestJob(urlKey, seq),
-        });
+      while (!shouldAbort()) {
+        const latest = loadSettings();
+        const liveOffset = Number(latest.delayOffsetMs) || 0;
+        let executeAtMs;
+        if (schedule.endTimeMs) {
+          executeAtMs = clickExecuteAtMs(schedule.endTimeMs, liveOffset);
+        } else {
+          const lead = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
+          executeAtMs = scheduledAt + Math.max(0, Number(schedule.clickWaitMs) || 0) + lead;
+        }
+        if (!executeAtMs) return;
+
+        const ok = await waitUntilTimestamp(executeAtMs, { shouldAbort });
+        if (!ok || shouldAbort()) {
+          console.log(`Skip click job #${key} — job mới hơn hoặc đã hủy`);
+          return;
+        }
+        break;
       }
-      if (!isActiveLatestJob(urlKey, seq)) {
-        console.log(`Skip click job #${key} sau chờ timing — job mới hơn`);
-        return;
-      }
+
+      if (shouldAbort()) return;
       if (process.platform === "darwin") ensureAccessibility(true);
+      const latest = loadSettings();
       const result = await clickScreenPoint(latest.clickX, latest.clickY);
       notifySchedule({
         type: "clicked",
@@ -239,16 +251,25 @@ async function scheduleDesktopClick({
         y: result.y,
         method: result.method,
       });
-      console.log(`Desktop click job #${key} at ${result.x},${result.y} (${result.method}) offset=${latest.delayOffsetMs}ms`);
+      const execLead = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
+      console.log(
+        `Desktop click job #${key} at ${result.x},${result.y} (${result.method})`
+        + ` source=${schedule.source} offset=${latest.delayOffsetMs}ms lead=${execLead}ms`
+      );
       clearOverlayTiming();
     } catch (err) {
       console.error("Desktop click failed:", err.message || err);
       notifySchedule({ type: "error", jobId: key, error: String(err.message || err) });
       clearOverlayTiming();
+    } finally {
+      if (activeClickTask === clickTask) activeClickTask = null;
     }
-  }, fireDelayMs);
+  })();
 
-  console.log(`Click job active (${urlKey}) fire in ${fireDelayMs}ms (display≈${displaySec ?? "?"}s + offset ${offsetMs}ms, lead ${schedule.executionLeadMs ?? "?"}ms)`);
+  console.log(
+    `Click job active (${urlKey}) source=${schedule.source}`
+    + ` fire≈${displaySec ?? sec}s offset=${offsetMs}ms lead=${schedule.executionLeadMs ?? "?"}ms`
+  );
   return schedule;
 }
 
@@ -546,7 +567,7 @@ app.on("window-all-closed", (event) => {
 app.on("before-quit", () => {
   shutdownWinClickHelper();
   if (stopPoller) stopPoller();
-  cancelActiveClickTimer();
+  cancelActiveClickTask();
   destroyCountdownOverlay();
   jobEntries.clear();
   activeJobKey = null;

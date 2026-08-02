@@ -6,13 +6,26 @@ const THANHTAI_WS_HOSTS = [
 ];
 
 const THANHTAI_WS_TIMEOUT_MS = 5000;
-const END_TIME_CACHE_TTL_MS = 120_000;
+const END_TIME_CACHE_TTL_MS = 5_000;
 
 function resolveClickExecutionLeadMs() {
   const env = Number(process.env.DESKTOP_CLICK_EXECUTION_LEAD_MS);
   if (Number.isFinite(env) && env >= 0) return Math.round(env);
   if (process.platform === "win32") return 200;
-  return 90;
+  return 50;
+}
+
+/** Mốc hiển thị 0.0s trên overlay (= lúc user muốn click). */
+function clickDisplayTargetMs(endTimeMs, delayOffsetMs = 0) {
+  if (!endTimeMs) return null;
+  return Math.round(endTimeMs + (Number(delayOffsetMs) || 0));
+}
+
+/** Mốc bắt đầu gọi click (sớm hơn display target một chút để bù độ trễ OS). */
+function clickExecuteAtMs(endTimeMs, delayOffsetMs = 0) {
+  const target = clickDisplayTargetMs(endTimeMs, delayOffsetMs);
+  if (!target) return null;
+  return target - resolveClickExecutionLeadMs();
 }
 
 /** ms còn lại trên đồng hồ countdown (0.0s = hết giờ) trước offset user. */
@@ -37,14 +50,24 @@ function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, wait));
 }
 
-/** Chờ tới đúng mốc end_time + offset (trừ lead) — dùng offset mới nhất lúc sắp click. */
-async function waitUntilClickTarget(endTimeMs, delayOffsetMs = 0, { shouldAbort } = {}) {
-  if (!endTimeMs) return;
-  const targetAt = endTimeMs + (Number(delayOffsetMs) || 0) - resolveClickExecutionLeadMs();
-  while (Date.now() < targetAt) {
-    if (typeof shouldAbort === "function" && shouldAbort()) return;
-    await sleepMs(Math.min(50, targetAt - Date.now()));
+/** Chờ tới timestamp tuyệt đối — một vòng chờ duy nhất, ổn định hơn setTimeout. */
+async function waitUntilTimestamp(targetMs, { shouldAbort } = {}) {
+  if (!Number.isFinite(targetMs)) return false;
+  while (Date.now() < targetMs) {
+    if (typeof shouldAbort === "function" && shouldAbort()) return false;
+    const remaining = targetMs - Date.now();
+    if (remaining > 80) await sleepMs(remaining - 40);
+    else if (remaining > 8) await sleepMs(4);
+    else await sleepMs(1);
   }
+  return !(typeof shouldAbort === "function" && shouldAbort());
+}
+
+/** @deprecated use waitUntilTimestamp(clickExecuteAtMs(...)) */
+async function waitUntilClickTarget(endTimeMs, delayOffsetMs = 0, { shouldAbort } = {}) {
+  const targetAt = clickExecuteAtMs(endTimeMs, delayOffsetMs);
+  if (!targetAt) return;
+  await waitUntilTimestamp(targetAt, { shouldAbort });
 }
 
 /** @type {Map<string, { endTimeMs: number, source: string, expiresAt: number }>} */
@@ -215,16 +238,18 @@ function fetchThanhtaiEndTimeMs(roomId, { timeoutMs = THANHTAI_WS_TIMEOUT_MS } =
   });
 }
 
-async function resolveCountdownEndTimeMs(url, presetEndTimeMs = null) {
+async function resolveCountdownEndTimeMs(url, presetEndTimeMs = null, { useCache = true } = {}) {
   const preset = normalizeEndTimeMs(presetEndTimeMs);
   if (preset) {
     return { endTimeMs: preset, source: "server_end_time" };
   }
 
   const cacheKey = cacheKeyForUrl(url);
-  const cached = endTimeCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    return { endTimeMs: cached.endTimeMs, source: cached.source };
+  if (useCache) {
+    const cached = endTimeCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return { endTimeMs: cached.endTimeMs, source: cached.source };
+    }
   }
 
   const junbEnd = parseJunbEndTimeMs(url);
@@ -257,6 +282,27 @@ async function resolveCountdownEndTimeMs(url, presetEndTimeMs = null) {
   return { endTimeMs: null, source: null };
 }
 
+function buildEndTimeSchedule(endTimeMs, {
+  now,
+  offset,
+  closeAfterEnd,
+  source,
+}) {
+  const clickWaitMs = computeClickFireDelayMs({ endTimeMs, clickWaitMs: 0 }, offset, now);
+  const closeWaitMs = Math.max(
+    clickWaitMs + closeAfterEnd,
+    Math.round(endTimeMs - now + closeAfterEnd),
+  );
+  return {
+    clickWaitMs,
+    closeWaitMs,
+    endTimeMs,
+    displayRemainingMs: displayRemainingMs(endTimeMs, offset, now),
+    executionLeadMs: resolveClickExecutionLeadMs(),
+    source,
+  };
+}
+
 async function computeCountdownSchedule(
   url,
   {
@@ -269,11 +315,23 @@ async function computeCountdownSchedule(
     endTimeMs: presetEndTimeMs = null,
   } = {},
 ) {
-  const now = Date.now();
   const offset = Number(delayOffsetMs) || 0;
   const closeAfterEnd = Number(tabCloseAfterEndMs) || 30_000;
   const queuedAt = Number(queuedAtMs) > 0 ? Math.round(Number(queuedAtMs)) : null;
-  const resolved = await resolveCountdownEndTimeMs(url, presetEndTimeMs);
+
+  // Giống iOS: TIME tuyệt đối HH:MM:SS trong tin (vd. 00:57s - 12:34:56) ưu tiên nhất.
+  const absoluteTargetMs = parseAbsoluteTargetMs(timeLabel, Date.now());
+  if (absoluteTargetMs) {
+    return buildEndTimeSchedule(absoluteTargetMs, {
+      now: Date.now(),
+      offset,
+      closeAfterEnd,
+      source: "message_clock",
+    });
+  }
+
+  const resolved = await resolveCountdownEndTimeMs(url, presetEndTimeMs, { useCache: false });
+  const now = Date.now();
   let endTimeMs = resolved.endTimeMs;
   let source = resolved.source;
 
@@ -283,40 +341,7 @@ async function computeCountdownSchedule(
   }
 
   if (endTimeMs) {
-    const clickWaitMs = computeClickFireDelayMs(
-      { endTimeMs, clickWaitMs: 0 },
-      offset,
-      now,
-    );
-    const closeWaitMs = Math.max(
-      clickWaitMs + closeAfterEnd,
-      Math.round(endTimeMs - now + closeAfterEnd),
-    );
-    return {
-      clickWaitMs,
-      closeWaitMs,
-      endTimeMs,
-      displayRemainingMs: displayRemainingMs(endTimeMs, offset, now),
-      executionLeadMs: resolveClickExecutionLeadMs(),
-      source: source || resolved.source || "countdown_end_time",
-    };
-  }
-
-  const absoluteTargetMs = parseAbsoluteTargetMs(timeLabel, now);
-  if (absoluteTargetMs) {
-    const clickWaitMs = computeClickFireDelayMs(
-      { endTimeMs: absoluteTargetMs, clickWaitMs: 0 },
-      offset,
-      now,
-    );
-    return {
-      clickWaitMs,
-      closeWaitMs: clickWaitMs + closeAfterEnd,
-      endTimeMs: absoluteTargetMs,
-      displayRemainingMs: displayRemainingMs(absoluteTargetMs, offset, now),
-      executionLeadMs: resolveClickExecutionLeadMs(),
-      source: "message_clock",
-    };
+    return buildEndTimeSchedule(endTimeMs, { now, offset, closeAfterEnd, source: source || "countdown_end_time" });
   }
 
   const base = Number(clickAfterMs) > 0 ? Number(clickAfterMs) : Number(defaultWaitMs) || 0;
@@ -350,5 +375,8 @@ module.exports = {
   resolveClickExecutionLeadMs,
   computeClickFireDelayMs,
   displayRemainingMs,
+  clickDisplayTargetMs,
+  clickExecuteAtMs,
+  waitUntilTimestamp,
   waitUntilClickTarget,
 };
