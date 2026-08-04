@@ -9,6 +9,25 @@ const THANHTAI_WS_HOSTS = [
 const THANHTAI_WS_TIMEOUT_MS = 5000;
 const END_TIME_CACHE_TTL_MS = 5_000;
 
+function resolveMaxStaleMs() {
+  const env = Number(process.env.DESKTOP_CLICK_MAX_STALE_MS);
+  if (Number.isFinite(env) && env >= 0) return Math.round(env);
+  return 3000;
+}
+
+/** Job đến sau mốc hiển thị 0.0s quá lâu → không click bừa. */
+function isScheduleTooStale(endTimeMs, delayOffsetMs = 0, nowMs = Date.now()) {
+  const displayTarget = clickDisplayTargetMs(endTimeMs, delayOffsetMs);
+  if (!displayTarget) return false;
+  return nowMs - displayTarget > resolveMaxStaleMs();
+}
+
+function scheduleStaleMs(endTimeMs, delayOffsetMs = 0, nowMs = Date.now()) {
+  const displayTarget = clickDisplayTargetMs(endTimeMs, delayOffsetMs);
+  if (!displayTarget) return 0;
+  return Math.max(0, nowMs - displayTarget);
+}
+
 /** Mốc hiển thị 0.0s trên overlay (= lúc user muốn click). */
 function clickDisplayTargetMs(endTimeMs, delayOffsetMs = 0) {
   if (!endTimeMs) return null;
@@ -313,12 +332,13 @@ async function computeCountdownSchedule(
   const offset = Number(delayOffsetMs) || 0;
   const closeAfterEnd = Number(tabCloseAfterEndMs) || 30_000;
   const queuedAt = Number(queuedAtMs) > 0 ? Math.round(Number(queuedAtMs)) : null;
+  const now = Date.now();
 
-  // Giống iOS: TIME tuyệt đối HH:MM:SS trong tin (vd. 00:57s - 12:34:56) ưu tiên nhất.
-  const absoluteTargetMs = parseAbsoluteTargetMs(timeLabel, Date.now());
-  if (absoluteTargetMs) {
+  // TIME HH:MM:SS — chỉ dùng nếu mốc chưa quá hạn (tránh click muộn 20s+ khi poll chậm).
+  const absoluteTargetMs = parseAbsoluteTargetMs(timeLabel, now);
+  if (absoluteTargetMs && !isScheduleTooStale(absoluteTargetMs, offset, now)) {
     return buildEndTimeSchedule(absoluteTargetMs, {
-      now: Date.now(),
+      now,
       offset,
       closeAfterEnd,
       source: "message_clock",
@@ -326,9 +346,19 @@ async function computeCountdownSchedule(
   }
 
   const resolved = await resolveCountdownEndTimeMs(url, presetEndTimeMs, { useCache: false });
-  const now = Date.now();
   let endTimeMs = resolved.endTimeMs;
   let source = resolved.source;
+
+  if (absoluteTargetMs && endTimeMs) {
+    source = "junb_end_time_after_stale_clock";
+  } else if (absoluteTargetMs && !endTimeMs) {
+    return buildEndTimeSchedule(absoluteTargetMs, {
+      now,
+      offset,
+      closeAfterEnd,
+      source: "message_clock_stale",
+    });
+  }
 
   if (!endTimeMs && queuedAt && Number(clickAfterMs) > 0) {
     endTimeMs = queuedAt + Math.round(Number(clickAfterMs));
@@ -368,6 +398,9 @@ module.exports = {
   computeCountdownSchedule,
   computeJunbSchedule,
   resolveClickExecutionLeadMs,
+  resolveMaxStaleMs,
+  isScheduleTooStale,
+  scheduleStaleMs,
   computeClickFireDelayMs,
   displayRemainingMs,
   clickDisplayTargetMs,

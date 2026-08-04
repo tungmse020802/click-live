@@ -13,6 +13,8 @@ let winClickHelper = null;
 let winClickReady = null;
 let winClickQueue = Promise.resolve();
 let helperClickSeq = 0;
+let helperSpawnGen = 0;
+const HELPER_STARTUP_TIMEOUT_MS = 12000;
 /** Stdout tích lũy — parse theo dòng, tránh nhầm ok cũ. */
 let helperStdoutBuffer = "";
 
@@ -57,12 +59,29 @@ function helperScriptPath() {
   return windowsClickHelperPath();
 }
 
+function killHelperProcess(child) {
+  if (!child || child.killed) return;
+  try {
+    if (process.platform === "win32" && child.pid) {
+      spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        windowsHide: true,
+        stdio: "ignore",
+      });
+    } else {
+      child.kill("SIGKILL");
+    }
+  } catch {
+    try { child.kill(); } catch { /* ignore */ }
+  }
+}
+
 function ensureWinClickHelper() {
   if (winClickHelper && !winClickHelper.killed) {
     return Promise.resolve();
   }
   if (winClickReady) return winClickReady;
 
+  const spawnGen = ++helperSpawnGen;
   winClickReady = new Promise((resolve, reject) => {
     const ps1 = helperScriptPath();
     if (!fs.existsSync(ps1)) {
@@ -72,13 +91,14 @@ function ensureWinClickHelper() {
     }
 
     const startedAt = Date.now();
-    clickLog("helper", "starting Windows click helper", { script: ps1 });
+    clickLog("helper", "starting Windows click helper", { script: ps1, spawnGen });
 
     const child = spawn("powershell.exe", [
       "-NoProfile",
       "-ExecutionPolicy",
       "Bypass",
       "-Sta",
+      "-NoLogo",
       "-File",
       ps1,
     ], {
@@ -87,30 +107,43 @@ function ensureWinClickHelper() {
     });
 
     let buffer = "";
-    const timer = setTimeout(() => {
-      try { child.kill(); } catch { /* ignore */ }
-      winClickReady = null;
-      reject(new Error("Windows click helper startup timeout"));
-    }, 15000);
-
-    const fail = (err) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled || spawnGen !== helperSpawnGen) return;
+      settled = true;
       clearTimeout(timer);
+      fn(value);
+    };
+
+    const timer = setTimeout(() => {
+      clickLogError("helper", "Windows click helper startup timeout", {
+        spawnGen,
+        waitedMs: HELPER_STARTUP_TIMEOUT_MS,
+      });
+      killHelperProcess(child);
       winClickReady = null;
       winClickHelper = null;
-      reject(err);
+      finish(reject, new Error("Windows click helper startup timeout"));
+    }, HELPER_STARTUP_TIMEOUT_MS);
+
+    const fail = (err) => {
+      winClickReady = null;
+      winClickHelper = null;
+      finish(reject, err);
     };
 
     child.stdout.on("data", (chunk) => {
+      if (spawnGen !== helperSpawnGen) return;
       buffer += chunk.toString();
       if (buffer.includes("ready")) {
-        clearTimeout(timer);
         winClickHelper = child;
         helperStdoutBuffer = "";
         attachHelperStdoutPump();
         clickLog("helper", "Windows click helper ready", {
           startupMs: Date.now() - startedAt,
+          spawnGen,
         });
-        resolve();
+        finish(resolve);
       }
     });
 
@@ -127,7 +160,8 @@ function ensureWinClickHelper() {
       fail(err);
     });
     child.on("exit", (code) => {
-      clickLogWarn("helper", "Windows click helper exited", { code });
+      if (spawnGen !== helperSpawnGen) return;
+      clickLogWarn("helper", "Windows click helper exited", { code, spawnGen });
       winClickHelper = null;
       winClickReady = null;
     });
@@ -256,12 +290,18 @@ function clickScreenPointWindows(px, py) {
 
 function warmUpWinClickHelper() {
   if (process.platform !== "win32") return Promise.resolve();
-  return ensureWinClickHelper().catch((err) => {
-    clickLogWarn("helper", "Windows click helper warmup failed", {
-      error: String(err.message || err),
+  return ensureWinClickHelper()
+    .then(() => {
+      clickLog("helper", "Windows click helper warmup OK");
+    })
+    .catch((err) => {
+      clickLogWarn("helper", "Windows click helper warmup failed", {
+        error: String(err.message || err),
+      });
+      console.warn("Windows click helper warmup failed:", err.message || err);
+      winClickReady = null;
+      winClickHelper = null;
     });
-    console.warn("Windows click helper warmup failed:", err.message || err);
-  });
 }
 
 function shutdownWinClickHelper() {
@@ -328,10 +368,15 @@ async function clickScreenPoint(x, y) {
   throw new Error(`Desktop click chua ho tro nen tang: ${process.platform}`);
 }
 
+function isWinClickHelperReady() {
+  return Boolean(winClickHelper && !winClickHelper.killed);
+}
+
 module.exports = {
   clickScreenPoint,
   resolveCliclickBin,
   warmUpWinClickHelper,
   shutdownWinClickHelper,
   parseHelperOkLine,
+  isWinClickHelperReady,
 };

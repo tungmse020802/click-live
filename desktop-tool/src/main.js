@@ -10,7 +10,7 @@ const {
 const { startDesktopPoller } = require("./poll");
 const { desktopLogin } = require("./auth");
 const { loadSettings, saveSettings, adjustDelayOffset } = require("./settings");
-const { clickScreenPoint, warmUpWinClickHelper, shutdownWinClickHelper } = require("./desktop-click");
+const { clickScreenPoint, warmUpWinClickHelper, shutdownWinClickHelper, isWinClickHelperReady } = require("./desktop-click");
 const { pickPointOnScreen } = require("./pick-point");
 const { ensureAccessibility } = require("./accessibility");
 const {
@@ -20,6 +20,8 @@ const {
   clickDisplayTargetMs,
   clickExecuteAtMs,
   resolveClickExecutionLeadMs,
+  isScheduleTooStale,
+  scheduleStaleMs,
 } = require("./junb-url");
 const {
   ensureCountdownOverlay,
@@ -113,6 +115,11 @@ function syncCountdownOverlay() {
     targetAtMs = scheduledAt + Math.max(0, Number(schedule.clickWaitMs) || 0) + lead;
   }
   setCountdownOverlay({ active: true, targetAtMs });
+  clickLog("overlay", "countdown overlay sync", {
+    targetAtMs,
+    endTimeMs: schedule.endTimeMs,
+    remainingMs: targetAtMs ? Math.max(0, targetAtMs - Date.now()) : null,
+  });
 }
 
 function clearOverlayTiming() {
@@ -150,7 +157,7 @@ function beginOpenSequence() {
   openSequence += 1;
   cancelActiveClickTask();
   nextClickGeneration();
-  clearOverlayTiming();
+  /* Giữ overlay cũ đến khi job mới syncCountdownOverlay — tránh nháy mất đồng hồ khi burst link */
   return openSequence;
 }
 
@@ -216,10 +223,32 @@ async function scheduleDesktopClick({
     return schedule;
   }
 
-  if (schedule.clickWaitMs <= 0 && !schedule.endTimeMs) return schedule;
+  if (schedule.clickWaitMs <= 0 && !schedule.endTimeMs) {
+    clearOverlayTiming();
+    return schedule;
+  }
 
   const key = jobId != null ? String(jobId) : urlKey;
   const offsetMs = Number(settings.delayOffsetMs) || 0;
+
+  if (schedule.endTimeMs && isScheduleTooStale(schedule.endTimeMs, offsetMs)) {
+    const staleMs = scheduleStaleMs(schedule.endTimeMs, offsetMs);
+    clickLogWarn("skip", `job #${key} quá hạn — không click`, {
+      jobId: key,
+      source: schedule.source,
+      staleMs,
+      offsetMs,
+      endTimeMs: schedule.endTimeMs,
+    });
+    clearOverlayTiming();
+    notifySchedule({
+      type: "error",
+      jobId: key,
+      error: `Quá hạn ${(staleMs / 1000).toFixed(1)}s — tăng poll hoặc giảm DESKTOP_CLICK_MAX_STALE_MS`,
+    });
+    return schedule;
+  }
+
   const fireDelayMs = schedule.endTimeMs
     ? computeClickFireDelayMs(schedule, offsetMs)
     : Math.max(0, Number(schedule.clickWaitMs) || 0);
@@ -726,6 +755,13 @@ app.whenReady().then(async () => {
     }
     restartPoller();
     warmUpWinClickHelper();
+    if (process.platform === "win32") {
+      setInterval(() => {
+        if (!isWinClickHelperReady()) {
+          warmUpWinClickHelper();
+        }
+      }, 60_000);
+    }
   } catch (err) {
     if (err && err.code === "EADDRINUSE") {
       console.error(`Port ${PORT} đang được dùng — tắt desktop-tool cũ hoặc đổi DESKTOP_TOOL_PORT trong .env`);

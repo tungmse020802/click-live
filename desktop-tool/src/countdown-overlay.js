@@ -7,6 +7,7 @@ const OVERLAY_MARGIN = 10;
 
 let overlayWindow = null;
 let overlayState = { active: false, targetAtMs: null };
+let overlayPageReady = false;
 
 function overlayPosition() {
   const display = screen.getPrimaryDisplay();
@@ -19,7 +20,22 @@ function overlayPosition() {
 
 function pushOverlayState() {
   if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  overlayWindow.webContents.send("countdown-overlay:update", overlayState);
+  if (!overlayPageReady || overlayWindow.webContents.isLoading()) return;
+  try {
+    overlayWindow.webContents.send("countdown-overlay:update", overlayState);
+  } catch (err) {
+    console.warn("countdown overlay push failed:", err.message || err);
+  }
+}
+
+function showOverlayWindow() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  if (process.platform === "darwin") {
+    overlayWindow.showInactive();
+  } else {
+    overlayWindow.show();
+  }
+  overlayWindow.setAlwaysOnTop(true, "screen-saver", 1);
 }
 
 function ensureCountdownOverlay() {
@@ -44,13 +60,17 @@ function ensureCountdownOverlay() {
     focusable: false,
     hasShadow: false,
     show: false,
+    thickFrame: false,
     ...(process.platform === "darwin" ? { type: "panel" } : {}),
+    ...(process.platform === "win32" ? { roundedCorners: false } : {}),
     webPreferences: {
       preload: path.join(__dirname, "countdown-overlay-preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+
+  overlayPageReady = false;
 
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   overlayWindow.setAlwaysOnTop(true, "screen-saver", 1);
@@ -59,12 +79,17 @@ function ensureCountdownOverlay() {
   overlayWindow.loadFile(path.join(__dirname, "..", "ui", "countdown-overlay.html"));
   overlayWindow.webContents.on("did-finish-load", () => {
     if (!overlayWindow || overlayWindow.isDestroyed()) return;
-    overlayWindow.showInactive();
+    overlayPageReady = true;
+    showOverlayWindow();
     pushOverlayState();
+  });
+  overlayWindow.webContents.on("did-fail-load", (_event, code, desc) => {
+    console.error("countdown overlay load failed:", code, desc);
   });
 
   overlayWindow.on("closed", () => {
     overlayWindow = null;
+    overlayPageReady = false;
   });
 
   return overlayWindow;
@@ -80,6 +105,7 @@ function setCountdownOverlay(state = {}) {
       active: true,
       targetAtMs: Number(state.targetAtMs) || null,
     };
+    showOverlayWindow();
   }
   pushOverlayState();
 }
