@@ -63,6 +63,13 @@ public class ClickLiveMouse {
   [DllImport("user32.dll")]
   public static extern bool GetCursorPos(out POINT lpPoint);
 
+  static bool IsDoubleClickEnabled() {
+    var v = Environment.GetEnvironmentVariable("DESKTOP_CLICK_DOUBLE");
+    if (string.IsNullOrEmpty(v)) return true;
+    v = v.Trim().ToLowerInvariant();
+    return v != "0" && v != "false" && v != "no";
+  }
+
   public static bool ClickAt(int x, int y, out string detail) {
     detail = "";
     if (!SetCursorPos(x, y)) {
@@ -70,17 +77,28 @@ public class ClickLiveMouse {
       return false;
     }
 
+    bool isDouble = IsDoubleClickEnabled();
     var inputSize = Marshal.SizeOf(typeof(INPUT));
-    var inputs = new INPUT[2];
+    var inputs = new INPUT[isDouble ? 4 : 2];
+    int n = 0;
 
-    inputs[0].type = INPUT_MOUSE;
-    inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    inputs[n].type = INPUT_MOUSE;
+    inputs[n].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    n++;
+    inputs[n].type = INPUT_MOUSE;
+    inputs[n].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    n++;
+    if (isDouble) {
+      inputs[n].type = INPUT_MOUSE;
+      inputs[n].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+      n++;
+      inputs[n].type = INPUT_MOUSE;
+      inputs[n].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+      n++;
+    }
 
-    inputs[1].type = INPUT_MOUSE;
-    inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-
-    var sent = SendInput(2, inputs, inputSize);
-    if (sent != 2) {
+    var sent = SendInput((uint)n, inputs, inputSize);
+    if (sent != n) {
       detail = "sendinput:" + sent + ",gle=" + Marshal.GetLastWin32Error();
       return false;
     }

@@ -10,6 +10,7 @@ const {
   parseHelperPongLine,
   parseHelperErrLine,
 } = require("./windows-click-protocol");
+const { isDoubleClickEnabled } = require("./windows-sendinput");
 
 let winClickHelper = null;
 let winClickReady = null;
@@ -268,7 +269,7 @@ function clickViaHelper(px, py) {
     .then((roundTripMs) => {
       lastHelperPingAt = Date.now();
       return {
-        method: "powershell-helper",
+        method: isDoubleClickEnabled() ? "powershell-helper-double" : "powershell-helper",
         x: px,
         y: py,
         durationMs: Date.now() - sentAt,

@@ -19,6 +19,7 @@ const {
   pingLatencyMs,
   isWindowsSendInputReady,
   getInitError,
+  isDoubleClickEnabled,
 } = require("./windows-sendinput");
 const {
   ensureWinClickHelper,
@@ -144,7 +145,7 @@ async function clickViaKoffi(px, py) {
   }
 
   return {
-    method: "sendinput",
+    method: isDoubleClickEnabled() ? "sendinput-double" : "sendinput",
     x: px,
     y: py,
     durationMs,
@@ -331,10 +332,11 @@ async function clickScreenPointDarwin(px, py, options = {}) {
   }
   const cliclick = resolveCliclickBin();
   const invokedAt = Date.now();
+  const cmd = isDoubleClickEnabled() ? `dc:${px},${py}` : `c:${px},${py}`;
   try {
-    await execFileAsync(cliclick, [`c:${px},${py}`]);
+    await execFileAsync(cliclick, [cmd]);
     const durationMs = Date.now() - invokedAt;
-    return { method: "cliclick", x: px, y: py, durationMs, invokedAt };
+    return { method: isDoubleClickEnabled() ? "cliclick-double" : "cliclick", x: px, y: py, durationMs, invokedAt };
   } catch (err) {
     const detail = String(err.stderr || err.message || err).trim();
     if (/could not be found|ENOENT/i.test(detail) || err.code === "ENOENT") {

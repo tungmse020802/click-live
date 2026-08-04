@@ -10,6 +10,17 @@ const MOUSEEVENTF_LEFTDOWN = 0x0002;
 const MOUSEEVENTF_LEFTUP = 0x0004;
 
 const CURSOR_TOLERANCE_PX = 3;
+const CLICK_EVENTS_SINGLE = 2;
+const CLICK_EVENTS_DOUBLE = 4;
+
+function isDoubleClickEnabled() {
+  const v = String(process.env.DESKTOP_CLICK_DOUBLE ?? "true").trim().toLowerCase();
+  return v !== "0" && v !== "false" && v !== "no";
+}
+
+function expectedClickEventCount() {
+  return isDoubleClickEnabled() ? CLICK_EVENTS_DOUBLE : CLICK_EVENTS_SINGLE;
+}
 
 let initialized = false;
 let initError = null;
@@ -158,7 +169,13 @@ function sendRelativeClick() {
     makeMouseButtonEvent(MOUSEEVENTF_LEFTDOWN),
     makeMouseButtonEvent(MOUSEEVENTF_LEFTUP),
   ];
-  return SendInput(events.length, events, inputSize);
+  if (isDoubleClickEnabled()) {
+    events.push(
+      makeMouseButtonEvent(MOUSEEVENTF_LEFTDOWN),
+      makeMouseButtonEvent(MOUSEEVENTF_LEFTUP),
+    );
+  }
+  return { sent: SendInput(events.length, events, inputSize), expected: events.length };
 }
 
 function clickAt(px, py) {
@@ -174,8 +191,8 @@ function clickAt(px, py) {
       return { ok: false, detail: "setcursorpos-failed" };
     }
 
-    const sent = sendRelativeClick();
-    if (sent !== 2) {
+    const { sent, expected } = sendRelativeClick();
+    if (sent !== expected) {
       return { ok: false, detail: `sendinput:${sent}` };
     }
 
@@ -224,4 +241,5 @@ module.exports = {
   readCursorPos,
   isWindowsSendInputReady,
   getInitError,
+  isDoubleClickEnabled,
 };
