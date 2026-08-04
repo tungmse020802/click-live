@@ -44,6 +44,7 @@ fi
 bash login_telethon_app2.sh
 systemctl enable click-live-telegram-reader-app2.service
 systemctl restart click-live-telegram-reader-app2.service
+systemctl is-active click-live-telegram-reader-app2.service || true
 REMOTE
 
 echo
