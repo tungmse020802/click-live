@@ -1,5 +1,5 @@
-# Click Live desktop-tool - setup all-in-one + run
-# Called by scripts\run-windows.bat
+# Click Live desktop-tool - run on Windows
+# scripts\run-windows.bat
 
 param(
   [switch]$SkipPull,
@@ -22,6 +22,11 @@ function Write-Warn {
 function Write-Err {
   param([string]$Message)
   Write-Host "[ERROR] $Message" -ForegroundColor Red
+}
+
+function Test-Cmd {
+  param([string]$Name)
+  return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
 function Invoke-External {
@@ -51,107 +56,16 @@ function Invoke-External {
   }
 }
 
-function Test-Cmd {
-  param([string]$Name)
-  return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
-}
-
-function Test-WingetInstalled {
-  param([string]$Id)
-  if (-not (Test-Cmd winget)) { return $false }
-  $out = & winget list --id $Id --accept-source-agreements 2>&1
-  if ($LASTEXITCODE -ne 0) { return $false }
-  return [bool]($out | Select-String -SimpleMatch $Id -Quiet)
-}
-
-function Ensure-WingetPackage {
-  param(
-    [Parameter(Mandatory = $true)][string]$Id,
-    [Parameter(Mandatory = $true)][string]$Label
-  )
-
-  if (-not (Test-Cmd winget)) {
-    Write-Warn "winget missing - skip auto-install $Label"
-    return $false
+function Get-DesktopToolDir {
+  $scriptDir = $PSScriptRoot
+  if (-not $scriptDir) {
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
   }
-
-  if (Test-WingetInstalled -Id $Id) {
-    Write-Host "  OK $Label"
-    return $true
-  }
-
-  Write-Host "  Installing $Label ..."
-  & winget install --id $Id -e --accept-source-agreements --accept-package-agreements
-  if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
-    Write-Warn "winget returned $LASTEXITCODE for $Label"
-    return $false
-  }
-  return $true
-}
-
-function Add-ToPath {
-  param([string]$Dir)
-  if (-not $Dir) { return }
-  if (-not (Test-Path $Dir)) { return }
-  if ($env:Path -like "*$Dir*") { return }
-  $env:Path = $Dir + ';' + $env:Path
-}
-
-function Ensure-NodeJs {
-  if (Test-Cmd node) {
-    Write-Host "  OK Node.js $(node -v)"
-    return
-  }
-
-  Write-Step "Install Node.js LTS"
-  Ensure-WingetPackage -Id "OpenJS.NodeJS.LTS" -Label "Node.js LTS" | Out-Null
-  Add-ToPath "$env:ProgramFiles\nodejs"
-  Add-ToPath "${env:ProgramFiles(x86)}\nodejs"
-
-  if (-not (Test-Cmd node)) {
-    throw "Node.js not found. Install from https://nodejs.org then rerun scripts\run-windows.bat"
-  }
-  Write-Host "  OK Node.js $(node -v)"
-}
-
-function Ensure-Git {
-  if (Test-Cmd git) {
-    Write-Host "  OK $(git --version)"
-    return
-  }
-
-  Write-Step "Install Git"
-  Ensure-WingetPackage -Id "Git.Git" -Label "Git" | Out-Null
-  Add-ToPath "$env:ProgramFiles\Git\cmd"
-  Add-ToPath "${env:ProgramFiles(x86)}\Git\cmd"
-
-  if (-not (Test-Cmd git)) {
-    throw "Git not found. Install from https://git-scm.com/download/win"
-  }
-  Write-Host "  OK $(git --version)"
-}
-
-function Ensure-Go {
-  if (Test-Cmd go) {
-    Write-Host "  OK $(go version)"
-    return $true
-  }
-
-  Write-Step "Install Go (build click-helper.exe)"
-  Ensure-WingetPackage -Id "GoLang.Go" -Label "Go" | Out-Null
-  Add-ToPath "$env:ProgramFiles\Go\bin"
-  Add-ToPath "${env:UserProfile}\go\bin"
-
-  if (-not (Test-Cmd go)) {
-    Write-Warn "Go not found - app will use PowerShell click helper fallback"
-    return $false
-  }
-  Write-Host "  OK $(go version)"
-  return $true
+  return (Resolve-Path (Join-Path $scriptDir "..")).Path
 }
 
 function Stop-ClickLive {
-  Write-Step "Stop old processes"
+  Write-Step "1/5 Stop old processes"
   $selfPid = $PID
 
   foreach ($line in (& netstat -aon 2>$null | Select-String ":8795" | Select-String "LISTENING")) {
@@ -168,21 +82,15 @@ function Stop-ClickLive {
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
       if ($_.ProcessId -eq $selfPid) { return $false }
-
-      if ($_.Name -eq 'click-helper.exe') { return $true }
-
       if ($_.Name -eq 'electron.exe') {
         return $_.CommandLine -match 'desktop-tool|click-live-desktop-tool'
       }
-
       if ($_.Name -eq 'node.exe') {
         return $_.CommandLine -match 'desktop-tool|click-live-desktop-tool|electron'
       }
-
       if ($_.Name -eq 'powershell.exe') {
         return $_.CommandLine -match 'windows-click-helper\.ps1'
       }
-
       return $false
     } |
     ForEach-Object {
@@ -197,13 +105,17 @@ function Stop-ClickLive {
 function Update-Repo {
   param([string]$Root)
 
-  if (-not (Test-Cmd git)) { return }
+  Write-Step "2/5 git pull"
+
+  if (-not (Test-Cmd git)) {
+    Write-Warn "git not found - skip pull"
+    return
+  }
   if (-not (Test-Path (Join-Path $Root ".git"))) {
-    Write-Warn "Not a git repo - skip pull"
+    Write-Warn "not a git repo - skip pull"
     return
   }
 
-  Write-Step "git pull"
   Push-Location $Root
   try {
     $branch = (& git rev-parse --abbrev-ref HEAD 2>$null).Trim()
@@ -215,14 +127,32 @@ function Update-Repo {
     $pullCode = Invoke-External { git pull --ff-only origin $branch }
     if ($pullCode -ne 0) {
       Write-Warn "git pull failed - continuing with local code"
+    } else {
+      Write-Host "  OK"
     }
   } finally {
     Pop-Location
   }
 }
 
+function Test-NodeJs {
+  Write-Step "3/5 Check Node.js"
+
+  if (-not (Test-Cmd node)) {
+    throw "Node.js not found. Run scripts\install-windows.bat or install from https://nodejs.org"
+  }
+  if (-not (Test-Cmd npm)) {
+    throw "npm not found. Reinstall Node.js LTS from https://nodejs.org"
+  }
+
+  Write-Host "  OK Node.js $(node -v)"
+  Write-Host "  OK npm $(npm -v)"
+}
+
 function Ensure-EnvFile {
   param([string]$DesktopToolDir)
+
+  Write-Step "4/5 Configure .env"
 
   $envFile = Join-Path $DesktopToolDir ".env"
   $example = Join-Path $DesktopToolDir ".env.example"
@@ -236,13 +166,32 @@ function Ensure-EnvFile {
   } else {
     Write-Host "  OK .env exists"
   }
-  Write-Host "  Login user trong app UI (khong can pull token trong .env)"
 }
 
 function Install-NpmDeps {
-  param([string]$DesktopToolDir)
+  param(
+    [string]$DesktopToolDir,
+    [bool]$AfterPull = $false
+  )
 
-  Write-Step "npm install"
+  $electronPkg = Join-Path $DesktopToolDir "node_modules\electron\package.json"
+  $koffiPkg = Join-Path $DesktopToolDir "node_modules\koffi\package.json"
+  $lockFile = Join-Path $DesktopToolDir "package-lock.json"
+  $nodeModules = Join-Path $DesktopToolDir "node_modules"
+
+  $needsInstall = (-not (Test-Path $electronPkg)) -or (-not (Test-Path $koffiPkg))
+  if (-not $needsInstall -and $AfterPull -and (Test-Path $lockFile) -and (Test-Path $nodeModules)) {
+    if ((Get-Item $lockFile).LastWriteTime -gt (Get-Item $nodeModules).LastWriteTime) {
+      $needsInstall = $true
+    }
+  }
+
+  if (-not $needsInstall) {
+    Write-Host "  OK node_modules (skip npm install)"
+    return
+  }
+
+  Write-Host "  npm install ..."
   Push-Location $DesktopToolDir
   try {
     $code = Invoke-External { npm install }
@@ -255,68 +204,12 @@ function Install-NpmDeps {
   }
 }
 
-function Build-ClickHelper {
-  param(
-    [string]$DesktopToolDir,
-    [bool]$GoReady
-  )
-
-  Write-Step "Build click-helper.exe (native click process)"
-
-  $outDir = Join-Path $DesktopToolDir "resources\bin\win32"
-  $out = Join-Path $outDir "click-helper.exe"
-  $src = Join-Path $DesktopToolDir "click-helper"
-
-  New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-
-  if (-not $GoReady) {
-    Write-Warn "No Go - skip native helper; PowerShell fallback will be used"
-    return
-  }
-
-  if (-not (Test-Path (Join-Path $src "main.go"))) {
-    Write-Warn "click-helper source missing - skip build"
-    return
-  }
-
-  Push-Location $src
-  try {
-    Write-Host "  go build ..."
-    $code = Invoke-External { go build -trimpath "-ldflags=-s -w" -o $out . }
-    if ($code -ne 0) {
-      Write-Warn "go build failed - PowerShell click helper fallback will be used"
-      return
-    }
-    $size = (Get-Item $out).Length
-    Write-Host "  OK $out ($([math]::Round($size / 1KB)) KB)"
-  } finally {
-    Pop-Location
-  }
-}
-
-function Test-Syntax {
-  param([string]$DesktopToolDir)
-
-  Write-Step "Syntax check"
-  Push-Location $DesktopToolDir
-  try {
-    $code = Invoke-External { npm run check }
-    if ($code -ne 0) {
-      Write-Warn "npm run check failed - continuing anyway"
-    } else {
-      Write-Host "  OK"
-    }
-  } finally {
-    Pop-Location
-  }
-}
-
 function Start-DesktopTool {
   param([string]$DesktopToolDir)
 
-  Write-Step "Start desktop-tool"
+  Write-Step "5/5 Start desktop-tool"
+  Write-Host "  Click: PowerShell helper"
   Write-Host "  Health: http://127.0.0.1:8795/health"
-  Write-Host "  Click log: desktop-tool\logs (or userData\logs khi cai app)"
   Write-Host ""
 
   Push-Location $DesktopToolDir
@@ -330,51 +223,39 @@ function Start-DesktopTool {
   }
 }
 
-function Get-DesktopToolDir {
-  $scriptDir = $PSScriptRoot
-  if (-not $scriptDir) {
-    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-  }
-  return (Resolve-Path (Join-Path $scriptDir "..")).Path
-}
-
 $exitCode = 0
+$desktopToolDir = Get-DesktopToolDir
+$repoRoot = (Resolve-Path (Join-Path $desktopToolDir "..")).Path
 
 try {
-  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
   Write-Host ""
-  Write-Host "========================================" -ForegroundColor Green
-  Write-Host " Click Live desktop-tool - setup + run" -ForegroundColor Green
-  Write-Host "========================================" -ForegroundColor Green
-
-  $desktopToolDir = Get-DesktopToolDir
-  $repoRoot = (Resolve-Path (Join-Path $desktopToolDir "..")).Path
-
-  Write-Step "Check dependencies"
-  Ensure-Git
-  Ensure-NodeJs
+  Write-Host "Click Live desktop-tool" -ForegroundColor Green
+  Write-Host "Folder: $desktopToolDir"
+  Write-Host ""
 
   Stop-ClickLive
 
+  $didPull = $false
   if (-not $SkipPull) {
     Update-Repo -Root $repoRoot
+    $didPull = $true
+  } else {
+    Write-Host ""
+    Write-Host "==> 2/5 git pull (skipped)" -ForegroundColor Cyan
   }
 
-  Write-Step "Configure .env"
+  Test-NodeJs
   Ensure-EnvFile -DesktopToolDir $desktopToolDir
 
-  Install-NpmDeps -DesktopToolDir $desktopToolDir
-  Test-Syntax -DesktopToolDir $desktopToolDir
-
   Write-Host ""
-  Write-Host "Setup complete." -ForegroundColor Green
-  Write-Host "  Folder : $desktopToolDir"
-  Write-Host "  Click  : PowerShell helper (windows-click-helper.ps1)"
-  Write-Host ""
+  Write-Host "==> npm deps" -ForegroundColor Cyan
+  Install-NpmDeps -DesktopToolDir $desktopToolDir -AfterPull:$didPull
 
   if (-not $SkipStart) {
     Start-DesktopTool -DesktopToolDir $desktopToolDir
+  } else {
+    Write-Host ""
+    Write-Host "Skip start (-SkipStart)" -ForegroundColor Yellow
   }
 } catch {
   Write-Err $_.Exception.Message
