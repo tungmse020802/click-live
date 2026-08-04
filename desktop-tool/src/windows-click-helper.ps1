@@ -11,6 +11,7 @@ try {
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
+
 public class ClickLiveDpi {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
@@ -25,13 +26,43 @@ using System.Runtime.InteropServices;
 using System.Threading;
 
 public class ClickLiveMouse {
+  public const uint INPUT_MOUSE = 0;
+  public const uint MOUSEEVENTF_MOVE = 0x0001;
   public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
   public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+  public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
+  public const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
+
+  public const uint WM_LBUTTONDOWN = 0x0201;
+  public const uint WM_LBUTTONUP = 0x0202;
+  public const uint WM_LBUTTONDBLCLK = 0x0203;
+  public const int MK_LBUTTON = 0x0001;
+
+  public const int SM_XVIRTUALSCREEN = 76;
+  public const int SM_YVIRTUALSCREEN = 77;
+  public const int SM_CXVIRTUALSCREEN = 78;
+  public const int SM_CYVIRTUALSCREEN = 79;
 
   [StructLayout(LayoutKind.Sequential)]
   public struct POINT {
     public int X;
     public int Y;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct MOUSEINPUT {
+    public int dx;
+    public int dy;
+    public uint mouseData;
+    public uint dwFlags;
+    public uint time;
+    public IntPtr dwExtraInfo;
+  }
+
+  [StructLayout(LayoutKind.Explicit)]
+  public struct INPUT {
+    [FieldOffset(0)] public uint type;
+    [FieldOffset(8)] public MOUSEINPUT mi;
   }
 
   [DllImport("user32.dll")]
@@ -44,7 +75,31 @@ public class ClickLiveMouse {
   public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
 
   [DllImport("user32.dll")]
+  static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+  [DllImport("user32.dll")]
+  static extern int GetSystemMetrics(int nIndex);
+
+  [DllImport("user32.dll")]
+  static extern IntPtr WindowFromPoint(POINT Point);
+
+  [DllImport("user32.dll")]
+  static extern bool ScreenToClient(IntPtr hWnd, ref POINT lpPoint);
+
+  [DllImport("user32.dll")]
+  static extern bool SetForegroundWindow(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+  [DllImport("user32.dll")]
   static extern uint GetDoubleClickTime();
+
+  static string ClickMode() {
+    var v = Environment.GetEnvironmentVariable("DESKTOP_CLICK_MODE");
+    if (string.IsNullOrEmpty(v)) return "absolute";
+    return v.Trim().ToLowerInvariant();
+  }
 
   static bool IsDoubleClickEnabled() {
     var v = Environment.GetEnvironmentVariable("DESKTOP_CLICK_DOUBLE");
@@ -76,32 +131,36 @@ public class ClickLiveMouse {
     return 60;
   }
 
-  static void PressButton(bool down) {
+  static void ToAbsolute(int x, int y, out int ax, out int ay) {
+    int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    int denomX = Math.Max(w - 1, 1);
+    int denomY = Math.Max(h - 1, 1);
+    ax = (x - left) * 65535 / denomX;
+    ay = (y - top) * 65535 / denomY;
+  }
+
+  static IntPtr MakeLParam(int x, int y) {
+    return (IntPtr)((y << 16) | (x & 0xFFFF));
+  }
+
+  static bool SendMouse(uint flags, int dx, int dy) {
+    INPUT[] inputs = new INPUT[1];
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dx = dx;
+    inputs[0].mi.dy = dy;
+    inputs[0].mi.dwFlags = flags;
+    return SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT))) == 1;
+  }
+
+  static void PressLegacy(bool down) {
     mouse_event(down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
   }
 
-  static void PerformButtonClicks() {
-    Thread.Sleep(ClickSettleMs());
-    PressButton(true);
-    Thread.Sleep(ClickStepMs());
-    PressButton(false);
-    if (IsDoubleClickEnabled()) {
-      Thread.Sleep(DoubleClickGapMs());
-      PressButton(true);
-      Thread.Sleep(ClickStepMs());
-      PressButton(false);
-    }
-  }
-
-  public static bool ClickAt(int x, int y, out string detail) {
+  static bool VerifyCursor(int x, int y, out string detail) {
     detail = "";
-    if (!SetCursorPos(x, y)) {
-      detail = "setcursorpos-failed,gle=" + Marshal.GetLastWin32Error();
-      return false;
-    }
-
-    PerformButtonClicks();
-
     POINT pt;
     if (!GetCursorPos(out pt)) {
       detail = "getcursorpos-failed";
@@ -112,6 +171,149 @@ public class ClickLiveMouse {
       return false;
     }
     return true;
+  }
+
+  static bool MovePointer(int x, int y) {
+    if (!SetCursorPos(x, y)) return false;
+    int ax, ay;
+    ToAbsolute(x, y, out ax, out ay);
+    uint moveFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    return SendMouse(moveFlags, ax, ay);
+  }
+
+  static bool ClickAbsolute(int x, int y, out string detail) {
+    detail = "mode=absolute";
+    if (!MovePointer(x, y)) {
+      detail = "mode=absolute,setcursorpos-failed,gle=" + Marshal.GetLastWin32Error();
+      return false;
+    }
+
+    Thread.Sleep(ClickSettleMs());
+    if (!SendMouse(MOUSEEVENTF_LEFTDOWN, 0, 0)) {
+      detail = "mode=absolute,sendinput-down-failed,gle=" + Marshal.GetLastWin32Error();
+      return false;
+    }
+    Thread.Sleep(ClickStepMs());
+    if (!SendMouse(MOUSEEVENTF_LEFTUP, 0, 0)) {
+      detail = "mode=absolute,sendinput-up-failed,gle=" + Marshal.GetLastWin32Error();
+      return false;
+    }
+
+    if (IsDoubleClickEnabled()) {
+      Thread.Sleep(DoubleClickGapMs());
+      if (!SendMouse(MOUSEEVENTF_LEFTDOWN, 0, 0)) {
+        detail = "mode=absolute,sendinput-down2-failed";
+        return false;
+      }
+      Thread.Sleep(ClickStepMs());
+      if (!SendMouse(MOUSEEVENTF_LEFTUP, 0, 0)) {
+        detail = "mode=absolute,sendinput-up2-failed";
+        return false;
+      }
+    }
+
+    string cursorDetail;
+    if (!VerifyCursor(x, y, out cursorDetail)) {
+      detail = "mode=absolute," + cursorDetail;
+      return false;
+    }
+    return true;
+  }
+
+  static bool ClickPostMessage(int x, int y, out string detail) {
+    detail = "mode=postmessage";
+    if (!SetCursorPos(x, y)) {
+      detail = "mode=postmessage,setcursorpos-failed,gle=" + Marshal.GetLastWin32Error();
+      return false;
+    }
+
+    POINT pt = new POINT { X = x, Y = y };
+    IntPtr hwnd = WindowFromPoint(pt);
+    if (hwnd == IntPtr.Zero) {
+      detail = "mode=postmessage,windowfrompoint-failed";
+      return false;
+    }
+
+    SetForegroundWindow(hwnd);
+    Thread.Sleep(ClickSettleMs());
+
+    POINT client = new POINT { X = x, Y = y };
+    if (!ScreenToClient(hwnd, ref client)) {
+      detail = "mode=postmessage,screentoclient-failed";
+      return false;
+    }
+
+    IntPtr lParam = MakeLParam(client.X, client.Y);
+    if (!PostMessage(hwnd, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, lParam)) {
+      detail = "mode=postmessage,down-failed";
+      return false;
+    }
+    Thread.Sleep(ClickStepMs());
+    if (!PostMessage(hwnd, WM_LBUTTONUP, IntPtr.Zero, lParam)) {
+      detail = "mode=postmessage,up-failed";
+      return false;
+    }
+
+    if (IsDoubleClickEnabled()) {
+      Thread.Sleep(DoubleClickGapMs());
+      if (!PostMessage(hwnd, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, lParam)) {
+        detail = "mode=postmessage,down2-failed";
+        return false;
+      }
+      Thread.Sleep(ClickStepMs());
+      if (!PostMessage(hwnd, WM_LBUTTONUP, IntPtr.Zero, lParam)) {
+        detail = "mode=postmessage,up2-failed";
+        return false;
+      }
+    }
+
+    string cursorDetail;
+    if (!VerifyCursor(x, y, out cursorDetail)) {
+      detail = "mode=postmessage," + cursorDetail;
+      return false;
+    }
+    return true;
+  }
+
+  static bool ClickLegacy(int x, int y, out string detail) {
+    detail = "mode=legacy";
+    if (!SetCursorPos(x, y)) {
+      detail = "mode=legacy,setcursorpos-failed,gle=" + Marshal.GetLastWin32Error();
+      return false;
+    }
+
+    Thread.Sleep(ClickSettleMs());
+    PressLegacy(true);
+    Thread.Sleep(ClickStepMs());
+    PressLegacy(false);
+
+    if (IsDoubleClickEnabled()) {
+      Thread.Sleep(DoubleClickGapMs());
+      PressLegacy(true);
+      Thread.Sleep(ClickStepMs());
+      PressLegacy(false);
+    }
+
+    string cursorDetail;
+    if (!VerifyCursor(x, y, out cursorDetail)) {
+      detail = "mode=legacy," + cursorDetail;
+      return false;
+    }
+    return true;
+  }
+
+  public static bool ClickAt(int x, int y, out string detail) {
+    detail = "";
+    string mode = ClickMode();
+
+    if (mode == "legacy") return ClickLegacy(x, y, out detail);
+    if (mode == "postmessage") return ClickPostMessage(x, y, out detail);
+    if (mode == "absolute") return ClickAbsolute(x, y, out detail);
+
+    // auto: absolute -> postmessage -> legacy
+    if (ClickAbsolute(x, y, out detail)) return true;
+    if (ClickPostMessage(x, y, out detail)) return true;
+    return ClickLegacy(x, y, out detail);
   }
 }
 "@

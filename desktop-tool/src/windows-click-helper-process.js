@@ -72,10 +72,12 @@ function psArgs(psPath) {
 
 function helperMethodSuffix() {
   const double = isDoubleClickEnabled() ? "-double" : "";
+  const mode = String(process.env.DESKTOP_CLICK_MODE || "absolute").trim().toLowerCase();
+  const modeTag = mode && mode !== "auto" ? `-${mode}` : "";
   if (activeHelperKind === "native") {
     return `native-helper${double}`;
   }
-  return `powershell-helper${double}`;
+  return `powershell-helper${modeTag}${double}`;
 }
 
 function killHelperProcess(child) {
