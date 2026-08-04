@@ -1,5 +1,6 @@
 const { BrowserWindow, screen, ipcMain } = require("electron");
 const path = require("path");
+const { readCursorScreenPoint } = require("./screen-coords");
 
 function unionDisplayBounds() {
   const displays = screen.getAllDisplays();
@@ -57,9 +58,10 @@ function pickPointOnScreen() {
       fn();
     };
 
-    const onDone = (_event, point) => {
+    const onDone = (_event, _point) => {
       if (_event.sender !== win.webContents) return;
-      finish(() => resolve(point));
+      const cursor = readCursorScreenPoint();
+      finish(() => resolve(cursor));
     };
     const onCancel = (_event) => {
       if (_event.sender !== win.webContents) return;

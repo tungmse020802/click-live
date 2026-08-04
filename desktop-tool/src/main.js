@@ -198,6 +198,22 @@ function notifySchedule(payload) {
   }
 }
 
+/** Windows: ẩn settings lúc click để không nuốt sự kiện trên cửa sổ tool. */
+async function withSettingsHiddenForClick(fn) {
+  const shouldHide = process.platform === "win32"
+    && settingsWindow
+    && !settingsWindow.isDestroyed()
+    && settingsWindow.isVisible();
+  if (shouldHide) settingsWindow.hide();
+  try {
+    return await fn();
+  } finally {
+    if (shouldHide && settingsWindow && !settingsWindow.isDestroyed()) {
+      settingsWindow.show();
+    }
+  }
+}
+
 async function scheduleDesktopClick({
   urlKey,
   url,
@@ -455,7 +471,7 @@ async function scheduleDesktopClick({
       const clickInvokeAt = Date.now();
       let result;
       try {
-        result = await clickScreenPoint(clickX, clickY, { clickGen });
+        result = await withSettingsHiddenForClick(() => clickScreenPoint(clickX, clickY, { clickGen }));
       } catch (err) {
         if (err?.code === "CLICK_STALE") {
           clickLog("skip", `skip click job #${key} stale at queue`, { jobId: key, clickGen });
@@ -683,7 +699,7 @@ function registerIpcHandlers() {
     ensureAccessibility(true);
     const settings = loadSettings();
     const { x, y } = resolveClickPoint(settings);
-    const result = await clickScreenPoint(x, y);
+    const result = await withSettingsHiddenForClick(() => clickScreenPoint(x, y));
     clickLog("click", "test click", {
       x: result.x,
       y: result.y,

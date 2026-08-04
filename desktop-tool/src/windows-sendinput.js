@@ -61,6 +61,22 @@ function toAbsoluteCoord(coord, origin, span) {
   return Math.round(normalized);
 }
 
+function makeMouseButtonEvent(flags) {
+  return {
+    type: INPUT_MOUSE,
+    u: {
+      mi: {
+        dx: 0,
+        dy: 0,
+        mouseData: 0,
+        dwFlags: flags,
+        time: 0,
+        dwExtraInfo: 0,
+      },
+    },
+  };
+}
+
 function initWindowsSendInput() {
   if (process.platform !== "win32") return false;
   if (initialized) return true;
@@ -83,13 +99,33 @@ function initWindowsSendInput() {
       dwExtraInfo: "uintptr_t",
     });
 
+    const KEYBDINPUT = koffi.struct("KEYBDINPUT", {
+      wVk: "uint16",
+      wScan: "uint16",
+      dwFlags: "uint32",
+      time: "uint32",
+      dwExtraInfo: "uintptr_t",
+    });
+
+    const HARDWAREINPUT = koffi.struct("HARDWAREINPUT", {
+      uMsg: "uint32",
+      wParamL: "uint16",
+      wParamH: "uint16",
+    });
+
     INPUT = koffi.struct("INPUT", {
       type: "uint32",
-      mi: MOUSEINPUT,
+      u: koffi.union({
+        mi: MOUSEINPUT,
+        ki: KEYBDINPUT,
+        hi: HARDWAREINPUT,
+      }),
     });
 
     inputSize = koffi.sizeof(INPUT);
-    SendInput = user32.func("uint32 SendInput(uint32 nInputs, INPUT *pInputs, int32 cbSize)");
+    SendInput = user32.func(
+      "uint32 __stdcall SendInput(uint32 cInputs, INPUT *pInputs, int32 cbSize)"
+    );
     SetCursorPos = user32.func("bool SetCursorPos(int32 x, int32 y)");
     GetCursorPos = user32.func("bool GetCursorPos(_Out_ POINT *lpPoint)");
 
@@ -119,31 +155,11 @@ function readCursorPos() {
 }
 
 function sendRelativeClick() {
-  const INPUT_2 = koffi.array(INPUT, 2);
-  const inputs = new INPUT_2();
-  inputs[0] = {
-    type: INPUT_MOUSE,
-    mi: {
-      dx: 0,
-      dy: 0,
-      mouseData: 0,
-      dwFlags: MOUSEEVENTF_LEFTDOWN,
-      time: 0,
-      dwExtraInfo: 0,
-    },
-  };
-  inputs[1] = {
-    type: INPUT_MOUSE,
-    mi: {
-      dx: 0,
-      dy: 0,
-      mouseData: 0,
-      dwFlags: MOUSEEVENTF_LEFTUP,
-      time: 0,
-      dwExtraInfo: 0,
-    },
-  };
-  return SendInput(2, inputs, inputSize);
+  const events = [
+    makeMouseButtonEvent(MOUSEEVENTF_LEFTDOWN),
+    makeMouseButtonEvent(MOUSEEVENTF_LEFTUP),
+  ];
+  return SendInput(events.length, events, inputSize);
 }
 
 function clickAt(px, py) {

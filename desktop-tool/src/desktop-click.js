@@ -7,6 +7,7 @@ const execFileAsync = promisify(execFile);
 const { windowsClickHelperPath } = require("./paths");
 const { clickLog, clickLogWarn } = require("./click-log");
 const { isCurrentClickGeneration } = require("./click-scheduler");
+const { toPhysicalScreenPoint } = require("./screen-coords");
 const {
   parseHelperOkLine,
   parseHelperPongLine,
@@ -351,16 +352,27 @@ async function clickScreenPointDarwin(px, py, options = {}) {
 }
 
 async function clickScreenPoint(x, y, options = {}) {
-  const px = Math.round(Number(x));
-  const py = Math.round(Number(y));
-  if (!Number.isFinite(px) || !Number.isFinite(py)) {
+  const dipX = Math.round(Number(x));
+  const dipY = Math.round(Number(y));
+  if (!Number.isFinite(dipX) || !Number.isFinite(dipY)) {
     throw new Error("Toa do click khong hop le");
   }
+
+  let px = dipX;
+  let py = dipY;
+  if (process.platform === "win32") {
+    const physical = toPhysicalScreenPoint(dipX, dipY);
+    px = physical.x;
+    py = physical.y;
+  }
+
   if (px < 0 || py < 0 || px > 65535 || py > 65535) {
     throw new Error(`Toa do click ngoai pham vi: ${px},${py}`);
   }
 
   clickLog("click", "invoke clickScreenPoint", {
+    dipX,
+    dipY,
     x: px,
     y: py,
     clickGen: options.clickGen ?? null,
