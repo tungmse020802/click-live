@@ -125,21 +125,38 @@ function Ensure-Go {
 
 function Stop-ClickLive {
   Write-Step "Stop old processes"
+  $selfPid = $PID
 
   foreach ($line in (& netstat -aon 2>$null | Select-String ":8795" | Select-String "LISTENING")) {
     $parts = ($line -split '\s+') | Where-Object { $_ -ne '' }
     $procId = $parts[-1]
     if ($procId -match '^\d+$') {
-      Write-Host "  stop PID $procId (port 8795)"
-      Stop-Process -Id ([int]$procId) -Force -ErrorAction SilentlyContinue
+      $pidNum = [int]$procId
+      if ($pidNum -eq $selfPid) { continue }
+      Write-Host "  stop PID $pidNum (port 8795)"
+      Stop-Process -Id $pidNum -Force -ErrorAction SilentlyContinue
     }
   }
 
-  $pat = 'desktop-tool|click-live-desktop-tool|click-helper\.exe|windows-click-helper'
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
-      ($_.Name -in @('electron.exe', 'node.exe', 'powershell.exe', 'click-helper.exe')) -and
-      ($_.CommandLine -match $pat)
+      if ($_.ProcessId -eq $selfPid) { return $false }
+
+      if ($_.Name -eq 'click-helper.exe') { return $true }
+
+      if ($_.Name -eq 'electron.exe') {
+        return $_.CommandLine -match 'desktop-tool|click-live-desktop-tool'
+      }
+
+      if ($_.Name -eq 'node.exe') {
+        return $_.CommandLine -match 'desktop-tool|click-live-desktop-tool|electron'
+      }
+
+      if ($_.Name -eq 'powershell.exe') {
+        return $_.CommandLine -match 'windows-click-helper\.ps1'
+      }
+
+      return $false
     } |
     ForEach-Object {
       Write-Host "  stop PID $($_.ProcessId) $($_.Name)"
