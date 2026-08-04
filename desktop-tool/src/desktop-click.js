@@ -15,8 +15,21 @@ let winClickQueue = Promise.resolve();
 let helperClickSeq = 0;
 let helperSpawnGen = 0;
 let helperSuccessfulClicks = 0;
+let lastHelperPingAt = 0;
+/** Latency ping/pong gần đây — ổn định hơn đo từ click thật. */
+const helperLatencySamples = [];
 const HELPER_STARTUP_TIMEOUT_MS = 12000;
 const HELPER_CLICK_TIMEOUT_MS = 3000;
+const HELPER_PING_TIMEOUT_MS = 1500;
+const HELPER_MAX_LATENCY_SAMPLES = 16;
+const HELPER_WARMUP_PINGS = Math.max(
+  1,
+  Number(process.env.DESKTOP_CLICK_HELPER_WARMUP_PINGS) || 3
+);
+const HELPER_KEEPALIVE_MS = Math.max(
+  0,
+  Number(process.env.DESKTOP_CLICK_HELPER_KEEPALIVE_MS) || 30_000
+);
 const HELPER_MAX_CLICKS = Math.max(
   20,
   Number(process.env.DESKTOP_CLICK_HELPER_MAX_CLICKS) || 120
@@ -28,6 +41,34 @@ function parseHelperOkLine(line, clickId, px, py) {
   const trimmed = String(line || "").trim();
   const expected = `ok:${clickId},${px},${py}`;
   return trimmed === expected || trimmed.startsWith(`${expected}\r`);
+}
+
+function parseHelperPongLine(line, pingId) {
+  const trimmed = String(line || "").trim();
+  const expected = `pong:${pingId}`;
+  return trimmed === expected || trimmed.startsWith(`${expected}\r`);
+}
+
+function recordHelperLatency(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return;
+  helperLatencySamples.push(Math.round(n));
+  while (helperLatencySamples.length > HELPER_MAX_LATENCY_SAMPLES) helperLatencySamples.shift();
+}
+
+function percentile(sorted, ratio) {
+  if (!sorted.length) return 0;
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * ratio)));
+  return sorted[idx];
+}
+
+/** Ước lượng latency pipe PS warm — dùng cho canh giờ click. */
+function getHelperLatencyEstimateMs() {
+  if (!helperLatencySamples.length) {
+    return process.platform === "win32" ? 12 : 8;
+  }
+  const sorted = [...helperLatencySamples].sort((a, b) => a - b);
+  return Math.round(percentile(sorted, 0.75));
 }
 
 function attachHelperStdoutPump() {
@@ -42,6 +83,100 @@ function attachHelperStdoutPump() {
       winClickHelper.emit("helper-line", line);
     }
   });
+}
+
+function writeHelperLine(text) {
+  return new Promise((resolve, reject) => {
+    if (!winClickHelper || winClickHelper.killed) {
+      reject(new Error("Windows click helper not running"));
+      return;
+    }
+    const payload = `${text}\n`;
+    const ok = winClickHelper.stdin.write(payload, (err) => {
+      if (err) reject(err);
+    });
+    if (ok) {
+      resolve();
+      return;
+    }
+    winClickHelper.stdin.once("drain", resolve);
+    winClickHelper.stdin.once("error", reject);
+  });
+}
+
+function waitHelperLine({ match, timeoutMs, label }) {
+  return new Promise((resolve, reject) => {
+    if (!winClickHelper || winClickHelper.killed) {
+      reject(new Error("Windows click helper not running"));
+      return;
+    }
+
+    const sentAt = Date.now();
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${label || "helper"} timeout`));
+    }, timeoutMs);
+
+    const onLine = (line) => {
+      if (match(line)) {
+        cleanup();
+        resolve(Date.now() - sentAt);
+      }
+    };
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      winClickHelper?.off("helper-line", onLine);
+    };
+
+    winClickHelper.on("helper-line", onLine);
+  });
+}
+
+function pingHelper() {
+  const pingId = ++helperClickSeq;
+  return writeHelperLine(`ping:${pingId}`)
+    .then(() => waitHelperLine({
+      match: (line) => parseHelperPongLine(line, pingId),
+      timeoutMs: HELPER_PING_TIMEOUT_MS,
+      label: "Windows click helper ping",
+    }))
+    .then((latencyMs) => {
+      lastHelperPingAt = Date.now();
+      recordHelperLatency(latencyMs);
+      return latencyMs;
+    });
+}
+
+async function primeHelperLatency() {
+  if (process.platform !== "win32") return null;
+  await ensureWinClickHelper();
+  const samples = [];
+  for (let i = 0; i < HELPER_WARMUP_PINGS; i += 1) {
+    try {
+      samples.push(await pingHelper());
+    } catch (err) {
+      clickLogWarn("helper", "Windows click helper ping failed", {
+        error: String(err.message || err),
+        attempt: i + 1,
+      });
+    }
+  }
+  if (!samples.length) return null;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  clickLog("helper", "Windows click helper latency primed", {
+    medianMs: median,
+    samples,
+    estimateMs: getHelperLatencyEstimateMs(),
+  });
+  try {
+    const { refreshSessionClickTiming } = require("./click-lead");
+    refreshSessionClickTiming();
+  } catch {
+    /* ignore */
+  }
+  return median;
 }
 
 function resolveCliclickBin() {
@@ -81,6 +216,7 @@ async function restartWinClickHelper(reason) {
   shutdownWinClickHelper();
   helperStdoutBuffer = "";
   await ensureWinClickHelper();
+  await primeHelperLatency();
 }
 
 function helperScriptPath() {
@@ -107,7 +243,10 @@ function ensureWinClickHelper() {
   if (winClickHelper && !winClickHelper.killed) {
     return Promise.resolve();
   }
-  if (winClickReady) return winClickReady;
+  if (winClickReady && winClickHelper && !winClickHelper.killed) {
+    return winClickReady;
+  }
+  winClickReady = null;
 
   const spawnGen = ++helperSpawnGen;
   winClickReady = new Promise((resolve, reject) => {
@@ -127,6 +266,7 @@ function ensureWinClickHelper() {
       "Bypass",
       "-Sta",
       "-NoLogo",
+      "-NonInteractive",
       "-File",
       ps1,
     ], {
@@ -160,10 +300,12 @@ function ensureWinClickHelper() {
       finish(reject, err);
     };
 
-    child.stdout.on("data", (chunk) => {
+    const onStartupData = (chunk) => {
       if (spawnGen !== helperSpawnGen) return;
       buffer += chunk.toString();
       if (buffer.includes("ready")) {
+        if (settled) return;
+        child.stdout.off("data", onStartupData);
         winClickHelper = child;
         helperStdoutBuffer = "";
         attachHelperStdoutPump();
@@ -173,7 +315,9 @@ function ensureWinClickHelper() {
         });
         finish(resolve);
       }
-    });
+    };
+
+    child.stdout.on("data", onStartupData);
 
     child.stderr.on("data", (chunk) => {
       const msg = chunk.toString().trim();
@@ -199,56 +343,28 @@ function ensureWinClickHelper() {
 }
 
 function clickViaHelper(px, py) {
-  return new Promise((resolve, reject) => {
-    if (!winClickHelper || winClickHelper.killed) {
-      reject(new Error("Windows click helper not running"));
-      return;
-    }
+  const clickId = ++helperClickSeq;
+  const sentAt = Date.now();
 
-    const clickId = ++helperClickSeq;
-    const sentAt = Date.now();
-    const expected = `ok:${clickId},${px},${py}`;
-    const timer = setTimeout(() => {
-      cleanup();
-      clickLogError("click", "Windows click helper timeout", {
-        clickId, x: px, y: py, waitedMs: HELPER_CLICK_TIMEOUT_MS,
-      });
-      reject(new Error("Windows click timeout"));
-    }, HELPER_CLICK_TIMEOUT_MS);
-
-    const onLine = (line) => {
-      if (parseHelperOkLine(line, clickId, px, py)) {
-        cleanup();
-        const durationMs = Date.now() - sentAt;
-        resolve({
-          method: "powershell-helper",
-          x: px,
-          y: py,
-          durationMs,
-          invokedAt: sentAt,
-          clickId,
-        });
-      } else if (/^ok:/.test(String(line || "").trim())) {
-        clickLogWarn("helper", "ignored mismatched helper ok", {
-          line: String(line).trim(),
-          expected,
-        });
-      }
-    };
-
-    const cleanup = () => {
-      clearTimeout(timer);
-      winClickHelper?.off("helper-line", onLine);
-    };
-
-    winClickHelper.on("helper-line", onLine);
-    try {
-      winClickHelper.stdin.write(`${clickId},${px},${py}\n`);
-    } catch (err) {
-      cleanup();
-      reject(err);
-    }
-  });
+  return writeHelperLine(`${clickId},${px},${py}`)
+    .then(() => waitHelperLine({
+      match: (line) => parseHelperOkLine(line, clickId, px, py),
+      timeoutMs: HELPER_CLICK_TIMEOUT_MS,
+      label: "Windows click helper click",
+    }))
+    .then((roundTripMs) => {
+      recordHelperLatency(roundTripMs);
+      lastHelperPingAt = Date.now();
+      return {
+        method: "powershell-helper",
+        x: px,
+        y: py,
+        durationMs: Date.now() - sentAt,
+        roundTripMs,
+        invokedAt: sentAt,
+        clickId,
+      };
+    });
 }
 
 async function clickScreenPointWindowsFallback(px, py) {
@@ -299,7 +415,15 @@ async function clickScreenPointWindowsInner(px, py, options = {}) {
     dropStaleClick(clickGen, "helper-inner");
   }
   try {
-    await ensureWinClickHelper();
+    if (!isWinClickHelperReady()) {
+      await ensureWinClickHelper();
+      await primeHelperLatency();
+    } else if (
+      HELPER_KEEPALIVE_MS > 0
+      && Date.now() - lastHelperPingAt > HELPER_KEEPALIVE_MS
+    ) {
+      await pingHelper().catch(() => {});
+    }
     if (isStaleClickRequest(clickGen)) {
       dropStaleClick(clickGen, "helper-after-ready");
     }
@@ -340,8 +464,11 @@ function clickScreenPointWindows(px, py, options = {}) {
 function warmUpWinClickHelper() {
   if (process.platform !== "win32") return Promise.resolve();
   return ensureWinClickHelper()
+    .then(() => primeHelperLatency())
     .then(() => {
-      clickLog("helper", "Windows click helper warmup OK");
+      clickLog("helper", "Windows click helper warmup OK", {
+        estimateMs: getHelperLatencyEstimateMs(),
+      });
     })
     .catch((err) => {
       clickLogWarn("helper", "Windows click helper warmup failed", {
@@ -411,6 +538,7 @@ async function clickScreenPoint(x, y, options = {}) {
     x: px,
     y: py,
     clickGen: options.clickGen ?? null,
+    helperLatencyMs: getHelperLatencyEstimateMs(),
   });
   if (process.platform === "win32") {
     return clickScreenPointWindows(px, py, options);
@@ -431,5 +559,8 @@ module.exports = {
   warmUpWinClickHelper,
   shutdownWinClickHelper,
   parseHelperOkLine,
+  parseHelperPongLine,
+  pingHelper,
+  getHelperLatencyEstimateMs,
   isWinClickHelperReady,
 };

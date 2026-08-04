@@ -24,6 +24,9 @@ $sig = @'
 
 $null = Add-Type -MemberDefinition $sig -Name WinMouse -Namespace ClickLive -PassThru
 
+$clickRx = [regex]'^(\d+),(-?\d+),(-?\d+)$'
+$pingRx = [regex]'^ping:(\d+)$'
+
 [Console]::Out.WriteLine("ready")
 [Console]::Out.Flush()
 
@@ -32,16 +35,31 @@ while ($true) {
   if ($null -eq $line) { break }
   $line = $line.Trim()
   if ($line -eq "quit") { break }
-  if ($line -match '^(\d+),(-?\d+),(-?\d+)$') {
-    $id = [int]$Matches[1]
-    $x = [int]$Matches[2]
-    $y = [int]$Matches[3]
+
+  if ($line -eq "ping") {
+    [Console]::Out.WriteLine("pong")
+    [Console]::Out.Flush()
+    continue
+  }
+
+  $pingMatch = $pingRx.Match($line)
+  if ($pingMatch.Success) {
+    $id = $pingMatch.Groups[1].Value
+    [Console]::Out.WriteLine("pong:$id")
+    [Console]::Out.Flush()
+    continue
+  }
+
+  $clickMatch = $clickRx.Match($line)
+  if ($clickMatch.Success) {
+    $id = [int]$clickMatch.Groups[1].Value
+    $x = [int]$clickMatch.Groups[2].Value
+    $y = [int]$clickMatch.Groups[3].Value
     [ClickLive.WinMouse]::SetCursorPos($x, $y) | Out-Null
     [ClickLive.WinMouse]::mouse_event(0x0002, 0, 0, 0, 0)
     [ClickLive.WinMouse]::mouse_event(0x0004, 0, 0, 0, 0)
     [Console]::Out.WriteLine("ok:${id},${x},${y}")
   } elseif ($line -match '^(-?\d+),(-?\d+)$') {
-    # legacy id=0 — deprecated; log err to avoid misparsed clicks
     [Console]::Out.WriteLine("err:legacy-format")
   } else {
     [Console]::Out.WriteLine("err")

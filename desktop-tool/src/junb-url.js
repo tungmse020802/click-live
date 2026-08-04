@@ -1,5 +1,9 @@
 const { decodeHtmlUrl } = require("./server");
-const { resolveClickExecutionLeadMs } = require("./click-lead");
+const {
+  resolveExecuteAdvanceMs,
+  resolveClickExecutionLeadMs,
+  getSessionClickTiming,
+} = require("./click-lead");
 
 const THANHTAI_WS_HOSTS = [
   "realtime-67lx.onrender.com",
@@ -34,11 +38,12 @@ function clickDisplayTargetMs(endTimeMs, delayOffsetMs = 0) {
   return Math.round(endTimeMs + (Number(delayOffsetMs) || 0));
 }
 
-/** Mốc bắt đầu gọi click (sớm hơn display target một chút để bù độ trễ OS). */
-function clickExecuteAtMs(endTimeMs, delayOffsetMs = 0) {
+/** Mốc bắt đầu gọi click — sớm hơn display target để overlay còn ~targetOverlayMs lúc chạm. */
+function clickExecuteAtMs(endTimeMs, delayOffsetMs = 0, executionAdvanceMs) {
   const target = clickDisplayTargetMs(endTimeMs, delayOffsetMs);
   if (!target) return null;
-  return target - resolveClickExecutionLeadMs();
+  const advance = executionAdvanceMs ?? resolveExecuteAdvanceMs();
+  return target - advance;
 }
 
 /** ms còn lại trên đồng hồ countdown (0.0s = hết giờ) trước offset user. */
@@ -50,11 +55,13 @@ function displayRemainingMs(endTimeMs, delayOffsetMs = 0, nowMs = Date.now()) {
 /** Hẹn timer sớm hơn để bù độ trễ PowerShell / cliclick — click chạm đúng lúc offset. */
 function computeClickFireDelayMs(schedule, delayOffsetMs = 0, nowMs = Date.now()) {
   const offset = Number(delayOffsetMs) || 0;
-  const lead = resolveClickExecutionLeadMs();
+  const advance = schedule?.executionAdvanceMs
+    ?? schedule?.executionLeadMs
+    ?? resolveExecuteAdvanceMs();
   if (schedule?.endTimeMs) {
-    return Math.max(0, Math.round(schedule.endTimeMs - nowMs + offset - lead));
+    return Math.max(0, Math.round(schedule.endTimeMs - nowMs + offset - advance));
   }
-  return Math.max(0, Math.round((Number(schedule?.clickWaitMs) || 0) - lead));
+  return Math.max(0, Math.round((Number(schedule?.clickWaitMs) || 0) - advance));
 }
 
 function sleepMs(ms) {
@@ -75,6 +82,37 @@ async function waitUntilTimestamp(targetMs, { shouldAbort } = {}) {
     /* else: busy-wait vài ms cuối cho chính xác */
   }
   return !(typeof shouldAbort === "function" && shouldAbort());
+}
+
+/**
+ * Chờ tới mốc click động — getTargetMs() được gọi lại mỗi vòng (offset đổi giữa chờ vẫn áp dụng).
+ */
+async function waitUntilDynamicTarget(getTargetMs, { shouldAbort, onTargetChange } = {}) {
+  if (typeof getTargetMs !== "function") return false;
+  let lastTarget = null;
+  while (true) {
+    if (typeof shouldAbort === "function" && shouldAbort()) return false;
+    const targetMs = getTargetMs();
+    if (!Number.isFinite(targetMs)) return false;
+    if (lastTarget !== null && targetMs !== lastTarget) {
+      if (typeof onTargetChange === "function") {
+        onTargetChange(targetMs, lastTarget);
+      }
+    }
+    lastTarget = targetMs;
+
+    const now = Date.now();
+    if (now >= targetMs) {
+      return !(typeof shouldAbort === "function" && shouldAbort());
+    }
+
+    const remaining = targetMs - now;
+    if (remaining > 200) await sleepMs(150);
+    else if (remaining > 80) await sleepMs(remaining - 40);
+    else if (remaining > 20) await sleepMs(Math.max(1, remaining - 8));
+    else if (remaining > 2) await sleepMs(1);
+    /* else: busy-wait vài ms cuối cho chính xác */
+  }
 }
 
 /** @deprecated use waitUntilTimestamp(clickExecuteAtMs(...)) */
@@ -307,12 +345,16 @@ function buildEndTimeSchedule(endTimeMs, {
     clickWaitMs + closeAfterEnd,
     Math.round(endTimeMs - now + closeAfterEnd),
   );
+  const timing = getSessionClickTiming();
   return {
     clickWaitMs,
     closeWaitMs,
     endTimeMs,
     displayRemainingMs: displayRemainingMs(endTimeMs, offset, now),
-    executionLeadMs: resolveClickExecutionLeadMs(),
+    frozenTargetBeforeMs: timing.targetBeforeMs,
+    frozenClickLatencyMs: timing.clickLatencyMs,
+    executionAdvanceMs: timing.executeAdvanceMs,
+    executionLeadMs: timing.executeAdvanceMs,
     source,
   };
 }
@@ -371,12 +413,16 @@ async function computeCountdownSchedule(
 
   const base = Number(clickAfterMs) > 0 ? Number(clickAfterMs) : Number(defaultWaitMs) || 0;
   const clickWaitMs = computeClickFireDelayMs({ clickWaitMs: Math.max(0, Math.round(base + offset)) }, 0, now);
+  const timing = getSessionClickTiming();
   return {
     clickWaitMs,
     closeWaitMs: clickWaitMs + closeAfterEnd,
     endTimeMs: null,
     displayRemainingMs: null,
-    executionLeadMs: resolveClickExecutionLeadMs(),
+    frozenTargetBeforeMs: timing.targetBeforeMs,
+    frozenClickLatencyMs: timing.clickLatencyMs,
+    executionAdvanceMs: timing.executeAdvanceMs,
+    executionLeadMs: timing.executeAdvanceMs,
     source: "time_meta",
   };
 }
@@ -406,5 +452,6 @@ module.exports = {
   clickDisplayTargetMs,
   clickExecuteAtMs,
   waitUntilTimestamp,
+  waitUntilDynamicTarget,
   waitUntilClickTarget,
 };

@@ -10,20 +10,32 @@ const {
 const { startDesktopPoller } = require("./poll");
 const { desktopLogin } = require("./auth");
 const { loadSettings, saveSettings, adjustDelayOffset } = require("./settings");
-const { clickScreenPoint, warmUpWinClickHelper, shutdownWinClickHelper, isWinClickHelperReady } = require("./desktop-click");
+const {
+  clickScreenPoint,
+  warmUpWinClickHelper,
+  shutdownWinClickHelper,
+  isWinClickHelperReady,
+  pingHelper,
+} = require("./desktop-click");
 const { pickPointOnScreen } = require("./pick-point");
 const { ensureAccessibility } = require("./accessibility");
 const {
   computeCountdownSchedule,
   computeClickFireDelayMs,
-  waitUntilTimestamp,
+  waitUntilDynamicTarget,
   clickDisplayTargetMs,
   clickExecuteAtMs,
   resolveClickExecutionLeadMs,
   isScheduleTooStale,
   scheduleStaleMs,
 } = require("./junb-url");
-const { recordClickOutcome, getClickLeadStats } = require("./click-lead");
+const {
+  recordClickOutcome,
+  getClickLeadStats,
+  resolveExecuteAdvanceMs,
+  resolveTargetOverlayRemainingMs,
+  isTrustworthyClickOutcome,
+} = require("./click-lead");
 const {
   ensureCountdownOverlay,
   setCountdownOverlay,
@@ -290,8 +302,16 @@ async function scheduleDesktopClick({
   });
 
   const executeAtMsPlanned = schedule.endTimeMs
-    ? clickExecuteAtMs(schedule.endTimeMs, offsetMs)
-    : scheduledAt + Math.max(0, Number(schedule.clickWaitMs) || 0) + execLead;
+    ? clickExecuteAtMs(
+      schedule.endTimeMs,
+      offsetMs,
+      schedule.executionAdvanceMs ?? schedule.executionLeadMs,
+    )
+    : scheduledAt + Math.max(0, Number(schedule.clickWaitMs) || 0);
+
+  const clickLandAtMsPlanned = schedule.endTimeMs && displayTargetMs
+    ? displayTargetMs - (schedule.frozenTargetBeforeMs ?? resolveTargetOverlayRemainingMs())
+    : null;
 
   clickLog("schedule", `job #${key} scheduled`, {
     jobId: key,
@@ -300,10 +320,13 @@ async function scheduleDesktopClick({
     source: schedule.source,
     endTimeMs: schedule.endTimeMs,
     displayTargetMs,
+    clickLandAtMs: clickLandAtMsPlanned,
     executeAtMs: executeAtMsPlanned,
     fireDelayMs,
     offsetMs,
     leadMs: execLead,
+    clickLatencyMs: schedule.frozenClickLatencyMs,
+    targetBeforeMs: schedule.frozenTargetBeforeMs,
     clickWaitMs: schedule.clickWaitMs,
     timeLabel: label,
     autoClickEnabled: settings.autoClickEnabled,
@@ -320,56 +343,97 @@ async function scheduleDesktopClick({
 
   (async () => {
     let finalExecuteAtMs = null;
+    let finalClickLandAtMs = null;
+    let waitDriftMs = null;
     let waitAbortLocal = null;
-    try {
-      while (!shouldAbort()) {
-        const latest = loadSettings();
-        const liveOffset = Number(latest.delayOffsetMs) || 0;
-        let executeAtMs;
-        if (schedule.endTimeMs) {
-          executeAtMs = clickExecuteAtMs(schedule.endTimeMs, liveOffset);
-        } else {
-          const lead = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
-          executeAtMs = scheduledAt + Math.max(0, Number(schedule.clickWaitMs) || 0) + lead;
-        }
-        if (!executeAtMs) return;
+    let helperWarmed = false;
 
-        let waitAborted = false;
-        waitAbortLocal = () => { waitAborted = true; };
-        registerClickWaitAbort(waitAbortLocal);
+    const resolveClickLandAtMs = () => {
+      if (!schedule.endTimeMs) return null;
+      const liveOffset = Number(loadSettings().delayOffsetMs) || 0;
+      const displayTarget = clickDisplayTargetMs(schedule.endTimeMs, liveOffset);
+      const targetBefore = schedule.frozenTargetBeforeMs ?? resolveTargetOverlayRemainingMs();
+      return displayTarget - targetBefore;
+    };
 
-        const ok = await waitUntilTimestamp(executeAtMs, {
-          shouldAbort: () => waitAborted || shouldAbort(),
-        });
-        clearClickWaitAbort(waitAbortLocal);
-        waitAbortLocal = null;
+    const resolveExecuteAtMs = () => {
+      const latency = schedule.frozenClickLatencyMs
+        ?? schedule.executionAdvanceMs
+        ?? schedule.executionLeadMs
+        ?? resolveExecuteAdvanceMs();
+      const clickLandAt = resolveClickLandAtMs();
+      if (clickLandAt != null) return clickLandAt - latency;
+      return scheduledAt + Math.max(0, Number(schedule.clickWaitMs) || 0);
+    };
 
-        if (!ok || shouldAbort()) {
-          clickLog("skip", `skip click job #${key} cancelled`, {
-            jobId: key, seq, executeAtMs, clickGen,
-          });
-          console.log(`Skip click job #${key} — job mới hơn hoặc đã hủy`);
-          return;
-        }
-        finalExecuteAtMs = executeAtMs;
-        const waitEndedAt = Date.now();
-        clickLog("wait", `job #${key} wait done`, {
-          jobId: key,
-          executeAtMs,
-          waitEndedAt,
-          driftMs: waitEndedAt - executeAtMs,
-          offsetMs: liveOffset,
-          clickGen,
-        });
-        notifySchedule({
-          type: "wait",
-          jobId: key,
-          driftMs: waitEndedAt - executeAtMs,
-          offsetMs: liveOffset,
-          executeAtMs,
-        });
-        break;
+    const maybeWarmHelper = (targetMs) => {
+      if (helperWarmed || process.platform !== "win32") return;
+      const remaining = targetMs - Date.now();
+      if (remaining > 0 && remaining <= 4000) {
+        helperWarmed = true;
+        warmUpWinClickHelper().catch(() => {});
       }
+    };
+
+    try {
+      if (!resolveExecuteAtMs()) return;
+
+      let waitAborted = false;
+      waitAbortLocal = () => { waitAborted = true; };
+      registerClickWaitAbort(waitAbortLocal);
+
+      const ok = await waitUntilDynamicTarget(
+        () => {
+          const targetMs = resolveExecuteAtMs();
+          maybeWarmHelper(targetMs);
+          return targetMs;
+        },
+        {
+        shouldAbort: () => waitAborted || shouldAbort(),
+        onTargetChange: (targetMs, prevMs) => {
+          syncCountdownOverlay();
+          clickLog("schedule", `job #${key} offset changed — re-target`, {
+            jobId: key,
+            executeAtMs: targetMs,
+            clickLandAtMs: resolveClickLandAtMs(),
+            prevExecuteAtMs: prevMs,
+            offsetMs: Number(loadSettings().delayOffsetMs) || 0,
+            clickGen,
+          });
+        },
+      });
+      clearClickWaitAbort(waitAbortLocal);
+      waitAbortLocal = null;
+
+      if (!ok || shouldAbort()) {
+        clickLog("skip", `skip click job #${key} cancelled`, {
+          jobId: key, seq, clickGen,
+        });
+        console.log(`Skip click job #${key} — job mới hơn hoặc đã hủy`);
+        return;
+      }
+
+      finalExecuteAtMs = resolveExecuteAtMs();
+      finalClickLandAtMs = resolveClickLandAtMs();
+      const liveOffset = Number(loadSettings().delayOffsetMs) || 0;
+      const waitEndedAt = Date.now();
+      waitDriftMs = waitEndedAt - finalExecuteAtMs;
+      clickLog("wait", `job #${key} wait done`, {
+        jobId: key,
+        executeAtMs: finalExecuteAtMs,
+        clickLandAtMs: finalClickLandAtMs,
+        waitEndedAt,
+        driftMs: waitDriftMs,
+        offsetMs: liveOffset,
+        clickGen,
+      });
+      notifySchedule({
+        type: "wait",
+        jobId: key,
+        driftMs: waitDriftMs,
+        offsetMs: liveOffset,
+        executeAtMs: finalExecuteAtMs,
+      });
 
       if (shouldAbort() || !isCurrentClickGeneration(clickGen)) {
         clickLog("skip", `skip click job #${key} stale generation`, { jobId: key, clickGen });
@@ -377,6 +441,9 @@ async function scheduleDesktopClick({
       }
 
       if (process.platform === "darwin") ensureAccessibility(true);
+      if (process.platform === "win32" && !isWinClickHelperReady()) {
+        await warmUpWinClickHelper();
+      }
       const latest = loadSettings();
       const { x: clickX, y: clickY } = resolveClickPoint(latest);
 
@@ -436,19 +503,28 @@ async function scheduleDesktopClick({
         method: result.method,
         clickDurationMs: result.durationMs,
         invokeDelayMs: finalExecuteAtMs != null ? clickInvokeAt - finalExecuteAtMs : null,
+        clickLandAtMs: finalClickLandAtMs,
+        landDriftMs: finalClickLandAtMs != null ? clickedAt - finalClickLandAtMs : null,
         driftFromDisplayMs: displayTarget != null ? clickedAt - displayTarget : null,
         source: schedule.source,
         offsetMs: latest.delayOffsetMs,
         leadMs: execLeadDone,
+        clickLatencyMs: schedule.frozenClickLatencyMs,
         endTimeMs: schedule.endTimeMs,
         displayTargetMs: displayTarget,
         clickedAt,
       });
       if (displayTarget != null && result.durationMs != null) {
         const beforeLead = execLeadDone;
+        const driftFromDisplayMs = clickedAt - displayTarget;
         recordClickOutcome({
           clickDurationMs: result.durationMs,
-          driftFromDisplayMs: clickedAt - displayTarget,
+          driftFromDisplayMs,
+          trustworthy: isTrustworthyClickOutcome({
+            driftFromDisplayMs,
+            fireDelayMs,
+            waitDriftMs,
+          }),
         });
         const leadStats = getClickLeadStats();
         if (leadStats.leadMs !== beforeLead) {
@@ -583,7 +659,13 @@ function broadcastClickLog(record) {
 
 function registerIpcHandlers() {
   ipcMain.handle("settings:get", () => loadSettings());
-  ipcMain.handle("settings:save", (_event, partial) => saveSettings(partial || {}));
+  ipcMain.handle("settings:save", (_event, partial) => {
+    const result = saveSettings(partial || {});
+    if (partial && Object.prototype.hasOwnProperty.call(partial, "delayOffsetMs")) {
+      syncCountdownOverlay();
+    }
+    return result;
+  });
   ipcMain.handle("settings:adjust-delay", async (_event, deltaMs) => {
     const result = adjustDelayOffset(Number(deltaMs) || 0);
     syncCountdownOverlay();
@@ -810,13 +892,15 @@ app.whenReady().then(async () => {
       console.warn("Tray failed:", err.message || err);
     }
     restartPoller();
-    warmUpWinClickHelper();
-    if (process.platform === "win32") {
+    await warmUpWinClickHelper();
+    if (process.platform === "win32" && Number(process.env.DESKTOP_CLICK_HELPER_KEEPALIVE_MS || 30_000) > 0) {
       setInterval(() => {
-        if (!isWinClickHelperReady()) {
-          warmUpWinClickHelper();
+        if (isWinClickHelperReady()) {
+          pingHelper().catch(() => warmUpWinClickHelper());
+          return;
         }
-      }, 60_000);
+        warmUpWinClickHelper();
+      }, Number(process.env.DESKTOP_CLICK_HELPER_KEEPALIVE_MS || 30_000));
     }
   } catch (err) {
     if (err && err.code === "EADDRINUSE") {

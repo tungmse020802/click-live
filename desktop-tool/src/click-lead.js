@@ -1,22 +1,41 @@
-/** Bù độ trễ click OS — học từ clickDurationMs + hiệu chỉnh drift thực tế (closed-loop). */
+/** Bù độ trễ click OS — canh thời điểm chạm chuột cố định so với TIME+offset. */
 
 const fs = require("fs");
 const path = require("path");
 
 const MAX_SAMPLES = 24;
 const DRIFT_EMA_ALPHA = 0.3;
-const DRIFT_CORRECTION_GAIN = 0.45;
-const MAX_DRIFT_CORRECTION_MS = 45;
+const MAX_OUTLIER_DRIFT_MS = 180;
+const MIN_TRUSTWORTHY_FIRE_MS = 500;
 
 const samples = [];
 let driftEma = null;
 let driftSampleCount = 0;
+/** Cố định cả session — mọi job cùng targetBefore + latency. */
+let sessionTiming = null;
 let calibrationLoaded = false;
 let saveTimer = null;
 
 function platformDefaultLeadMs() {
   if (process.platform === "win32") return 100;
   return 40;
+}
+
+function resolveTargetOverlayRemainingMs() {
+  const env = Number(process.env.DESKTOP_CLICK_TARGET_OVERLAY_MS);
+  if (Number.isFinite(env) && env >= 0) return Math.round(env);
+  return process.platform === "win32" ? 80 : 40;
+}
+
+function advanceBounds() {
+  return process.platform === "win32"
+    ? { floor: 35, ceiling: 220 }
+    : { floor: 15, ceiling: 100 };
+}
+
+function clampAdvance(ms) {
+  const { floor, ceiling } = advanceBounds();
+  return Math.min(ceiling, Math.max(floor, Math.round(ms)));
 }
 
 function resolveCalibrationPath() {
@@ -101,61 +120,100 @@ function recordClickDrift(driftMs) {
   scheduleSaveCalibration();
 }
 
-/** Ghi nhận sau click có TIME — duration (latency) + drift (đúng/muộn/sớm vs overlay 0.0s). */
-function recordClickOutcome({ clickDurationMs, driftFromDisplayMs } = {}) {
-  if (clickDurationMs != null) recordClickDuration(clickDurationMs);
-  if (driftFromDisplayMs != null) recordClickDrift(driftFromDisplayMs);
-}
-
 function percentile(sorted, ratio) {
   if (!sorted.length) return 0;
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor(sorted.length * ratio)));
   return sorted[idx];
 }
 
-function durationBasedLeadMs() {
-  const floor = process.platform === "win32" ? 35 : 15;
-  const ceiling = process.platform === "win32" ? 220 : 100;
-  const fallback = platformDefaultLeadMs();
-
+function predictClickLatencyMs() {
+  loadCalibration();
+  try {
+    const { getHelperLatencyEstimateMs } = require("./desktop-click");
+    const warm = getHelperLatencyEstimateMs();
+    if (Number.isFinite(warm) && warm > 0) return Math.round(warm);
+  } catch {
+    /* ngoài Electron hoặc chưa warm */
+  }
+  const fallback = process.platform === "win32" ? 12 : 8;
   if (samples.length < 3) return fallback;
-
   const sorted = [...samples].sort((a, b) => a - b);
-  const p95 = percentile(sorted, 0.95);
-  const margin = process.platform === "win32" ? 20 : 10;
-  return Math.min(ceiling, Math.max(floor, p95 + margin));
+  const p75 = Math.round(percentile(sorted, 0.75));
+  return Math.max(fallback, p75);
 }
 
-function driftCorrectionMs() {
-  if (driftEma == null || driftSampleCount < 2) return 0;
-  const raw = driftEma * DRIFT_CORRECTION_GAIN;
-  return Math.round(Math.max(-MAX_DRIFT_CORRECTION_MS, Math.min(MAX_DRIFT_CORRECTION_MS, raw)));
+function buildSessionClickTiming() {
+  const targetBeforeMs = resolveTargetOverlayRemainingMs();
+  const clickLatencyMs = predictClickLatencyMs();
+  const executeAdvanceMs = clampAdvance(targetBeforeMs + clickLatencyMs);
+  return { targetBeforeMs, clickLatencyMs, executeAdvanceMs };
+}
+
+/** Timing cố định cả session — mọi job dùng cùng mốc chạm chuột. */
+function getSessionClickTiming() {
+  loadCalibration();
+  const env = Number(process.env.DESKTOP_CLICK_EXECUTION_LEAD_MS);
+  if (Number.isFinite(env) && env >= 0) {
+    const advance = Math.round(env);
+    return {
+      targetBeforeMs: resolveTargetOverlayRemainingMs(),
+      clickLatencyMs: Math.max(0, advance - resolveTargetOverlayRemainingMs()),
+      executeAdvanceMs: advance,
+    };
+  }
+  if (!sessionTiming) {
+    sessionTiming = buildSessionClickTiming();
+  }
+  return sessionTiming;
+}
+
+/** Gọi sau warmup helper — cập nhật latency đo thực tế (pipe ấm). */
+function refreshSessionClickTiming() {
+  if (Number.isFinite(Number(process.env.DESKTOP_CLICK_EXECUTION_LEAD_MS))) {
+    return getSessionClickTiming();
+  }
+  sessionTiming = buildSessionClickTiming();
+  return sessionTiming;
+}
+
+function resolveExecuteAdvanceMs() {
+  return getSessionClickTiming().executeAdvanceMs;
 }
 
 function resolveClickExecutionLeadMs() {
-  loadCalibration();
+  return resolveExecuteAdvanceMs();
+}
 
-  const env = Number(process.env.DESKTOP_CLICK_EXECUTION_LEAD_MS);
-  if (Number.isFinite(env) && env >= 0) return Math.round(env);
+function isTrustworthyClickOutcome({ driftFromDisplayMs, fireDelayMs, waitDriftMs } = {}) {
+  if (fireDelayMs != null && fireDelayMs < MIN_TRUSTWORTHY_FIRE_MS) return false;
+  if (waitDriftMs != null && Math.abs(waitDriftMs) > 600) return false;
+  if (driftFromDisplayMs != null && Math.abs(driftFromDisplayMs) > MAX_OUTLIER_DRIFT_MS) return false;
+  return true;
+}
 
-  const floor = process.platform === "win32" ? 35 : 15;
-  const ceiling = process.platform === "win32" ? 220 : 100;
-  const base = durationBasedLeadMs();
-  const corrected = base + driftCorrectionMs();
-  return Math.min(ceiling, Math.max(floor, corrected));
+/** Ghi latency/drift để thống kê — không đổi timing giữa các job trong session. */
+function recordClickOutcome({
+  clickDurationMs,
+  driftFromDisplayMs,
+  trustworthy = true,
+} = {}) {
+  if (clickDurationMs != null) recordClickDuration(clickDurationMs);
+  if (!trustworthy || driftFromDisplayMs == null) return;
+  if (Math.abs(driftFromDisplayMs) > MAX_OUTLIER_DRIFT_MS) return;
+  recordClickDrift(driftFromDisplayMs);
 }
 
 function getClickLeadStats() {
   loadCalibration();
-  const baseLeadMs = durationBasedLeadMs();
-  const correctionMs = driftCorrectionMs();
+  const timing = getSessionClickTiming();
   return {
     samples: samples.length,
     driftSamples: driftSampleCount,
     driftEma,
-    baseLeadMs,
-    correctionMs,
-    leadMs: resolveClickExecutionLeadMs(),
+    targetOverlayMs: timing.targetBeforeMs,
+    clickLatencyMs: timing.clickLatencyMs,
+    sessionAdvanceMs: timing.executeAdvanceMs,
+    leadMs: timing.executeAdvanceMs,
     recent: samples.slice(-5),
   };
 }
@@ -164,6 +222,7 @@ function resetClickLeadSamples() {
   samples.length = 0;
   driftEma = null;
   driftSampleCount = 0;
+  sessionTiming = null;
   calibrationLoaded = true;
   scheduleSaveCalibration();
 }
@@ -173,6 +232,12 @@ module.exports = {
   recordClickDrift,
   recordClickOutcome,
   resolveClickExecutionLeadMs,
+  resolveExecuteAdvanceMs,
+  resolveTargetOverlayRemainingMs,
+  predictClickLatencyMs,
+  getSessionClickTiming,
+  refreshSessionClickTiming,
+  isTrustworthyClickOutcome,
   platformDefaultLeadMs,
   getClickLeadStats,
   resetClickLeadSamples,

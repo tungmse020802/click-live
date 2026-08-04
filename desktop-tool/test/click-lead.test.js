@@ -7,8 +7,10 @@ const {
   recordClickDuration,
   recordClickOutcome,
   resolveClickExecutionLeadMs,
+  getSessionClickTiming,
   resetClickLeadSamples,
   getClickLeadStats,
+  isTrustworthyClickOutcome,
 } = require("../src/click-lead");
 
 test("adaptive lead stays within platform bounds", () => {
@@ -28,17 +30,28 @@ test("env DESKTOP_CLICK_EXECUTION_LEAD_MS overrides adaptive", () => {
   delete process.env.DESKTOP_CLICK_EXECUTION_LEAD_MS;
 });
 
-test("drift correction reduces lead when clicks land early", () => {
+test("session click timing stays fixed across jobs", () => {
   delete process.env.DESKTOP_CLICK_EXECUTION_LEAD_MS;
   process.env.DESKTOP_TOOL_USER_DATA = fs.mkdtempSync(path.join(os.tmpdir(), "click-lead-drift-"));
   resetClickLeadSamples();
-  for (let i = 0; i < 6; i += 1) recordClickDuration(80);
-  const base = resolveClickExecutionLeadMs();
+  for (let i = 0; i < 6; i += 1) recordClickDuration(30);
+  const t1 = getSessionClickTiming();
   for (let i = 0; i < 5; i += 1) {
-    recordClickOutcome({ clickDurationMs: 80, driftFromDisplayMs: -30 });
+    recordClickOutcome({
+      clickDurationMs: 30,
+      driftFromDisplayMs: -110,
+      trustworthy: true,
+    });
   }
-  const adjusted = resolveClickExecutionLeadMs();
-  assert.ok(adjusted < base, `expected ${adjusted} < ${base}`);
+  const t2 = getSessionClickTiming();
+  assert.equal(t1.executeAdvanceMs, t2.executeAdvanceMs);
+  assert.equal(t1.clickLatencyMs, t2.clickLatencyMs);
   const stats = getClickLeadStats();
-  assert.ok(stats.correctionMs < 0);
+  assert.ok(stats.targetOverlayMs >= 40);
+});
+
+test("isTrustworthyClickOutcome rejects late fire and huge drift", () => {
+  assert.equal(isTrustworthyClickOutcome({ fireDelayMs: 0, driftFromDisplayMs: -80 }), false);
+  assert.equal(isTrustworthyClickOutcome({ fireDelayMs: 5000, driftFromDisplayMs: 2500 }), false);
+  assert.equal(isTrustworthyClickOutcome({ fireDelayMs: 5000, driftFromDisplayMs: -85 }), true);
 });
