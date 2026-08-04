@@ -44,7 +44,7 @@ function Ensure-WingetPackage {
   )
 
   if (-not (Test-Cmd winget)) {
-    Write-Warn "winget missing — skip auto-install $Label"
+    Write-Warn "winget missing - skip auto-install $Label"
     return $false
   }
 
@@ -154,7 +154,7 @@ function Update-Repo {
 
   if (-not (Test-Cmd git)) { return }
   if (-not (Test-Path (Join-Path $Root ".git"))) {
-    Write-Warn "Not a git repo — skip pull"
+    Write-Warn "Not a git repo - skip pull"
     return
   }
 
@@ -169,7 +169,7 @@ function Update-Repo {
     & git fetch origin 2>&1 | ForEach-Object { Write-Host "  $_" }
     & git pull --ff-only origin $branch 2>&1 | ForEach-Object { Write-Host "  $_" }
     if ($LASTEXITCODE -ne 0) {
-      Write-Warn "git pull failed — continuing with local code"
+      Write-Warn "git pull failed - continuing with local code"
     }
   } finally {
     Pop-Location
@@ -225,7 +225,7 @@ function Build-ClickHelper {
   New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
   if (-not $GoReady) {
-    Write-Warn "No Go — skip native helper; PowerShell fallback will be used"
+    Write-Warn "No Go - skip native helper; PowerShell fallback will be used"
     return
   }
 
@@ -237,7 +237,7 @@ function Build-ClickHelper {
   Push-Location $src
   try {
     Write-Host "  go build ..."
-    & go build -trimpath -ldflags="-s -w" -o $out .
+    & go build -trimpath "-ldflags=-s -w" -o $out .
     if ($LASTEXITCODE -ne 0) {
       throw "go build failed with code $LASTEXITCODE"
     }
@@ -299,7 +299,7 @@ try {
 
   Write-Host ""
   Write-Host "========================================" -ForegroundColor Green
-  Write-Host " Click Live desktop-tool — setup + run" -ForegroundColor Green
+  Write-Host " Click Live desktop-tool - setup + run" -ForegroundColor Green
   Write-Host "========================================" -ForegroundColor Green
 
   $desktopToolDir = Get-DesktopToolDir

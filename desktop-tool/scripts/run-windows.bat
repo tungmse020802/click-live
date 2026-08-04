@@ -1,24 +1,33 @@
 @echo off
 setlocal EnableExtensions
-chcp 65001 >nul 2>&1
+cd /d "%~dp0.."
 
 echo.
-echo Click Live desktop-tool — setup all-in-one
+echo Click Live desktop-tool - setup all-in-one
 echo.
 
-where powershell.exe >nul 2>&1
-if errorlevel 1 (
-  echo [ERROR] powershell.exe not found
+set "PS1=%~dp0run-windows-setup.ps1"
+set "PSEXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+if not exist "%PSEXE%" (
+  echo [ERROR] PowerShell not found: %PSEXE%
   pause
   exit /b 1
 )
 
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0run-windows-setup.ps1" %*
+if not exist "%PS1%" (
+  echo [ERROR] Missing: %PS1%
+  pause
+  exit /b 1
+)
+
+"%PSEXE%" -ExecutionPolicy Bypass -File "%PS1%" %*
 set ERR=%ERRORLEVEL%
 
 if %ERR% NEQ 0 (
   echo.
   echo [ERROR] Setup/run failed with code %ERR%
+  pause
 )
 
 exit /b %ERR%

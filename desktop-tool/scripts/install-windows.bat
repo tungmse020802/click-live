@@ -27,7 +27,7 @@ if errorlevel 1 (
 echo Running install-windows.ps1 ...
 echo.
 
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS1%" %*
+powershell.exe -ExecutionPolicy Bypass -File "%PS1%" %*
 set ERR=%ERRORLEVEL%
 
 echo.
