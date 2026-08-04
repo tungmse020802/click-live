@@ -24,6 +24,33 @@ function Write-Err {
   Write-Host "[ERROR] $Message" -ForegroundColor Red
 }
 
+function Invoke-External {
+  param(
+    [Parameter(Mandatory = $true)]
+    [scriptblock]$Command
+  )
+
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $output = & $Command 2>&1
+    foreach ($line in @($output)) {
+      if ($null -eq $line) { continue }
+      $text = if ($line -is [System.Management.Automation.ErrorRecord]) {
+        $line.ToString()
+      } else {
+        [string]$line
+      }
+      if ($text) {
+        Write-Host "  $text"
+      }
+    }
+    return $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
 function Test-Cmd {
   param([string]$Name)
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
@@ -184,9 +211,9 @@ function Update-Repo {
       $branch = "feature/pipeline-optimize"
     }
     Write-Host "  branch: $branch"
-    & git fetch origin 2>&1 | ForEach-Object { Write-Host "  $_" }
-    & git pull --ff-only origin $branch 2>&1 | ForEach-Object { Write-Host "  $_" }
-    if ($LASTEXITCODE -ne 0) {
+    Invoke-External { git fetch origin } | Out-Null
+    $pullCode = Invoke-External { git pull --ff-only origin $branch }
+    if ($pullCode -ne 0) {
       Write-Warn "git pull failed - continuing with local code"
     }
   } finally {
@@ -218,9 +245,9 @@ function Install-NpmDeps {
   Write-Step "npm install"
   Push-Location $DesktopToolDir
   try {
-    & npm install
-    if ($LASTEXITCODE -ne 0) {
-      throw "npm install failed with code $LASTEXITCODE"
+    $code = Invoke-External { npm install }
+    if ($code -ne 0) {
+      throw "npm install failed with code $code"
     }
     Write-Host "  OK"
   } finally {
@@ -255,9 +282,9 @@ function Build-ClickHelper {
   Push-Location $src
   try {
     Write-Host "  go build ..."
-    & go build -trimpath "-ldflags=-s -w" -o $out .
-    if ($LASTEXITCODE -ne 0) {
-      throw "go build failed with code $LASTEXITCODE"
+    $code = Invoke-External { go build -trimpath "-ldflags=-s -w" -o $out . }
+    if ($code -ne 0) {
+      throw "go build failed with code $code"
     }
     $size = (Get-Item $out).Length
     Write-Host "  OK $out ($([math]::Round($size / 1KB)) KB)"
@@ -272,8 +299,8 @@ function Test-Syntax {
   Write-Step "Syntax check"
   Push-Location $DesktopToolDir
   try {
-    & npm run check 2>&1 | ForEach-Object { Write-Host "  $_" }
-    if ($LASTEXITCODE -ne 0) {
+    $code = Invoke-External { npm run check }
+    if ($code -ne 0) {
       Write-Warn "npm run check failed - continuing anyway"
     } else {
       Write-Host "  OK"
@@ -293,9 +320,9 @@ function Start-DesktopTool {
 
   Push-Location $DesktopToolDir
   try {
-    & npm start
-    if ($LASTEXITCODE -ne 0) {
-      throw "npm start failed with code $LASTEXITCODE"
+    $code = Invoke-External { npm start }
+    if ($code -ne 0) {
+      throw "npm start failed with code $code"
     }
   } finally {
     Pop-Location
