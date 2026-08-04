@@ -126,7 +126,7 @@ public class ClickLiveMouse {
 
   static string ClickMode() {
     var v = Environment.GetEnvironmentVariable("DESKTOP_CLICK_MODE");
-    if (string.IsNullOrEmpty(v)) return "absolute";
+    if (string.IsNullOrEmpty(v)) return "deep";
     return v.Trim().ToLowerInvariant();
   }
 
@@ -217,7 +217,13 @@ public class ClickLiveMouse {
       return false;
     }
 
-    Thread.Sleep(ClickSettleMs());
+    IntPtr hwnd = ResolveDeepHwnd(x, y);
+    if (hwnd != IntPtr.Zero) {
+      FocusTargetWindow(hwnd);
+    } else {
+      Thread.Sleep(ClickSettleMs());
+    }
+
     if (!SendMouse(MOUSEEVENTF_LEFTDOWN, 0, 0)) {
       detail = "mode=absolute,sendinput-down-failed,gle=" + Marshal.GetLastWin32Error();
       return false;

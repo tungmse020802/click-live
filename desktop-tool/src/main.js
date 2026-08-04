@@ -198,18 +198,39 @@ function notifySchedule(payload) {
   }
 }
 
-/** Windows: ẩn settings lúc click để không nuốt sự kiện trên cửa sổ tool. */
+/** Windows: an het cua so tool truoc click, hien lai bang showInactive (khong cuop focus). */
 async function withSettingsHiddenForClick(fn) {
-  const shouldHide = process.platform === "win32"
-    && settingsWindow
-    && !settingsWindow.isDestroyed()
-    && settingsWindow.isVisible();
-  if (shouldHide) settingsWindow.hide();
+  if (process.platform !== "win32") {
+    return fn();
+  }
+
+  const focusMs = Math.max(0, Number(process.env.DESKTOP_CLICK_FOCUS_MS) || 80);
+  const restoreMs = Math.max(0, Number(process.env.DESKTOP_CLICK_RESTORE_MS) || 200);
+  const hidden = BrowserWindow.getAllWindows().filter(
+    (win) => !win.isDestroyed() && win.isVisible()
+  );
+
+  for (const win of hidden) {
+    win.hide();
+  }
+
+  if (focusMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, focusMs));
+  }
+
   try {
     return await fn();
   } finally {
-    if (shouldHide && settingsWindow && !settingsWindow.isDestroyed()) {
-      settingsWindow.show();
+    if (restoreMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, restoreMs));
+    }
+    for (const win of hidden) {
+      if (win.isDestroyed()) continue;
+      if (typeof win.showInactive === "function") {
+        win.showInactive();
+      } else {
+        win.show();
+      }
     }
   }
 }

@@ -70,9 +70,30 @@ function psArgs(psPath) {
   ];
 }
 
+function buildClickHelperEnv() {
+  const keys = [
+    "DESKTOP_CLICK_MODE",
+    "DESKTOP_CLICK_DOUBLE",
+    "DESKTOP_CLICK_SETTLE_MS",
+    "DESKTOP_CLICK_STEP_MS",
+    "DESKTOP_CLICK_DOUBLE_GAP_MS",
+  ];
+  const env = { ...process.env };
+  for (const key of keys) {
+    const value = process.env[key];
+    if (value != null && String(value).trim() !== "") {
+      env[key] = String(value).trim();
+    }
+  }
+  if (!env.DESKTOP_CLICK_MODE) {
+    env.DESKTOP_CLICK_MODE = "deep";
+  }
+  return env;
+}
+
 function helperMethodSuffix() {
   const double = isDoubleClickEnabled() ? "-double" : "";
-  const mode = String(process.env.DESKTOP_CLICK_MODE || "absolute").trim().toLowerCase();
+  const mode = String(process.env.DESKTOP_CLICK_MODE || "deep").trim().toLowerCase();
   const modeTag = mode && mode !== "auto" ? `-${mode}` : "";
   if (activeHelperKind === "native") {
     return `native-helper${double}`;
@@ -219,6 +240,7 @@ function ensureWinClickHelper() {
     const child = spawn(backend.cmd, backend.args, {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      env: buildClickHelperEnv(),
     });
 
     let buffer = "";
@@ -262,6 +284,7 @@ function ensureWinClickHelper() {
         attachHelperStdoutPump();
         clickLog("helper", "click helper ready", {
           kind: backend.kind,
+          clickMode: buildClickHelperEnv().DESKTOP_CLICK_MODE,
           startupMs: Date.now() - startedAt,
           spawnGen,
         });
