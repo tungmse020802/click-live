@@ -33,10 +33,12 @@ public class ClickLiveMouse {
   public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
   public const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
 
+  public const uint WM_MOUSEMOVE = 0x0200;
   public const uint WM_LBUTTONDOWN = 0x0201;
   public const uint WM_LBUTTONUP = 0x0202;
   public const uint WM_LBUTTONDBLCLK = 0x0203;
   public const int MK_LBUTTON = 0x0001;
+  public const int SW_SHOW = 5;
 
   public const int SM_XVIRTUALSCREEN = 76;
   public const int SM_YVIRTUALSCREEN = 77;
@@ -91,6 +93,33 @@ public class ClickLiveMouse {
 
   [DllImport("user32.dll")]
   static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+  [DllImport("user32.dll")]
+  static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+  [DllImport("user32.dll")]
+  static extern IntPtr ChildWindowFromPoint(IntPtr hWndParent, POINT Point);
+
+  [DllImport("user32.dll")]
+  static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+  [DllImport("user32.dll")]
+  static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+
+  [DllImport("user32.dll")]
+  static extern IntPtr SetFocus(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  static extern bool BringWindowToTop(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+  [DllImport("user32.dll")]
+  static extern bool AllowSetForegroundWindow(int dwProcessId);
+
+  [DllImport("kernel32.dll")]
+  static extern uint GetCurrentThreadId();
 
   [DllImport("user32.dll")]
   static extern uint GetDoubleClickTime();
@@ -220,6 +249,137 @@ public class ClickLiveMouse {
     return true;
   }
 
+  static IntPtr ResolveDeepHwnd(int x, int y) {
+    POINT screen = new POINT { X = x, Y = y };
+    IntPtr hwnd = WindowFromPoint(screen);
+    if (hwnd == IntPtr.Zero) return IntPtr.Zero;
+
+    for (int i = 0; i < 20; i++) {
+      POINT client = new POINT { X = x, Y = y };
+      if (!ScreenToClient(hwnd, ref client)) break;
+      IntPtr child = ChildWindowFromPoint(hwnd, client);
+      if (child == IntPtr.Zero || child == hwnd) break;
+      hwnd = child;
+    }
+    return hwnd;
+  }
+
+  static bool FocusTargetWindow(IntPtr hwnd) {
+    if (hwnd == IntPtr.Zero) return false;
+
+    uint pid;
+    GetWindowThreadProcessId(hwnd, out pid);
+    AllowSetForegroundWindow((int)pid);
+    ShowWindow(hwnd, SW_SHOW);
+    BringWindowToTop(hwnd);
+    SetForegroundWindow(hwnd);
+    SetFocus(hwnd);
+    Thread.Sleep(ClickSettleMs());
+    return true;
+  }
+
+  static bool SendMouseMessages(IntPtr hwnd, int x, int y, bool useSendMessage, out string detail) {
+    detail = "";
+    if (hwnd == IntPtr.Zero) {
+      detail = "hwnd-zero";
+      return false;
+    }
+
+    POINT client = new POINT { X = x, Y = y };
+    if (!ScreenToClient(hwnd, ref client)) {
+      detail = "screentoclient-failed";
+      return false;
+    }
+
+    IntPtr lParam = MakeLParam(client.X, client.Y);
+
+    if (useSendMessage) {
+      SendMessage(hwnd, WM_MOUSEMOVE, IntPtr.Zero, lParam);
+      Thread.Sleep(ClickStepMs());
+      SendMessage(hwnd, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, lParam);
+      Thread.Sleep(ClickStepMs());
+      SendMessage(hwnd, WM_LBUTTONUP, IntPtr.Zero, lParam);
+      if (IsDoubleClickEnabled()) {
+        Thread.Sleep(DoubleClickGapMs());
+        SendMessage(hwnd, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, lParam);
+        Thread.Sleep(ClickStepMs());
+        SendMessage(hwnd, WM_LBUTTONUP, IntPtr.Zero, lParam);
+      }
+    } else {
+      PostMessage(hwnd, WM_MOUSEMOVE, IntPtr.Zero, lParam);
+      Thread.Sleep(ClickStepMs());
+      PostMessage(hwnd, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, lParam);
+      Thread.Sleep(ClickStepMs());
+      PostMessage(hwnd, WM_LBUTTONUP, IntPtr.Zero, lParam);
+      if (IsDoubleClickEnabled()) {
+        Thread.Sleep(DoubleClickGapMs());
+        PostMessage(hwnd, WM_LBUTTONDOWN, (IntPtr)MK_LBUTTON, lParam);
+        Thread.Sleep(ClickStepMs());
+        PostMessage(hwnd, WM_LBUTTONUP, IntPtr.Zero, lParam);
+      }
+    }
+
+    return true;
+  }
+
+  static bool ClickDeep(int x, int y, out string detail) {
+    detail = "mode=deep";
+    if (!SetCursorPos(x, y)) {
+      detail = "mode=deep,setcursorpos-failed,gle=" + Marshal.GetLastWin32Error();
+      return false;
+    }
+
+    IntPtr hwnd = ResolveDeepHwnd(x, y);
+    if (hwnd == IntPtr.Zero) {
+      detail = "mode=deep,windowfrompoint-failed";
+      return false;
+    }
+
+    uint targetTid;
+    GetWindowThreadProcessId(hwnd, out targetTid);
+    uint selfTid = GetCurrentThreadId();
+    bool attached = false;
+
+    try {
+      if (targetTid != selfTid) {
+        attached = AttachThreadInput(selfTid, targetTid, true);
+      }
+
+      FocusTargetWindow(hwnd);
+
+      string msgDetail;
+      if (!SendMouseMessages(hwnd, x, y, true, out msgDetail)) {
+        detail = "mode=deep," + msgDetail + ",hwnd=" + hwnd.ToInt64();
+        return false;
+      }
+
+      Thread.Sleep(ClickStepMs());
+      SendMouse(MOUSEEVENTF_LEFTDOWN, 0, 0);
+      Thread.Sleep(ClickStepMs());
+      SendMouse(MOUSEEVENTF_LEFTUP, 0, 0);
+
+      if (IsDoubleClickEnabled()) {
+        Thread.Sleep(DoubleClickGapMs());
+        SendMouse(MOUSEEVENTF_LEFTDOWN, 0, 0);
+        Thread.Sleep(ClickStepMs());
+        SendMouse(MOUSEEVENTF_LEFTUP, 0, 0);
+      }
+    } finally {
+      if (attached) {
+        AttachThreadInput(selfTid, targetTid, false);
+      }
+    }
+
+    string cursorDetail;
+    if (!VerifyCursor(x, y, out cursorDetail)) {
+      detail = "mode=deep," + cursorDetail + ",hwnd=" + hwnd.ToInt64();
+      return false;
+    }
+
+    detail = "mode=deep,hwnd=" + hwnd.ToInt64();
+    return true;
+  }
+
   static bool ClickPostMessage(int x, int y, out string detail) {
     detail = "mode=postmessage";
     if (!SetCursorPos(x, y)) {
@@ -308,10 +468,12 @@ public class ClickLiveMouse {
 
     if (mode == "legacy") return ClickLegacy(x, y, out detail);
     if (mode == "postmessage") return ClickPostMessage(x, y, out detail);
+    if (mode == "deep") return ClickDeep(x, y, out detail);
     if (mode == "absolute") return ClickAbsolute(x, y, out detail);
 
-    // auto: absolute -> postmessage -> legacy
+    // auto: absolute -> deep -> postmessage -> legacy
     if (ClickAbsolute(x, y, out detail)) return true;
+    if (ClickDeep(x, y, out detail)) return true;
     if (ClickPostMessage(x, y, out detail)) return true;
     return ClickLegacy(x, y, out detail);
   }
