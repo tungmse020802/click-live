@@ -161,7 +161,9 @@ Ghi chú:
 ```bash
 cd server/telegram_bot
 cp .env.app2.example .env.app2
-# chỉnh TELEGRAM_PHONE, TELEGRAM_CLIENT_TARGETS, API id/hash
+# hoặc tự động từ .env acc 1:
+TELEGRAM_PHONE_APP2=+849xxxxxxxx bash setup_app2.sh
+# chỉnh TELEGRAM_CLIENT_TARGETS trong .env.app2 nếu nhóm khác app-1
 bash login_telethon_app2.sh
 python3 telethon_reader.py   # test local (set -a && source .env.app2 && set +a)
 ```
@@ -169,6 +171,9 @@ python3 telethon_reader.py   # test local (set -a && source .env.app2 && set +a)
 Trên server sau deploy:
 
 ```bash
+TELEGRAM_PHONE_APP2=+849xxxxxxxx bash setup_app2.sh   # local
+SERVER_PASS='...' bash setup_app2_remote.sh --login # upload + login OTP
+# hoặc chỉ login nếu đã có .env.app2 trên server:
 bash login_telethon_app2_remote.sh
 journalctl -u click-live-telegram-reader-app2.service -f
 ```
