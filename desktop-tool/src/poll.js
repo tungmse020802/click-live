@@ -1,6 +1,7 @@
 const http = require("http");
 const https = require("https");
 const { URL } = require("url");
+const { clickLog, clickLogWarn } = require("./click-log");
 
 function httpGetJson(urlStr, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
@@ -73,9 +74,20 @@ function startDesktopPoller({ queueUrl, pullToken, queueUsername, intervalMs, on
       }
       const item = opens[opens.length - 1];
       const who = data.queue_user ? ` user=${data.queue_user}` : "";
+      clickLog("poll", "desktop pull open", {
+        jobId: item.jobId,
+        url: item.url.slice(0, 200),
+        clickAfterMs: item.clickAfterMs,
+        timeLabel: item.timeLabel,
+        queuedAtMs: item.queuedAtMs,
+        endTimeMs: item.endTimeMs,
+        queueUser: data.queue_user || "",
+        droppedOlder: opens.length - 1,
+      });
       console.log(`Desktop poll: 1 link${who}`);
       onOpen(item);
     } catch (err) {
+      clickLogWarn("poll", "desktop poll failed", { error: String(err.message || err) });
       console.warn("Desktop poll failed:", err.message || err);
     } finally {
       inFlight = false;

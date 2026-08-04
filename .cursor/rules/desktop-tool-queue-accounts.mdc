@@ -1,0 +1,37 @@
+---
+description: Mapping queue user ↔ desktop-tool / client — mọi thay đổi desktop click phải giữ đúng hành vi này
+globs: desktop-tool/**,server/telegram_bot/desktop_*.py,server/telegram_bot/open_link.py
+alwaysApply: false
+---
+
+# Desktop-tool ↔ Queue user mapping
+
+## Quy tắc vàng
+
+1. **Web queue UI login `adminN`** → mở link gắn `queue_user=adminN` → **chỉ desktop-tool login `adminN`** nhận qua `/api/desktop/pull`.
+2. **Token pull khác nhau theo user** — không dùng chung token giữa admin1/admin2.
+3. **Burst nhiều link cùng user** → server **drain hết pending** một lần pull → desktop **chỉ timing link cuối** (`poll.js` lấy `opens[opens.length - 1]`).
+4. **Job click** — `beginOpenSequence()` + `clickGeneration`: chỉ job mới nhất được wait/click; job cũ phải `skip`.
+5. **Một acc = một desktop-tool** khuyến nghị. Hai máy cùng login `admin1` → máy poll trước lấy hết pending; máy kia rỗng.
+
+## Bảng mapping
+
+| Web / hành động | queue_user | Desktop login | Kết quả |
+|-----------------|------------|---------------|---------|
+| User A mở link trên panel | admin1 | admin1 | Nhận + click (nếu bật) |
+| User A mở link | admin1 | admin2 | Không nhận |
+| Burst 10 link / 5s | admin1 | admin1 | 1 pull → 10 opens → timing **link #10** |
+| 2 desktop cùng admin1 | admin1 | cả 2 | Poll trước lấy batch; poll sau rỗng |
+| Telethon reader app-2 | — | — | Không liên quan desktop pull |
+
+## Test bắt buộc khi sửa desktop/relay
+
+- `server/telegram_bot/test_desktop_auth.py` — isolation, burst drain
+- `desktop-tool/npm test` — click generation, protocol Windows, adaptive lead
+
+## Giảm delay click
+
+- `DESKTOP_CLICK_EXECUTION_LEAD_MS=0` hoặc để adaptive (`click-lead.js` học từ `clickDurationMs`)
+- `DESKTOP_TOOL_POLL_MS=500` (mặc định 2000) — nhận link nhanh hơn
+- Windows: helper PowerShell phải `ready` lúc startup; log `method=powershell-helper` not `powershell`
+- Offset âm trong UI nếu vẫn click muộn so overlay

@@ -92,6 +92,8 @@ class TelegramClientConfig:
     filter_config_path: str
     filter_reload_seconds: float
     broadcast_enabled: bool
+    reader_id: str
+    use_env_targets_only: bool
 
 
 @dataclass(frozen=True)
@@ -483,6 +485,11 @@ def load_telegram_client_config() -> TelegramClientConfig:
         ),
         filter_reload_seconds=_parse_float("TELEGRAM_CLIENT_FILTER_RELOAD_SECONDS", 1.0, 0.1),
         broadcast_enabled=_parse_bool(os.environ.get("BOT_BROADCAST_ENABLED", ""), True),
+        reader_id=os.environ.get("TELEGRAM_CLIENT_READER_ID", "app1").strip() or "app1",
+        use_env_targets_only=_parse_bool(
+            os.environ.get("TELEGRAM_CLIENT_USE_ENV_TARGETS", ""),
+            False,
+        ),
     )
 
 

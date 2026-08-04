@@ -104,5 +104,41 @@ class DesktopAuthTests(unittest.TestCase):
         self.assertEqual(empty["opens"], [])
 
 
+    def test_relay_burst_same_user_returns_all_pending(self):
+        import desktop_relay as relay
+
+        relay._pending.clear()
+        relay._opened_urls.clear()
+        relay._last_desktop_ping.clear()
+
+        cfg = _config()
+        for i in range(5):
+            enqueue_open(f"https://example.com/link{i}", job_id=i, queue_user="admin1")
+
+        token = desktop_pull_token_for_user("admin1", cfg.auth_secret)
+        pull = pull_pending(token, cfg)
+        self.assertEqual(len(pull["opens"]), 5)
+        self.assertIn("link4", pull["opens"][-1]["url"])
+        self.assertEqual(pull_pending(token, cfg)["opens"], [])
+
+    def test_relay_two_desktops_same_user_first_wins_burst(self):
+        """2 desktop cùng acc: lần pull đầu lấy hết pending — desktop thứ 2 rỗng."""
+        import desktop_relay as relay
+
+        relay._pending.clear()
+        relay._opened_urls.clear()
+        relay._last_desktop_ping.clear()
+
+        cfg = _config()
+        enqueue_open("https://example.com/x", job_id=1, queue_user="admin1")
+        enqueue_open("https://example.com/y", job_id=2, queue_user="admin1")
+
+        token = desktop_pull_token_for_user("admin1", cfg.auth_secret)
+        first = pull_pending(token, cfg)
+        second = pull_pending(token, cfg)
+        self.assertEqual(len(first["opens"]), 2)
+        self.assertEqual(second["opens"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

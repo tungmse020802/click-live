@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } = require("electron");
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const {
@@ -28,6 +28,17 @@ const {
   destroyCountdownOverlay,
 } = require("./countdown-overlay");
 const { envFilePath, isPackaged } = require("./paths");
+const { clickLog, clickLogWarn, clickLogError, resolveLogsDir, logFilePath, setLogUiListener, getRecentUiLogs, clearUiLogs } = require("./click-log");
+const {
+  nextClickGeneration,
+  currentClickGeneration,
+  isCurrentClickGeneration,
+  abortClickWait,
+  registerClickWaitAbort,
+  clearClickWaitAbort,
+} = require("./click-scheduler");
+
+const MAX_JOB_ENTRIES = 32;
 
 function loadDotEnv() {
   const envPath = envFilePath();
@@ -111,11 +122,34 @@ function clearOverlayTiming() {
 
 function cancelActiveClickTask() {
   activeClickTask = null;
+  abortClickWait();
+}
+
+function pruneJobEntries() {
+  if (jobEntries.size <= MAX_JOB_ENTRIES) return;
+  const sorted = [...jobEntries.entries()].sort((a, b) => b[1].openedAt - a[1].openedAt);
+  jobEntries.clear();
+  for (const [key, entry] of sorted.slice(0, MAX_JOB_ENTRIES)) {
+    jobEntries.set(key, entry);
+  }
+}
+
+function resolveClickPoint(settings) {
+  const px = Math.round(Number(settings?.clickX));
+  const py = Math.round(Number(settings?.clickY));
+  if (!Number.isFinite(px) || !Number.isFinite(py)) {
+    throw new Error("Chưa cấu hình tọa độ click (X/Y)");
+  }
+  if (px < 0 || py < 0) {
+    throw new Error(`Tọa độ click không hợp lệ: ${px},${py}`);
+  }
+  return { x: px, y: py };
 }
 
 function beginOpenSequence() {
   openSequence += 1;
   cancelActiveClickTask();
+  nextClickGeneration();
   clearOverlayTiming();
   return openSequence;
 }
@@ -158,6 +192,7 @@ async function scheduleDesktopClick({
   const settings = loadSettings();
 
   if (!isLatestOpenSequence(seq)) {
+    clickLog("skip", `skip schedule seq=${seq}`, { seq, openSequence });
     console.log(`Skip schedule seq=${seq} — job cuối là seq=${openSequence}`);
     return presetSchedule;
   }
@@ -176,6 +211,7 @@ async function scheduleDesktopClick({
   });
 
   if (!isLatestOpenSequence(seq)) {
+    clickLog("skip", `skip timing after resolve seq=${seq}`, { seq, openSequence });
     console.log(`Skip timing seq=${seq} sau resolve — tab cuối seq=${openSequence}`);
     return schedule;
   }
@@ -214,11 +250,42 @@ async function scheduleDesktopClick({
     displayRemainingMs: displaySec != null ? Math.round(Number(displaySec) * 1000) : null,
   });
 
+  const execLead = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
+  const displayTargetMs = schedule.endTimeMs
+    ? clickDisplayTargetMs(schedule.endTimeMs, offsetMs)
+    : null;
+  const executeAtMsPlanned = schedule.endTimeMs
+    ? clickExecuteAtMs(schedule.endTimeMs, offsetMs)
+    : scheduledAt + Math.max(0, Number(schedule.clickWaitMs) || 0) + execLead;
+
+  clickLog("schedule", `job #${key} scheduled`, {
+    jobId: key,
+    urlKey,
+    seq,
+    source: schedule.source,
+    endTimeMs: schedule.endTimeMs,
+    displayTargetMs,
+    executeAtMs: executeAtMsPlanned,
+    fireDelayMs,
+    offsetMs,
+    leadMs: execLead,
+    clickWaitMs: schedule.clickWaitMs,
+    timeLabel: label,
+    autoClickEnabled: settings.autoClickEnabled,
+  });
+
   const clickTask = {};
   activeClickTask = clickTask;
-  const shouldAbort = () => activeClickTask !== clickTask || !isActiveLatestJob(urlKey, seq);
+  const clickGen = currentClickGeneration();
+  const shouldAbort = () => (
+    activeClickTask !== clickTask
+    || !isCurrentClickGeneration(clickGen)
+    || !isActiveLatestJob(urlKey, seq)
+  );
 
   (async () => {
+    let finalExecuteAtMs = null;
+    let waitAbortLocal = null;
     try {
       while (!shouldAbort()) {
         const latest = loadSettings();
@@ -232,18 +299,67 @@ async function scheduleDesktopClick({
         }
         if (!executeAtMs) return;
 
-        const ok = await waitUntilTimestamp(executeAtMs, { shouldAbort });
+        let waitAborted = false;
+        waitAbortLocal = () => { waitAborted = true; };
+        registerClickWaitAbort(waitAbortLocal);
+
+        const ok = await waitUntilTimestamp(executeAtMs, {
+          shouldAbort: () => waitAborted || shouldAbort(),
+        });
+        clearClickWaitAbort(waitAbortLocal);
+        waitAbortLocal = null;
+
         if (!ok || shouldAbort()) {
+          clickLog("skip", `skip click job #${key} cancelled`, {
+            jobId: key, seq, executeAtMs, clickGen,
+          });
           console.log(`Skip click job #${key} — job mới hơn hoặc đã hủy`);
           return;
         }
+        finalExecuteAtMs = executeAtMs;
+        const waitEndedAt = Date.now();
+        clickLog("wait", `job #${key} wait done`, {
+          jobId: key,
+          executeAtMs,
+          waitEndedAt,
+          driftMs: waitEndedAt - executeAtMs,
+          offsetMs: liveOffset,
+          clickGen,
+        });
         break;
       }
 
-      if (shouldAbort()) return;
+      if (shouldAbort() || !isCurrentClickGeneration(clickGen)) {
+        clickLog("skip", `skip click job #${key} stale generation`, { jobId: key, clickGen });
+        return;
+      }
+
       if (process.platform === "darwin") ensureAccessibility(true);
       const latest = loadSettings();
-      const result = await clickScreenPoint(latest.clickX, latest.clickY);
+      const { x: clickX, y: clickY } = resolveClickPoint(latest);
+
+      if (shouldAbort() || !isCurrentClickGeneration(clickGen)) {
+        clickLog("skip", `skip click job #${key} before invoke`, { jobId: key, clickGen });
+        return;
+      }
+
+      const clickInvokeAt = Date.now();
+      const result = await clickScreenPoint(clickX, clickY);
+
+      if (shouldAbort() || !isCurrentClickGeneration(clickGen)) {
+        clickLog("skip", `skip click job #${key} after invoke (stale)`, {
+          jobId: key,
+          clickGen,
+          x: result.x,
+          y: result.y,
+        });
+        return;
+      }
+
+      const clickedAt = Date.now();
+      const displayTarget = schedule.endTimeMs
+        ? clickDisplayTargetMs(schedule.endTimeMs, Number(latest.delayOffsetMs) || 0)
+        : null;
       notifySchedule({
         type: "clicked",
         jobId: key,
@@ -251,17 +367,41 @@ async function scheduleDesktopClick({
         y: result.y,
         method: result.method,
       });
-      const execLead = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
+      const execLeadDone = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
+      clickLog("click", `job #${key} clicked`, {
+        jobId: key,
+        clickGen,
+        x: result.x,
+        y: result.y,
+        method: result.method,
+        clickDurationMs: result.durationMs,
+        invokeDelayMs: finalExecuteAtMs != null ? clickInvokeAt - finalExecuteAtMs : null,
+        driftFromDisplayMs: displayTarget != null ? clickedAt - displayTarget : null,
+        source: schedule.source,
+        offsetMs: latest.delayOffsetMs,
+        leadMs: execLeadDone,
+        endTimeMs: schedule.endTimeMs,
+        displayTargetMs: displayTarget,
+        clickedAt,
+      });
       console.log(
         `Desktop click job #${key} at ${result.x},${result.y} (${result.method})`
-        + ` source=${schedule.source} offset=${latest.delayOffsetMs}ms lead=${execLead}ms`
+        + ` source=${schedule.source} offset=${latest.delayOffsetMs}ms lead=${execLeadDone}ms`
+        + (result.durationMs != null ? ` clickMs=${result.durationMs}` : "")
       );
       clearOverlayTiming();
     } catch (err) {
+      clickLogError("click", `job #${key} failed`, {
+        jobId: key,
+        clickGen,
+        error: String(err.message || err),
+        source: schedule.source,
+      });
       console.error("Desktop click failed:", err.message || err);
       notifySchedule({ type: "error", jobId: key, error: String(err.message || err) });
       clearOverlayTiming();
     } finally {
+      if (waitAbortLocal) clearClickWaitAbort(waitAbortLocal);
       if (activeClickTask === clickTask) activeClickTask = null;
     }
   })();
@@ -299,6 +439,7 @@ async function openCountdownTab({
   entry.openSequence = seq;
   jobEntries.set(urlKey, entry);
   activeJobKey = urlKey;
+  pruneJobEntries();
 
   const schedule = await computeCountdownSchedule(cleanUrl, {
     clickAfterMs,
@@ -363,6 +504,12 @@ function restartPoller() {
   }
 }
 
+function broadcastClickLog(record) {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.webContents.send("click-log", record);
+  }
+}
+
 function registerIpcHandlers() {
   ipcMain.handle("settings:get", () => loadSettings());
   ipcMain.handle("settings:save", (_event, partial) => saveSettings(partial || {}));
@@ -382,9 +529,32 @@ function registerIpcHandlers() {
   ipcMain.handle("settings:test-click", async () => {
     ensureAccessibility(true);
     const settings = loadSettings();
-    return clickScreenPoint(settings.clickX, settings.clickY);
+    const { x, y } = resolveClickPoint(settings);
+    const result = await clickScreenPoint(x, y);
+    clickLog("click", "test click", {
+      x: result.x,
+      y: result.y,
+      method: result.method,
+      clickDurationMs: result.durationMs,
+    });
+    return result;
   });
   ipcMain.handle("settings:ensure-accessibility", async () => ensureAccessibility(true));
+  ipcMain.handle("logs:get-recent", (_event, limit) => ({
+    logs: getRecentUiLogs(limit),
+    logsDir: resolveLogsDir(),
+    logFile: logFilePath(),
+  }));
+  ipcMain.handle("logs:clear", () => {
+    clearUiLogs();
+    return { ok: true };
+  });
+  ipcMain.handle("logs:open-folder", async () => {
+    const dir = resolveLogsDir();
+    fs.mkdirSync(dir, { recursive: true });
+    await shell.openPath(dir);
+    return { ok: true, path: dir };
+  });
   ipcMain.handle("auth:session", () => {
     const creds = getPollerCredentials();
     return {
@@ -440,10 +610,10 @@ function showSettingsWindow() {
   }
 
   settingsWindow = new BrowserWindow({
-    width: 460,
-    height: 760,
-    minWidth: 400,
-    minHeight: 520,
+    width: 520,
+    height: 920,
+    minWidth: 420,
+    minHeight: 640,
     show: true,
     autoHideMenuBar: true,
     title: "Click Live Desktop Tool",
@@ -474,6 +644,14 @@ async function startServer() {
     console.log(`Config: ${envFilePath()}`);
   }
   console.log("Đếm giờ: overlay góc trái trên — không mở Chrome countdown");
+  clickLog("startup", "desktop-tool started", {
+    port,
+    logsDir: resolveLogsDir(),
+    logFile: logFilePath(),
+    leadMs: resolveClickExecutionLeadMs(),
+    pollMs: POLL_MS,
+  });
+  console.log(`Click logs: ${logFilePath()}`);
   return port;
 }
 
@@ -534,6 +712,7 @@ process.on("unhandledRejection", (err) => {
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return;
 
+  setLogUiListener(broadcastClickLog);
   registerIpcHandlers();
 
   try {

@@ -134,6 +134,7 @@ pip install -q -r requirements.txt
 
 install -m 644 systemd/click-live-queue.service /etc/systemd/system/
 install -m 644 systemd/click-live-telegram-reader.service /etc/systemd/system/
+install -m 644 systemd/click-live-telegram-reader-app2.service /etc/systemd/system/
 install -m 644 systemd/click-live-broadcast.service /etc/systemd/system/
 systemctl daemon-reload
 
@@ -157,9 +158,19 @@ systemctl restart click-live-queue.service
 systemctl restart click-live-telegram-reader.service
 systemctl restart click-live-broadcast.service
 
+if [[ -f .env.app2 ]]; then
+  systemctl enable click-live-telegram-reader-app2.service
+  systemctl restart click-live-telegram-reader-app2.service
+else
+  echo "Skip app-2 reader: chưa có .env.app2 (copy .env.app2.example rồi login_telethon_app2.sh)"
+fi
+
 echo
 echo "=== Service status ==="
 systemctl is-active click-live-queue.service click-live-telegram-reader.service click-live-broadcast.service
+if [[ -f .env.app2 ]]; then
+  systemctl is-active click-live-telegram-reader-app2.service || true
+fi
 ss -lntp | grep 8787 || true
 REMOTE
 

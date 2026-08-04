@@ -1,4 +1,5 @@
 const { decodeHtmlUrl } = require("./server");
+const { resolveClickExecutionLeadMs } = require("./click-lead");
 
 const THANHTAI_WS_HOSTS = [
   "realtime-67lx.onrender.com",
@@ -7,13 +8,6 @@ const THANHTAI_WS_HOSTS = [
 
 const THANHTAI_WS_TIMEOUT_MS = 5000;
 const END_TIME_CACHE_TTL_MS = 5_000;
-
-function resolveClickExecutionLeadMs() {
-  const env = Number(process.env.DESKTOP_CLICK_EXECUTION_LEAD_MS);
-  if (Number.isFinite(env) && env >= 0) return Math.round(env);
-  if (process.platform === "win32") return 200;
-  return 50;
-}
 
 /** Mốc hiển thị 0.0s trên overlay (= lúc user muốn click). */
 function clickDisplayTargetMs(endTimeMs, delayOffsetMs = 0) {
@@ -57,8 +51,9 @@ async function waitUntilTimestamp(targetMs, { shouldAbort } = {}) {
     if (typeof shouldAbort === "function" && shouldAbort()) return false;
     const remaining = targetMs - Date.now();
     if (remaining > 80) await sleepMs(remaining - 40);
-    else if (remaining > 8) await sleepMs(4);
-    else await sleepMs(1);
+    else if (remaining > 20) await sleepMs(Math.max(1, remaining - 8));
+    else if (remaining > 2) await sleepMs(1);
+    /* else: busy-wait vài ms cuối cho chính xác */
   }
   return !(typeof shouldAbort === "function" && shouldAbort());
 }

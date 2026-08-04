@@ -142,6 +142,24 @@ Tuỳ chọn cài `cliclick` (ổn định hơn AppleScript):
 brew install cliclick
 ```
 
+### Log click (debug timing)
+
+Mỗi job ghi file JSON theo ngày:
+
+| Môi trường | Thư mục |
+|------------|---------|
+| `npm start` (dev) | `desktop-tool/logs/click-YYYY-MM-DD.log` |
+| App cài (.exe / .dmg) | `%APPDATA%\click-live-desktop-tool\logs\` (Win) hoặc `~/Library/Application Support/click-live-desktop-tool/logs/` (Mac) |
+
+Tuỳ chọn trong `.env`: `DESKTOP_TOOL_LOG_DIR=C:\ClickLive\logs`
+
+Mỗi dòng JSON gồm event: `startup`, `poll`, `schedule`, `wait`, `click`, `helper`, `skip`, `error`. Field quan trọng khi debug:
+
+- `driftMs` — timer chờ lệch bao nhiêu so `executeAtMs`
+- `driftFromDisplayMs` — click thực tế lệch bao nhiêu so mốc overlay 0.0s (âm = sớm, dương = muộn)
+- `clickDurationMs` — PowerShell/cliclick mất bao lâu
+- `method` — `powershell-helper` (nhanh) vs `powershell` (fallback chậm)
+
 Settings lưu tại `~/Library/Application Support/click-live-desktop-tool/settings.json`.
 
 ## Luồng

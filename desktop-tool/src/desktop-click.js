@@ -6,10 +6,35 @@ const path = require("path");
 
 const execFileAsync = promisify(execFile);
 const { windowsClickHelperPath } = require("./paths");
+const { clickLog, clickLogWarn, clickLogError } = require("./click-log");
+const { recordClickDuration } = require("./click-lead");
 
 let winClickHelper = null;
 let winClickReady = null;
 let winClickQueue = Promise.resolve();
+let helperClickSeq = 0;
+/** Stdout tích lũy — parse theo dòng, tránh nhầm ok cũ. */
+let helperStdoutBuffer = "";
+
+function parseHelperOkLine(line, clickId, px, py) {
+  const trimmed = String(line || "").trim();
+  const expected = `ok:${clickId},${px},${py}`;
+  return trimmed === expected || trimmed.startsWith(`${expected}\r`);
+}
+
+function attachHelperStdoutPump() {
+  if (!winClickHelper || winClickHelper._clickLivePumpAttached) return;
+  winClickHelper._clickLivePumpAttached = true;
+  winClickHelper.stdout.on("data", (chunk) => {
+    helperStdoutBuffer += chunk.toString();
+    const parts = helperStdoutBuffer.split(/\r?\n/);
+    helperStdoutBuffer = parts.pop() || "";
+    for (const line of parts) {
+      if (line === "ready" || !line.trim()) continue;
+      winClickHelper.emit("helper-line", line);
+    }
+  });
+}
 
 function resolveCliclickBin() {
   const envBin = String(process.env.DESKTOP_CLICLICK_BIN || "").trim();
@@ -46,6 +71,9 @@ function ensureWinClickHelper() {
       return;
     }
 
+    const startedAt = Date.now();
+    clickLog("helper", "starting Windows click helper", { script: ps1 });
+
     const child = spawn("powershell.exe", [
       "-NoProfile",
       "-ExecutionPolicy",
@@ -77,17 +105,29 @@ function ensureWinClickHelper() {
       if (buffer.includes("ready")) {
         clearTimeout(timer);
         winClickHelper = child;
+        helperStdoutBuffer = "";
+        attachHelperStdoutPump();
+        clickLog("helper", "Windows click helper ready", {
+          startupMs: Date.now() - startedAt,
+        });
         resolve();
       }
     });
 
     child.stderr.on("data", (chunk) => {
       const msg = chunk.toString().trim();
-      if (msg) console.warn("win-click-helper:", msg);
+      if (msg) {
+        console.warn("win-click-helper:", msg);
+        clickLogWarn("helper", "Windows click helper stderr", { detail: msg });
+      }
     });
 
-    child.on("error", fail);
-    child.on("exit", () => {
+    child.on("error", (err) => {
+      clickLogError("helper", "Windows click helper spawn failed", { error: String(err.message || err) });
+      fail(err);
+    });
+    child.on("exit", (code) => {
+      clickLogWarn("helper", "Windows click helper exited", { code });
       winClickHelper = null;
       winClickReady = null;
     });
@@ -103,34 +143,55 @@ function clickViaHelper(px, py) {
       return;
     }
 
-    let buffer = "";
+    const clickId = ++helperClickSeq;
+    const sentAt = Date.now();
+    const expected = `ok:${clickId},${px},${py}`;
     const timer = setTimeout(() => {
       cleanup();
+      clickLogError("click", "Windows click helper timeout", {
+        clickId, x: px, y: py, waitedMs: 3000,
+      });
       reject(new Error("Windows click timeout"));
     }, 3000);
 
-    const onData = (chunk) => {
-      buffer += chunk.toString();
-      if (buffer.includes("ok")) {
+    const onLine = (line) => {
+      if (parseHelperOkLine(line, clickId, px, py)) {
         cleanup();
-        resolve({ method: "powershell-helper", x: px, y: py });
-      } else if (buffer.includes("err")) {
-        cleanup();
-        reject(new Error("Windows click helper rejected input"));
+        const durationMs = Date.now() - sentAt;
+        resolve({
+          method: "powershell-helper",
+          x: px,
+          y: py,
+          durationMs,
+          invokedAt: sentAt,
+          clickId,
+        });
+      } else if (/^ok:/.test(String(line || "").trim())) {
+        clickLogWarn("helper", "ignored mismatched helper ok", {
+          line: String(line).trim(),
+          expected,
+        });
       }
     };
 
     const cleanup = () => {
       clearTimeout(timer);
-      winClickHelper.stdout.off("data", onData);
+      winClickHelper?.off("helper-line", onLine);
     };
 
-    winClickHelper.stdout.on("data", onData);
-    winClickHelper.stdin.write(`${px},${py}\n`);
+    winClickHelper.on("helper-line", onLine);
+    try {
+      winClickHelper.stdin.write(`${clickId},${px},${py}\n`);
+    } catch (err) {
+      cleanup();
+      reject(err);
+    }
   });
 }
 
 async function clickScreenPointWindowsFallback(px, py) {
+  const invokedAt = Date.now();
+  clickLogWarn("click", "Windows click fallback (spawn PowerShell)", { x: px, y: py });
   const script = [
     "$sig = @'",
     "[DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int X, int Y);",
@@ -165,7 +226,9 @@ async function clickScreenPointWindowsFallback(px, py) {
     }
   }
 
-  return { method: "powershell", x: px, y: py };
+  const durationMs = Date.now() - invokedAt;
+  clickLogWarn("click", "Windows click fallback done", { x: px, y: py, durationMs });
+  return { method: "powershell", x: px, y: py, durationMs, invokedAt };
 }
 
 async function clickScreenPointWindowsInner(px, py) {
@@ -173,6 +236,11 @@ async function clickScreenPointWindowsInner(px, py) {
     await ensureWinClickHelper();
     return await clickViaHelper(px, py);
   } catch (err) {
+    clickLogWarn("click", "Windows click helper failed, using fallback", {
+      error: String(err.message || err),
+      x: px,
+      y: py,
+    });
     console.warn("Windows click helper failed, fallback:", err.message || err);
     return clickScreenPointWindowsFallback(px, py);
   }
@@ -189,6 +257,9 @@ function clickScreenPointWindows(px, py) {
 function warmUpWinClickHelper() {
   if (process.platform !== "win32") return Promise.resolve();
   return ensureWinClickHelper().catch((err) => {
+    clickLogWarn("helper", "Windows click helper warmup failed", {
+      error: String(err.message || err),
+    });
     console.warn("Windows click helper warmup failed:", err.message || err);
   });
 }
@@ -212,9 +283,11 @@ function shutdownWinClickHelper() {
 
 async function clickScreenPointDarwin(px, py) {
   const cliclick = resolveCliclickBin();
+  const invokedAt = Date.now();
   try {
     await execFileAsync(cliclick, [`c:${px},${py}`]);
-    return { method: "cliclick", x: px, y: py };
+    const durationMs = Date.now() - invokedAt;
+    return { method: "cliclick", x: px, y: py, durationMs, invokedAt };
   } catch (err) {
     const detail = String(err.stderr || err.message || err).trim();
     if (/could not be found|ENOENT/i.test(detail) || err.code === "ENOENT") {
@@ -237,12 +310,20 @@ async function clickScreenPoint(x, y) {
   if (!Number.isFinite(px) || !Number.isFinite(py)) {
     throw new Error("Toa do click khong hop le");
   }
+  if (px < 0 || py < 0 || px > 65535 || py > 65535) {
+    throw new Error(`Toa do click ngoai pham vi: ${px},${py}`);
+  }
 
+  clickLog("click", "invoke clickScreenPoint", { x: px, y: py });
   if (process.platform === "win32") {
-    return clickScreenPointWindows(px, py);
+    const result = await clickScreenPointWindows(px, py);
+    if (result.durationMs != null) recordClickDuration(result.durationMs);
+    return result;
   }
   if (process.platform === "darwin") {
-    return clickScreenPointDarwin(px, py);
+    const result = await clickScreenPointDarwin(px, py);
+    if (result.durationMs != null) recordClickDuration(result.durationMs);
+    return result;
   }
   throw new Error(`Desktop click chua ho tro nen tang: ${process.platform}`);
 }
@@ -252,4 +333,5 @@ module.exports = {
   resolveCliclickBin,
   warmUpWinClickHelper,
   shutdownWinClickHelper,
+  parseHelperOkLine,
 };

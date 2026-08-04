@@ -21,7 +21,7 @@
       background: var(--bg);
       color: var(--text);
     }
-    .wrap { padding: 18px 20px 24px; max-width: 440px; }
+    .wrap { padding: 18px 20px 24px; max-width: 480px; }
     h1 { font-size: 18px; margin: 0 0 4px; }
     .sub { color: var(--muted); margin-bottom: 18px; font-size: 13px; }
     section {
@@ -121,6 +121,53 @@
     }
     .auth-row { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
     #loginPanel.hidden, #loggedInPanel.hidden { display: none; }
+    .log-toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+    .log-toolbar .path {
+      font-size: 11px;
+      color: var(--muted);
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .log-panel {
+      background: #0d1218;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      height: 220px;
+      overflow-y: auto;
+      padding: 8px 10px;
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .log-line {
+      margin: 0 0 4px;
+      word-break: break-word;
+      color: var(--muted);
+    }
+    .log-line .time { color: #64748b; }
+    .log-line .evt { font-weight: 600; }
+    .log-line.level-error .evt { color: #f87171; }
+    .log-line.level-warn .evt { color: #fbbf24; }
+    .log-line.evt-click .evt { color: var(--green); }
+    .log-line.evt-schedule .evt { color: #60a5fa; }
+    .log-line.evt-wait .evt { color: #a78bfa; }
+    .log-line.evt-poll .evt { color: #94a3b8; }
+    .log-line.evt-helper .evt { color: #fb923c; }
+    .log-line .detail { color: #cbd5e1; }
+    .log-empty {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 24px 8px;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -168,7 +215,7 @@
           <button class="small" data-delta="50">+0.05</button>
         </div>
       </div>
-      <p class="hint">Offset âm (vd <strong>−0.09s</strong>) = click khi đồng hồ còn <strong>~0.09s</strong> (trước 0.0s). Dương = muộn hơn. App tự trừ ~200ms (Windows) / ~90ms (Mac) độ trễ click. Chỉ tab <strong>mở cuối</strong>.</p>
+      <p class="hint">Offset âm (vd <strong>−0.09s</strong>) = click khi đồng hồ còn <strong>~0.09s</strong>. App tự bù độ trễ OS (adaptive lead — xem log). Chỉ job <strong>mở cuối</strong> / acc desktop khớp web.</p>
     </section>
 
     <section>
@@ -198,6 +245,19 @@
     <section>
       <h2>Trạng thái</h2>
       <div class="status" id="status">Sẵn sàng.</div>
+    </section>
+
+    <section>
+      <h2>Log click / timing</h2>
+      <div class="log-toolbar">
+        <span class="path" id="logPath" title="">—</span>
+        <button id="openLogFolderBtn" class="small">Mở folder</button>
+        <button id="clearLogsBtn" class="small">Xóa UI</button>
+      </div>
+      <div class="log-panel" id="logPanel">
+        <div class="log-empty" id="logEmpty">Chưa có log — poll/schedule/click sẽ hiện ở đây.</div>
+      </div>
+      <p class="hint">Log realtime + lưu file <code>click-YYYY-MM-DD.log</code>. Field debug: <strong>driftFromDisplayMs</strong> (âm=sớm), <strong>clickDurationMs</strong>, <strong>method</strong>.</p>
     </section>
   </div>
 

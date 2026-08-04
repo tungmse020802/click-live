@@ -174,6 +174,13 @@ class TelethonReader:
             await client.disconnect()
 
     def _resolve_targets(self) -> List[TelegramClientTarget]:
+        if self.config.use_env_targets_only:
+            if not self.config.targets:
+                raise RuntimeError(
+                    "TELEGRAM_CLIENT_USE_ENV_TARGETS=true but TELEGRAM_CLIENT_TARGETS is empty"
+                )
+            return list(self.config.targets)
+
         groups = self.db.list_enabled_watch_groups()
         if groups:
             return client_targets_from_watch_groups(groups)
@@ -196,7 +203,10 @@ class TelethonReader:
                 target_count,
             )
             current_signature = self._target_signature(self._resolve_targets())
-            if current_signature != target_signature:
+            if (
+                not self.config.use_env_targets_only
+                and current_signature != target_signature
+            ):
                 logger.info("Watch groups changed on web; reconnecting Telethon reader")
                 await client.disconnect()
                 return
@@ -330,6 +340,7 @@ class TelethonReader:
                 queue_payload = {
                     "source": PLATFORM,
                     "source_transport": TRANSPORT,
+                    "telegram_reader_id": self.config.reader_id,
                     "reply_transport": (
                         "bot_broadcast" if self.config.broadcast_enabled else "none"
                     ),
@@ -495,7 +506,13 @@ def _mask_phone(phone: str) -> str:
 async def async_main() -> None:
     config = load_telegram_client_config()
     setup_logging(config.log_level)
-    logger.warning("Starting Telegram client reader session=%s", config.session_path)
+    logger.warning(
+        "Starting Telegram client reader id=%s session=%s env_targets_only=%s targets=%s",
+        config.reader_id,
+        config.session_path,
+        config.use_env_targets_only,
+        len(config.targets),
+    )
     reader = TelethonReader(config=config, db=ChatDatabase(config.db_path))
     await reader.run()
 

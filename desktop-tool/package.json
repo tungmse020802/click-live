@@ -11,6 +11,7 @@
     "run": "bash run.sh",
     "dev": "electron .",
     "check": "node --check src/main.js && node --check src/server.js",
+    "test": "node --test test/*.test.js",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac",

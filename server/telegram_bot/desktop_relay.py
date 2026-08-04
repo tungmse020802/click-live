@@ -119,12 +119,18 @@ def enqueue_open(
         }
 
 
-def _pop_pending_for_user(queue_user: str) -> Optional[Dict[str, Any]]:
+def _drain_pending_for_user(queue_user: str) -> List[Dict[str, Any]]:
+    """Lấy hết pending của user — desktop chỉ timing link cuối."""
     user = _normalize_queue_user(queue_user)
-    for index, item in enumerate(_pending):
-        if item.get("queue_user", "") == user:
-            return _pending.pop(index)
-    return None
+    matched = [item for item in _pending if item.get("queue_user", "") == user]
+    if matched:
+        _pending[:] = [item for item in _pending if item.get("queue_user", "") != user]
+    return matched
+
+
+def _pop_pending_for_user(queue_user: str) -> Optional[Dict[str, Any]]:
+    items = _drain_pending_for_user(queue_user)
+    return items[0] if items else None
 
 
 def pull_pending(token: str, config: QueueUiConfig) -> Dict[str, Any]:
@@ -140,10 +146,11 @@ def pull_pending(token: str, config: QueueUiConfig) -> Dict[str, Any]:
     now = time.time()
     with _lock:
         _last_desktop_ping[queue_user] = now
-        item = _pop_pending_for_user(queue_user)
-        if not item:
+        items = _drain_pending_for_user(queue_user)
+        if not items:
             return {"ok": True, "opens": [], "queue_user": queue_user}
-        _opened_urls[(queue_user, item["url_key"])] = now
+        for item in items:
+            _opened_urls[(queue_user, item["url_key"])] = now
         return {
             "ok": True,
             "queue_user": queue_user,
@@ -158,6 +165,7 @@ def pull_pending(token: str, config: QueueUiConfig) -> Dict[str, Any]:
                     "queued_at_ms": item.get("queued_at_ms") or int(now * 1000),
                     "end_time_ms": item.get("end_time_ms"),
                 }
+                for item in items
             ],
         }
 

@@ -11,6 +11,118 @@ const loggedInUrl = document.getElementById('loggedInUrl');
 const queueUrlInput = document.getElementById('queueUrl');
 const loginUsername = document.getElementById('loginUsername');
 const loginPassword = document.getElementById('loginPassword');
+const logPanel = document.getElementById('logPanel');
+const logEmpty = document.getElementById('logEmpty');
+const logPath = document.getElementById('logPath');
+
+let logAutoScroll = true;
+const MAX_LOG_LINES_UI = 200;
+
+function formatLogDetail(entry) {
+  const d = entry.data;
+  if (!d || typeof d !== 'object') return '';
+  const parts = [];
+  if (d.jobId != null) parts.push(`#${d.jobId}`);
+  if (d.source) parts.push(`src=${d.source}`);
+  if (d.method) parts.push(d.method);
+  if (d.driftFromDisplayMs != null) parts.push(`drift=${d.driftFromDisplayMs}ms`);
+  if (d.driftMs != null) parts.push(`drift=${d.driftMs}ms`);
+  if (d.clickDurationMs != null) parts.push(`click=${d.clickDurationMs}ms`);
+  if (d.fireDelayMs != null) parts.push(`fire=${d.fireDelayMs}ms`);
+  if (d.offsetMs != null) parts.push(`off=${d.offsetMs}ms`);
+  if (d.leadMs != null) parts.push(`lead=${d.leadMs}ms`);
+  if (d.startupMs != null) parts.push(`startup=${d.startupMs}ms`);
+  if (d.error) parts.push(String(d.error));
+  return parts.length ? ` · ${parts.join(' · ')}` : '';
+}
+
+function formatLogTime(iso) {
+  try {
+    return new Date(iso).toLocaleTimeString('vi-VN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      fractionalSecondDigits: 3,
+      hour12: false,
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function renderLogEntry(entry) {
+  const line = document.createElement('div');
+  const level = entry.level || 'info';
+  const event = entry.event || level;
+  line.className = `log-line level-${level} evt-${event}`;
+  const detail = formatLogDetail(entry);
+  line.innerHTML = `<span class="time">${formatLogTime(entry.ts)}</span> `
+    + `<span class="evt">[${event}]</span> `
+    + `<span class="msg">${entry.msg || ''}</span>`
+    + (detail ? `<span class="detail">${detail}</span>` : '');
+  return line;
+}
+
+function trimLogPanel() {
+  const lines = logPanel.querySelectorAll('.log-line');
+  if (lines.length <= MAX_LOG_LINES_UI) return;
+  for (let i = 0; i < lines.length - MAX_LOG_LINES_UI; i += 1) {
+    lines[i].remove();
+  }
+}
+
+function appendLogEntry(entry) {
+  if (logEmpty.parentNode) logEmpty.remove();
+  logPanel.appendChild(renderLogEntry(entry));
+  trimLogPanel();
+  if (logAutoScroll) {
+    logPanel.scrollTop = logPanel.scrollHeight;
+  }
+}
+
+function renderLogList(entries) {
+  logPanel.querySelectorAll('.log-line').forEach((el) => el.remove());
+  if (!entries.length) {
+    if (!logEmpty.parentNode) logPanel.appendChild(logEmpty);
+    return;
+  }
+  if (logEmpty.parentNode) logEmpty.remove();
+  entries.forEach((entry) => logPanel.appendChild(renderLogEntry(entry)));
+  if (logAutoScroll) {
+    logPanel.scrollTop = logPanel.scrollHeight;
+  }
+}
+
+async function loadLogHistory() {
+  const info = await window.desktopTool.getLogs(MAX_LOG_LINES_UI);
+  if (info.logFile) {
+    logPath.textContent = info.logFile;
+    logPath.title = info.logFile;
+  }
+  renderLogList(info.logs || []);
+}
+
+logPanel.addEventListener('scroll', () => {
+  const nearBottom = logPanel.scrollHeight - logPanel.scrollTop - logPanel.clientHeight < 24;
+  logAutoScroll = nearBottom;
+});
+
+document.getElementById('clearLogsBtn').addEventListener('click', async () => {
+  await window.desktopTool.clearLogs();
+  renderLogList([]);
+});
+
+document.getElementById('openLogFolderBtn').addEventListener('click', async () => {
+  try {
+    await window.desktopTool.openLogFolder();
+  } catch (err) {
+    statusEl.textContent = err.message || 'Không mở được folder log';
+  }
+});
+
+window.desktopTool.onLog((entry) => {
+  appendLogEntry(entry);
+});
 
 function formatOffset(ms) {
   const sec = ms / 1000;
@@ -158,6 +270,7 @@ window.desktopTool.onSchedule((payload) => {
 Promise.all([
   window.desktopTool.getSettings().then(applySettings),
   refreshAuthSession(),
+  loadLogHistory(),
 ]).catch((err) => {
   statusEl.textContent = `Lỗi tải settings: ${err.message}`;
 });

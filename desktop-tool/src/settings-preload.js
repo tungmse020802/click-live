@@ -14,4 +14,10 @@ contextBridge.exposeInMainWorld("desktopTool", {
   onSchedule: (callback) => {
     ipcRenderer.on("countdown-schedule", (_event, payload) => callback(payload));
   },
+  getLogs: (limit) => ipcRenderer.invoke("logs:get-recent", limit),
+  clearLogs: () => ipcRenderer.invoke("logs:clear"),
+  openLogFolder: () => ipcRenderer.invoke("logs:open-folder"),
+  onLog: (callback) => {
+    ipcRenderer.on("click-log", (_event, record) => callback(record));
+  },
 });

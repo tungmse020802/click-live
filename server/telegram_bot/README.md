@@ -151,6 +151,28 @@ Ghi chú:
 - Lần đầu chạy cần `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_PHONE`; terminal sẽ hỏi mã login Telegram nếu chưa có session.
 - Với room dạng Telegram Web `#-3734576353`, reader tự chuyển sang entity ref `-1003734576353` cho Telethon.
 
+**Reader app-2 (acc Telegram thứ hai, cùng queue):**
+
+- Dùng Telethon (app login), **không** Playwright/Telegram Web.
+- Session riêng: `data/telegram_client_app2.session` — không chạy song song cùng session với app-1.
+- Cùng `BOT_DB_PATH` → tin vẫn vào `message_queue` như reader chính.
+- App-2 **không** đọc bảng `watch_groups` trên panel; nhóm cấu hình cố định trong `.env.app2` (`TELEGRAM_CLIENT_USE_ENV_TARGETS=true`).
+
+```bash
+cd server/telegram_bot
+cp .env.app2.example .env.app2
+# chỉnh TELEGRAM_PHONE, TELEGRAM_CLIENT_TARGETS, API id/hash
+bash login_telethon_app2.sh
+python3 telethon_reader.py   # test local (set -a && source .env.app2 && set +a)
+```
+
+Trên server sau deploy:
+
+```bash
+bash login_telethon_app2_remote.sh
+journalctl -u click-live-telegram-reader-app2.service -f
+```
+
 Ví dụ `data/message_filters.json`:
 
 ```json
