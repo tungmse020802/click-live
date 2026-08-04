@@ -1,4 +1,4 @@
-# Click Live desktop-tool — setup all-in-one + run
+# Click Live desktop-tool - setup all-in-one + run
 # Called by scripts\run-windows.bat
 
 param(
@@ -64,9 +64,10 @@ function Ensure-WingetPackage {
 
 function Add-ToPath {
   param([string]$Dir)
-  if ($Dir -and (Test-Path $Dir) -and ($env:Path -notlike "*$Dir*")) {
-    $env:Path = "$Dir;$env:Path"
-  }
+  if (-not $Dir) { return }
+  if (-not (Test-Path $Dir)) { return }
+  if ($env:Path -like "*$Dir*") { return }
+  $env:Path = $Dir + ';' + $env:Path
 }
 
 function Ensure-NodeJs {
@@ -115,7 +116,7 @@ function Ensure-Go {
   Add-ToPath "${env:UserProfile}\go\bin"
 
   if (-not (Test-Cmd go)) {
-    Write-Warn "Go not found — app will use PowerShell click helper fallback"
+    Write-Warn "Go not found - app will use PowerShell click helper fallback"
     return $false
   }
   Write-Host "  OK $(go version)"
@@ -230,7 +231,7 @@ function Build-ClickHelper {
   }
 
   if (-not (Test-Path (Join-Path $src "main.go"))) {
-    Write-Warn "click-helper source missing — skip build"
+    Write-Warn "click-helper source missing - skip build"
     return
   }
 
@@ -256,7 +257,7 @@ function Test-Syntax {
   try {
     & npm run check 2>&1 | ForEach-Object { Write-Host "  $_" }
     if ($LASTEXITCODE -ne 0) {
-      Write-Warn "npm run check failed — continuing anyway"
+      Write-Warn "npm run check failed - continuing anyway"
     } else {
       Write-Host "  OK"
     }

@@ -62,9 +62,10 @@ function Ensure-WingetPackage {
 
 function Add-ToPath {
   param([string]$Dir)
-  if ($Dir -and (Test-Path $Dir) -and ($env:Path -notlike "*$Dir*")) {
-    $env:Path = "$Dir;$env:Path"
-  }
+  if (-not $Dir) { return }
+  if (-not (Test-Path $Dir)) { return }
+  if ($env:Path -like "*$Dir*") { return }
+  $env:Path = $Dir + ';' + $env:Path
 }
 
 function Ensure-NodeJs {
@@ -279,13 +280,13 @@ try {
     Push-Location (Join-Path $desktopToolDir "click-helper")
     & go build -trimpath -ldflags="-s -w" -o $out .
     if ($LASTEXITCODE -ne 0) {
-      Write-Host "  ! go build failed — PowerShell click fallback" -ForegroundColor Yellow
+      Write-Host "  ! go build failed - PowerShell click fallback" -ForegroundColor Yellow
     } else {
       Write-Host "  OK $out"
     }
     Pop-Location
   } else {
-    Write-Host "  ! Go missing — PowerShell click fallback" -ForegroundColor Yellow
+    Write-Host "  ! Go missing - PowerShell click fallback" -ForegroundColor Yellow
   }
 
   Write-Step "Syntax check"
