@@ -261,6 +261,33 @@ try {
     throw "npm install failed with code $LASTEXITCODE"
   }
 
+  Write-Step "Build click-helper.exe"
+  $goReady = $false
+  if (Test-Cmd go) {
+    $goReady = $true
+    Write-Host "  OK $(go version)"
+  } else {
+    Write-Host "  Installing Go via winget ..."
+    Ensure-WingetPackage -Id "GoLang.Go" -Label "Go" | Out-Null
+    Add-ToPath "$env:ProgramFiles\Go\bin"
+    if (Test-Cmd go) { $goReady = $true }
+  }
+  if ($goReady) {
+    $outDir = Join-Path $desktopToolDir "resources\bin\win32"
+    $out = Join-Path $outDir "click-helper.exe"
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    Push-Location (Join-Path $desktopToolDir "click-helper")
+    & go build -trimpath -ldflags="-s -w" -o $out .
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "  ! go build failed — PowerShell click fallback" -ForegroundColor Yellow
+    } else {
+      Write-Host "  OK $out"
+    }
+    Pop-Location
+  } else {
+    Write-Host "  ! Go missing — PowerShell click fallback" -ForegroundColor Yellow
+  }
+
   Write-Step "Syntax check"
   & npm run check
   if ($LASTEXITCODE -ne 0) {

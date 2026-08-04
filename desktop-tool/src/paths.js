@@ -1,4 +1,5 @@
 const { app } = require("electron");
+const fs = require("fs");
 const path = require("path");
 
 function isPackaged() {
@@ -23,8 +24,23 @@ function windowsClickHelperPath() {
   return path.join(__dirname, "windows-click-helper.ps1");
 }
 
+function windowsClickNativeHelperPath() {
+  if (isPackaged()) {
+    return path.join(process.resourcesPath, "bin", "click-helper.exe");
+  }
+  const candidates = [
+    path.join(__dirname, "..", "resources", "bin", "win32", "click-helper.exe"),
+    path.join(__dirname, "..", "click-helper", "click-helper.exe"),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return candidates[0];
+}
+
 module.exports = {
   isPackaged,
   envFilePath,
   windowsClickHelperPath,
+  windowsClickNativeHelperPath,
 };

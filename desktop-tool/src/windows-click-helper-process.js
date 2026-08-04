@@ -1,9 +1,14 @@
 /**
- * Persistent PowerShell click helper — fallback khi koffi không có (~10ms/click).
+ * Persistent Windows click helper — native exe (ưu tiên) hoặc PowerShell fallback.
+ * Protocol stdin/stdout: ready | id,x,y | ping:id | quit → ok:/err:/pong:
  */
 
 const { spawn } = require("child_process");
-const { windowsClickHelperPath } = require("./paths");
+const fs = require("fs");
+const {
+  windowsClickNativeHelperPath,
+  windowsClickHelperPath,
+} = require("./paths");
 const { clickLog, clickLogWarn, clickLogError } = require("./click-log");
 const {
   parseHelperOkLine,
@@ -19,17 +24,57 @@ let helperSpawnGen = 0;
 let helperSuccessfulClicks = 0;
 let lastHelperPingAt = 0;
 let helperStdoutBuffer = "";
+let activeHelperKind = null;
 
 const HELPER_STARTUP_TIMEOUT_MS = 12000;
 const HELPER_CLICK_TIMEOUT_MS = 3000;
 const HELPER_PING_TIMEOUT_MS = 1500;
 const HELPER_MAX_CLICKS = Math.max(
   20,
-  Number(process.env.DESKTOP_CLICK_HELPER_MAX_CLICKS) || 120
+  Number(process.env.DESKTOP_CLICK_HELPER_MAX_CLICKS) || 500
 );
 
-function helperScriptPath() {
-  return windowsClickHelperPath();
+function resolveHelperBackend() {
+  const pref = String(process.env.DESKTOP_CLICK_HELPER || "auto").trim().toLowerCase();
+  const nativePath = windowsClickNativeHelperPath();
+  const psPath = windowsClickHelperPath();
+  const nativeExists = fs.existsSync(nativePath);
+  const psExists = fs.existsSync(psPath);
+
+  if (pref === "powershell" || pref === "ps") {
+    return psExists ? { kind: "powershell", cmd: "powershell.exe", args: psArgs(psPath) } : null;
+  }
+  if (pref === "native" || pref === "exe") {
+    return nativeExists ? { kind: "native", cmd: nativePath, args: [] } : null;
+  }
+  if (nativeExists) {
+    return { kind: "native", cmd: nativePath, args: [] };
+  }
+  if (psExists) {
+    return { kind: "powershell", cmd: "powershell.exe", args: psArgs(psPath) };
+  }
+  return null;
+}
+
+function psArgs(psPath) {
+  return [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Sta",
+    "-NoLogo",
+    "-NonInteractive",
+    "-File",
+    psPath,
+  ];
+}
+
+function helperMethodSuffix() {
+  const double = isDoubleClickEnabled() ? "-double" : "";
+  if (activeHelperKind === "native") {
+    return `native-helper${double}`;
+  }
+  return `powershell-helper${double}`;
 }
 
 function killHelperProcess(child) {
@@ -154,29 +199,21 @@ function ensureWinClickHelper() {
   }
   winClickReady = null;
 
+  const backend = resolveHelperBackend();
+  if (!backend) {
+    return Promise.reject(new Error("No Windows click helper found (native exe or .ps1)"));
+  }
+
   const spawnGen = ++helperSpawnGen;
   winClickReady = new Promise((resolve, reject) => {
-    const ps1 = helperScriptPath();
-    const fs = require("fs");
-    if (!fs.existsSync(ps1)) {
-      winClickReady = null;
-      reject(new Error("windows-click-helper.ps1 not found"));
-      return;
-    }
-
     const startedAt = Date.now();
-    clickLog("helper", "starting PowerShell click helper", { script: ps1, spawnGen });
+    clickLog("helper", "starting click helper process", {
+      kind: backend.kind,
+      cmd: backend.cmd,
+      spawnGen,
+    });
 
-    const child = spawn("powershell.exe", [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Sta",
-      "-NoLogo",
-      "-NonInteractive",
-      "-File",
-      ps1,
-    ], {
+    const child = spawn(backend.cmd, backend.args, {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -191,19 +228,22 @@ function ensureWinClickHelper() {
     };
 
     const timer = setTimeout(() => {
-      clickLogError("helper", "PowerShell click helper startup timeout", {
+      clickLogError("helper", "click helper startup timeout", {
+        kind: backend.kind,
         spawnGen,
         waitedMs: HELPER_STARTUP_TIMEOUT_MS,
       });
       killHelperProcess(child);
       winClickReady = null;
       winClickHelper = null;
-      finish(reject, new Error("PowerShell click helper startup timeout"));
+      activeHelperKind = null;
+      finish(reject, new Error("Windows click helper startup timeout"));
     }, HELPER_STARTUP_TIMEOUT_MS);
 
     const fail = (err) => {
       winClickReady = null;
       winClickHelper = null;
+      activeHelperKind = null;
       finish(reject, err);
     };
 
@@ -214,9 +254,11 @@ function ensureWinClickHelper() {
         if (settled) return;
         child.stdout.off("data", onStartupData);
         winClickHelper = child;
+        activeHelperKind = backend.kind;
         helperStdoutBuffer = "";
         attachHelperStdoutPump();
-        clickLog("helper", "PowerShell click helper ready", {
+        clickLog("helper", "click helper ready", {
+          kind: backend.kind,
           startupMs: Date.now() - startedAt,
           spawnGen,
         });
@@ -230,19 +272,23 @@ function ensureWinClickHelper() {
       const msg = chunk.toString().trim();
       if (msg) {
         console.warn("win-click-helper:", msg);
-        clickLogWarn("helper", "PowerShell click helper stderr", { detail: msg });
+        clickLogWarn("helper", "click helper stderr", { kind: backend.kind, detail: msg });
       }
     });
 
     child.on("error", (err) => {
-      clickLogError("helper", "PowerShell click helper spawn failed", { error: String(err.message || err) });
+      clickLogError("helper", "click helper spawn failed", {
+        kind: backend.kind,
+        error: String(err.message || err),
+      });
       fail(err);
     });
     child.on("exit", (code) => {
       if (spawnGen !== helperSpawnGen) return;
-      clickLogWarn("helper", "PowerShell click helper exited", { code, spawnGen });
+      clickLogWarn("helper", "click helper exited", { kind: activeHelperKind, code, spawnGen });
       winClickHelper = null;
       winClickReady = null;
+      activeHelperKind = null;
     });
   });
 
@@ -250,7 +296,8 @@ function ensureWinClickHelper() {
 }
 
 async function restartWinClickHelper(reason) {
-  clickLog("helper", "restarting PowerShell click helper", {
+  clickLog("helper", "restarting click helper", {
+    kind: activeHelperKind,
     reason,
     successfulClicks: helperSuccessfulClicks,
   });
@@ -269,13 +316,14 @@ function clickViaHelper(px, py) {
     .then((roundTripMs) => {
       lastHelperPingAt = Date.now();
       return {
-        method: isDoubleClickEnabled() ? "powershell-helper-double" : "powershell-helper",
+        method: helperMethodSuffix(),
         x: px,
         y: py,
         durationMs: Date.now() - sentAt,
         roundTripMs,
         invokedAt: sentAt,
         clickId,
+        helperKind: activeHelperKind,
       };
     });
 }
@@ -286,7 +334,7 @@ function pingHelperProcess() {
     .then(() => waitHelperLine({
       match: (line) => parseHelperPongLine(line, pingId),
       timeoutMs: HELPER_PING_TIMEOUT_MS,
-      label: "PowerShell click helper ping",
+      label: "click helper ping",
     }))
     .then((latencyMs) => {
       lastHelperPingAt = Date.now();
@@ -321,6 +369,7 @@ function shutdownWinClickHelper() {
   }
   winClickHelper = null;
   winClickReady = null;
+  activeHelperKind = null;
 }
 
 function isWinClickHelperReady() {
@@ -331,6 +380,10 @@ function getLastHelperPingAt() {
   return lastHelperPingAt;
 }
 
+function getActiveHelperKind() {
+  return activeHelperKind;
+}
+
 module.exports = {
   ensureWinClickHelper,
   clickViaPersistentHelper,
@@ -338,4 +391,6 @@ module.exports = {
   shutdownWinClickHelper,
   isWinClickHelperReady,
   getLastHelperPingAt,
+  getActiveHelperKind,
+  resolveHelperBackend,
 };

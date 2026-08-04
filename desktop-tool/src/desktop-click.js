@@ -28,6 +28,7 @@ const {
   shutdownWinClickHelper,
   isWinClickHelperReady: isPsHelperReady,
   getLastHelperPingAt,
+  getActiveHelperKind,
 } = require("./windows-click-helper-process");
 
 let winClickQueue = Promise.resolve();
@@ -167,7 +168,7 @@ async function clickScreenPointWindowsInner(px, py, options = {}) {
     dropStaleClick(clickGen, "win-inner");
   }
 
-  // PowerShell helper (process riêng) — click nút ổn định hơn từ Electron.
+  // Process nền (native exe hoặc PowerShell) — ổn định hơn gọi SendInput từ Electron.
   try {
     if (isStaleClickRequest(clickGen)) dropStaleClick(clickGen, "win-before-helper");
     if (!isPsHelperReady()) {
@@ -181,7 +182,7 @@ async function clickScreenPointWindowsInner(px, py, options = {}) {
     return await clickViaPowerShellHelper(px, py);
   } catch (err) {
     if (err?.code === "CLICK_STALE") throw err;
-    clickLogWarn("click", "PowerShell helper failed, trying koffi mouse_event", {
+    clickLogWarn("click", "background click helper failed, trying koffi mouse_event", {
       error: String(err.message || err),
       x: px,
       y: py,
@@ -248,7 +249,7 @@ async function primeClickLatencyHelper() {
     try {
       samples.push(await pingHelperProcess());
     } catch (err) {
-      clickLogWarn("helper", "PowerShell helper ping failed", {
+      clickLogWarn("helper", "click helper ping failed", {
         error: String(err.message || err),
         attempt: i + 1,
       });
@@ -276,7 +277,9 @@ async function primeClickLatency() {
     medianMs: median,
     samples,
     estimateMs: getHelperLatencyEstimateMs(),
-    backend: isPsHelperReady() ? "powershell-helper" : (isWindowsSendInputReady() ? "koffi" : "none"),
+    backend: isPsHelperReady()
+      ? (getActiveHelperKind() || "helper")
+      : (isWindowsSendInputReady() ? "koffi" : "none"),
   });
   try {
     const { refreshSessionClickTiming } = require("./click-lead");
@@ -292,7 +295,7 @@ function warmUpWinClickHelper() {
   return primeClickLatency()
     .then(() => {
       const backend = isPsHelperReady()
-        ? "powershell-helper"
+        ? (getActiveHelperKind() || "helper")
         : (isWindowsSendInputReady() ? "koffi" : "none");
       clickLog("helper", "Windows click warmup OK", {
         estimateMs: getHelperLatencyEstimateMs(),

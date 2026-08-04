@@ -20,6 +20,10 @@ asarUnpack:
 extraResources:
   - from: src/windows-click-helper.ps1
     to: windows-click-helper.ps1
+  - from: resources/bin/win32/
+    to: bin/
+    filter:
+      - click-helper.exe
   - from: .env.example
     to: .env.example
 

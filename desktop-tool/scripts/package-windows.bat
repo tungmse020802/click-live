@@ -17,6 +17,9 @@ echo npm install ...
 call npm install
 if errorlevel 1 goto :fail
 
+call "%~dp0build-click-helper.bat"
+echo.
+
 echo npm run dist:win ...
 call npm run dist:win
 if errorlevel 1 goto :fail
