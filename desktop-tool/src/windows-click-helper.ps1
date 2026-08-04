@@ -5,10 +5,14 @@ try {
 using System;
 using System.Runtime.InteropServices;
 public class ClickLiveDpi {
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+  public static readonly IntPtr PerMonitorV2 = (IntPtr)(-4);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 "@
-  [ClickLiveDpi]::SetProcessDPIAware() | Out-Null
+  if (-not [ClickLiveDpi]::SetProcessDpiAwarenessContext([ClickLiveDpi]::PerMonitorV2)) {
+    [ClickLiveDpi]::SetProcessDPIAware() | Out-Null
+  }
 } catch {
   # DPI API không có trên một số bản Windows — bỏ qua
 }
@@ -37,13 +41,8 @@ while ($true) {
     [ClickLive.WinMouse]::mouse_event(0x0004, 0, 0, 0, 0)
     [Console]::Out.WriteLine("ok:${id},${x},${y}")
   } elseif ($line -match '^(-?\d+),(-?\d+)$') {
-    # legacy: id=0
-    $x = [int]$Matches[1]
-    $y = [int]$Matches[2]
-    [ClickLive.WinMouse]::SetCursorPos($x, $y) | Out-Null
-    [ClickLive.WinMouse]::mouse_event(0x0002, 0, 0, 0, 0)
-    [ClickLive.WinMouse]::mouse_event(0x0004, 0, 0, 0, 0)
-    [Console]::Out.WriteLine("ok:0,${x},${y}")
+    # legacy id=0 — deprecated; log err to avoid misparsed clicks
+    [Console]::Out.WriteLine("err:legacy-format")
   } else {
     [Console]::Out.WriteLine("err")
   }

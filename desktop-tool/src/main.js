@@ -131,6 +131,7 @@ function clearOverlayTiming() {
 function cancelActiveClickTask() {
   activeClickTask = null;
   abortClickWait();
+  nextClickGeneration();
 }
 
 function pruneJobEntries() {
@@ -157,7 +158,6 @@ function resolveClickPoint(settings) {
 function beginOpenSequence() {
   openSequence += 1;
   cancelActiveClickTask();
-  nextClickGeneration();
   /* Giữ overlay cũ đến khi job mới syncCountdownOverlay — tránh nháy mất đồng hồ khi burst link */
   return openSequence;
 }
@@ -386,7 +386,16 @@ async function scheduleDesktopClick({
       }
 
       const clickInvokeAt = Date.now();
-      const result = await clickScreenPoint(clickX, clickY);
+      let result;
+      try {
+        result = await clickScreenPoint(clickX, clickY, { clickGen });
+      } catch (err) {
+        if (err?.code === "CLICK_STALE") {
+          clickLog("skip", `skip click job #${key} stale at queue`, { jobId: key, clickGen });
+          return;
+        }
+        throw err;
+      }
 
       if (shouldAbort() || !isCurrentClickGeneration(clickGen)) {
         clickLog("skip", `skip click job #${key} after invoke (stale)`, {

@@ -1,10 +1,34 @@
 const { BrowserWindow, screen, ipcMain } = require("electron");
 const path = require("path");
 
+function unionDisplayBounds() {
+  const displays = screen.getAllDisplays();
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const display of displays) {
+    const { x, y, width, height } = display.bounds;
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x + width);
+    maxY = Math.max(maxY, y + height);
+  }
+  if (!Number.isFinite(minX)) {
+    const primary = screen.getPrimaryDisplay().bounds;
+    return primary;
+  }
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
+}
+
 function pickPointOnScreen() {
   return new Promise((resolve, reject) => {
-    const display = screen.getPrimaryDisplay();
-    const { x, y, width, height } = display.bounds;
+    const { x, y, width, height } = unionDisplayBounds();
     const win = new BrowserWindow({
       x,
       y,

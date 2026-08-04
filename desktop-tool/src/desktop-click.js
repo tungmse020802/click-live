@@ -7,13 +7,20 @@ const path = require("path");
 const execFileAsync = promisify(execFile);
 const { windowsClickHelperPath } = require("./paths");
 const { clickLog, clickLogWarn, clickLogError } = require("./click-log");
+const { isCurrentClickGeneration } = require("./click-scheduler");
 
 let winClickHelper = null;
 let winClickReady = null;
 let winClickQueue = Promise.resolve();
 let helperClickSeq = 0;
 let helperSpawnGen = 0;
+let helperSuccessfulClicks = 0;
 const HELPER_STARTUP_TIMEOUT_MS = 12000;
+const HELPER_CLICK_TIMEOUT_MS = 3000;
+const HELPER_MAX_CLICKS = Math.max(
+  20,
+  Number(process.env.DESKTOP_CLICK_HELPER_MAX_CLICKS) || 120
+);
 /** Stdout tích lũy — parse theo dòng, tránh nhầm ok cũ. */
 let helperStdoutBuffer = "";
 
@@ -52,6 +59,28 @@ function resolveCliclickBin() {
     if (fs.existsSync(candidate)) return candidate;
   }
   return "cliclick";
+}
+
+function isStaleClickRequest(clickGen) {
+  return clickGen != null && !isCurrentClickGeneration(clickGen);
+}
+
+function dropStaleClick(clickGen, stage) {
+  clickLog("skip", `drop stale click at ${stage}`, { clickGen });
+  const err = new Error("stale click cancelled");
+  err.code = "CLICK_STALE";
+  throw err;
+}
+
+async function restartWinClickHelper(reason) {
+  clickLog("helper", "restarting Windows click helper", {
+    reason,
+    successfulClicks: helperSuccessfulClicks,
+  });
+  helperSuccessfulClicks = 0;
+  shutdownWinClickHelper();
+  helperStdoutBuffer = "";
+  await ensureWinClickHelper();
 }
 
 function helperScriptPath() {
@@ -182,10 +211,10 @@ function clickViaHelper(px, py) {
     const timer = setTimeout(() => {
       cleanup();
       clickLogError("click", "Windows click helper timeout", {
-        clickId, x: px, y: py, waitedMs: 3000,
+        clickId, x: px, y: py, waitedMs: HELPER_CLICK_TIMEOUT_MS,
       });
       reject(new Error("Windows click timeout"));
-    }, 3000);
+    }, HELPER_CLICK_TIMEOUT_MS);
 
     const onLine = (line) => {
       if (parseHelperOkLine(line, clickId, px, py)) {
@@ -264,25 +293,46 @@ async function clickScreenPointWindowsFallback(px, py) {
   return { method: "powershell", x: px, y: py, durationMs, invokedAt };
 }
 
-async function clickScreenPointWindowsInner(px, py) {
+async function clickScreenPointWindowsInner(px, py, options = {}) {
+  const { clickGen } = options;
+  if (isStaleClickRequest(clickGen)) {
+    dropStaleClick(clickGen, "helper-inner");
+  }
   try {
     await ensureWinClickHelper();
-    return await clickViaHelper(px, py);
+    if (isStaleClickRequest(clickGen)) {
+      dropStaleClick(clickGen, "helper-after-ready");
+    }
+    const result = await clickViaHelper(px, py);
+    helperSuccessfulClicks += 1;
+    if (helperSuccessfulClicks >= HELPER_MAX_CLICKS) {
+      await restartWinClickHelper("max-clicks");
+    }
+    return result;
   } catch (err) {
+    if (err?.code === "CLICK_STALE") throw err;
     clickLogWarn("click", "Windows click helper failed, using fallback", {
       error: String(err.message || err),
       x: px,
       y: py,
     });
     console.warn("Windows click helper failed, fallback:", err.message || err);
+    if (isStaleClickRequest(clickGen)) {
+      dropStaleClick(clickGen, "fallback-blocked");
+    }
     return clickScreenPointWindowsFallback(px, py);
   }
 }
 
-function clickScreenPointWindows(px, py) {
+function clickScreenPointWindows(px, py, options = {}) {
   const task = winClickQueue
     .catch(() => {})
-    .then(() => clickScreenPointWindowsInner(px, py));
+    .then(() => {
+      if (isStaleClickRequest(options.clickGen)) {
+        dropStaleClick(options.clickGen, "queue");
+      }
+      return clickScreenPointWindowsInner(px, py, options);
+    });
   winClickQueue = task.catch(() => {});
   return task;
 }
@@ -320,7 +370,11 @@ function shutdownWinClickHelper() {
   winClickReady = null;
 }
 
-async function clickScreenPointDarwin(px, py) {
+async function clickScreenPointDarwin(px, py, options = {}) {
+  const { clickGen } = options;
+  if (isStaleClickRequest(clickGen)) {
+    dropStaleClick(clickGen, "darwin");
+  }
   const cliclick = resolveCliclickBin();
   const invokedAt = Date.now();
   try {
@@ -343,7 +397,7 @@ async function clickScreenPointDarwin(px, py) {
   }
 }
 
-async function clickScreenPoint(x, y) {
+async function clickScreenPoint(x, y, options = {}) {
   const px = Math.round(Number(x));
   const py = Math.round(Number(y));
   if (!Number.isFinite(px) || !Number.isFinite(py)) {
@@ -353,12 +407,16 @@ async function clickScreenPoint(x, y) {
     throw new Error(`Toa do click ngoai pham vi: ${px},${py}`);
   }
 
-  clickLog("click", "invoke clickScreenPoint", { x: px, y: py });
+  clickLog("click", "invoke clickScreenPoint", {
+    x: px,
+    y: py,
+    clickGen: options.clickGen ?? null,
+  });
   if (process.platform === "win32") {
-    return clickScreenPointWindows(px, py);
+    return clickScreenPointWindows(px, py, options);
   }
   if (process.platform === "darwin") {
-    return clickScreenPointDarwin(px, py);
+    return clickScreenPointDarwin(px, py, options);
   }
   throw new Error(`Desktop click chua ho tro nen tang: ${process.platform}`);
 }
