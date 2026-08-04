@@ -557,6 +557,7 @@ async function scheduleDesktopClick({
         recordClickOutcome({
           clickDurationMs: result.durationMs,
           driftFromDisplayMs,
+          waitDriftMs,
           trustworthy: isTrustworthyClickOutcome({
             driftFromDisplayMs,
             fireDelayMs,

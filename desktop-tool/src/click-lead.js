@@ -27,10 +27,17 @@ function resolveTargetOverlayRemainingMs() {
   return process.platform === "win32" ? 80 : 40;
 }
 
+function resolveClickFocusOverheadMs() {
+  if (process.platform !== "win32") return 0;
+  const focus = Number(process.env.DESKTOP_CLICK_FOCUS_MS);
+  if (Number.isFinite(focus) && focus >= 0) return Math.round(focus);
+  return 80;
+}
+
 function advanceBounds() {
   return process.platform === "win32"
-    ? { floor: 35, ceiling: 220 }
-    : { floor: 15, ceiling: 100 };
+    ? { floor: 35, ceiling: 900 }
+    : { floor: 15, ceiling: 120 };
 }
 
 function clampAdvance(ms) {
@@ -128,25 +135,35 @@ function percentile(sorted, ratio) {
 
 function predictClickLatencyMs() {
   loadCalibration();
+  let warm = 0;
   try {
     const { getHelperLatencyEstimateMs } = require("./desktop-click");
-    const warm = getHelperLatencyEstimateMs();
-    if (Number.isFinite(warm) && warm > 0) return Math.round(warm);
+    const estimate = getHelperLatencyEstimateMs();
+    if (Number.isFinite(estimate) && estimate > 0) warm = Math.round(estimate);
   } catch {
     /* ngoài Electron hoặc chưa warm */
   }
-  const fallback = process.platform === "win32" ? 12 : 8;
-  if (samples.length < 3) return fallback;
+  const fallback = process.platform === "win32" ? 20 : 8;
+  const ratio = Number(process.env.DESKTOP_CLICK_LATENCY_PERCENTILE);
+  const pct = Number.isFinite(ratio) && ratio > 0 && ratio <= 1 ? ratio : 0.9;
+
+  if (samples.length < 3) {
+    return Math.max(fallback, warm);
+  }
   const sorted = [...samples].sort((a, b) => a - b);
-  const p75 = Math.round(percentile(sorted, 0.75));
-  return Math.max(fallback, p75);
+  const fromSamples = Math.round(percentile(sorted, pct));
+  return Math.max(fallback, warm, fromSamples);
 }
 
 function buildSessionClickTiming() {
   const targetBeforeMs = resolveTargetOverlayRemainingMs();
   const clickLatencyMs = predictClickLatencyMs();
-  const executeAdvanceMs = clampAdvance(targetBeforeMs + clickLatencyMs);
-  return { targetBeforeMs, clickLatencyMs, executeAdvanceMs };
+  const focusOverheadMs = resolveClickFocusOverheadMs();
+  const driftBump = driftEma != null && driftEma > 30
+    ? Math.round(Math.min(400, driftEma * 0.6))
+    : 0;
+  const executeAdvanceMs = clampAdvance(targetBeforeMs + clickLatencyMs + focusOverheadMs + driftBump);
+  return { targetBeforeMs, clickLatencyMs, focusOverheadMs, driftBump, executeAdvanceMs };
 }
 
 /** Timing cố định cả session — mọi job dùng cùng mốc chạm chuột. */
@@ -191,16 +208,42 @@ function isTrustworthyClickOutcome({ driftFromDisplayMs, fireDelayMs, waitDriftM
   return true;
 }
 
-/** Ghi latency/drift để thống kê — không đổi timing giữa các job trong session. */
+function adjustSessionTimingForDrift(driftMs) {
+  if (Number.isFinite(Number(process.env.DESKTOP_CLICK_EXECUTION_LEAD_MS))) return;
+  const n = Number(driftMs);
+  if (!Number.isFinite(n) || n < 40) return;
+
+  const current = getSessionClickTiming();
+  const bump = Math.round(Math.min(500, n * 0.55));
+  const nextAdvance = clampAdvance(current.executeAdvanceMs + bump);
+  if (nextAdvance <= current.executeAdvanceMs) return;
+
+  sessionTiming = {
+    ...current,
+    clickLatencyMs: Math.max(0, nextAdvance - current.targetBeforeMs - (current.focusOverheadMs || 0)),
+    executeAdvanceMs: nextAdvance,
+    driftBump: (current.driftBump || 0) + bump,
+  };
+}
+
+/** Ghi latency/drift — tự tăng lead trong session khi click muộn (máy tải cao). */
 function recordClickOutcome({
   clickDurationMs,
   driftFromDisplayMs,
+  waitDriftMs,
   trustworthy = true,
 } = {}) {
   if (clickDurationMs != null) recordClickDuration(clickDurationMs);
-  if (!trustworthy || driftFromDisplayMs == null) return;
-  if (Math.abs(driftFromDisplayMs) > MAX_OUTLIER_DRIFT_MS) return;
-  recordClickDrift(driftFromDisplayMs);
+  if (!trustworthy) return;
+  if (driftFromDisplayMs != null && Math.abs(driftFromDisplayMs) <= MAX_OUTLIER_DRIFT_MS) {
+    recordClickDrift(driftFromDisplayMs);
+    if (driftFromDisplayMs > 40) {
+      adjustSessionTimingForDrift(driftFromDisplayMs);
+    }
+  }
+  if (waitDriftMs != null && waitDriftMs > 40) {
+    adjustSessionTimingForDrift(waitDriftMs);
+  }
 }
 
 function getClickLeadStats() {
@@ -212,6 +255,8 @@ function getClickLeadStats() {
     driftEma,
     targetOverlayMs: timing.targetBeforeMs,
     clickLatencyMs: timing.clickLatencyMs,
+    focusOverheadMs: timing.focusOverheadMs || 0,
+    driftBumpMs: timing.driftBump || 0,
     sessionAdvanceMs: timing.executeAdvanceMs,
     leadMs: timing.executeAdvanceMs,
     recent: samples.slice(-5),
