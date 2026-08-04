@@ -313,12 +313,16 @@ class TelethonReader:
             room_id = self.room_ids[target.room_key]
             direction = "outgoing" if message.out else "incoming"
             platform_message_id = f"{target.room_key}:{message.id}"
+            message_created_at = None
+            if timestamp_ms is not None:
+                message_created_at = timestamp_ms / 1000.0
             chat_message_id = self.db.insert_chat_message_if_new(
                 room_id=room_id,
                 user_id=user_id,
                 platform_message_id=platform_message_id,
                 direction=direction,
                 text=text,
+                created_at=message_created_at,
             )
             if chat_message_id is None:
                 return

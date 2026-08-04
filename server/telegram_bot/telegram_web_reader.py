@@ -401,12 +401,16 @@ class TelegramWebReader:
                 )
 
             direction = "outgoing" if message.is_outgoing else "incoming"
+            message_created_at = None
+            if message.timestamp_ms is not None:
+                message_created_at = int(message.timestamp_ms) / 1000.0
             chat_message_id = self.db.insert_chat_message_if_new(
                 room_id=room_id,
                 user_id=user_id,
                 platform_message_id=message.key,
                 direction=direction,
                 text=message.text,
+                created_at=message_created_at,
             )
             if chat_message_id is None:
                 continue

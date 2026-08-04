@@ -44,6 +44,8 @@ from deeplink_resolve import (
     resolve_live_url,
 )
 from message_format import broadcast_text_from_payload, queue_display_from_payload
+from phone_jobs import extract_time_from_item
+from countdown_timing import resolve_countdown_end_time_ms
 from dotenv import load_dotenv
 from telegram import Bot
 from ui_auth import (
@@ -101,12 +103,24 @@ def _enrich_queue_item(item: Dict[str, Any]) -> Dict[str, Any]:
         or re.search(r"https?://|snssdk1180://", combined, re.I)
     )
 
+    time_meta = extract_time_from_item(item)
+    telegram_ts = payload.get("telegram_timestamp_ms")
+    junb_end_time_ms = resolve_countdown_end_time_ms(countdown_url) if countdown_url else None
+
     enriched = dict(item)
     enriched["display_html"] = display_html
     enriched["countdown_url"] = countdown_url
     enriched["deeplink"] = deeplink
     enriched["room_id"] = room_id
     enriched["has_link"] = has_link
+    enriched["time_meta"] = time_meta
+    if telegram_ts is not None:
+        try:
+            enriched["telegram_at_ms"] = int(telegram_ts)
+        except (TypeError, ValueError):
+            pass
+    if junb_end_time_ms is not None:
+        enriched["junb_end_time_ms"] = int(junb_end_time_ms)
     return enriched
 
 

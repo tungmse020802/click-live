@@ -477,8 +477,9 @@ class ChatDatabase:
         platform_message_id: str,
         direction: str,
         text: str,
+        created_at: Optional[float] = None,
     ) -> Optional[int]:
-        now = _now()
+        now = float(created_at) if created_at is not None else _now()
         with self._connect() as conn:
             cursor = conn.execute(
                 """

@@ -304,6 +304,8 @@
       font-size: 12px;
       color: var(--tg-muted);
     }
+    .chat-time-row.time-warn { color: #fbbf24; }
+    .chat-time-row strong { color: var(--tg-text); font-weight: 600; }
 
     .chat-actions {
       display: flex;
@@ -473,15 +475,93 @@
         .replace(/'/g, '&#039;');
     }
 
+    const VN_TZ = 'Asia/Ho_Chi_Minh';
+
+    function toEpochMs(value) {
+      if (value == null || value === '') return null;
+      const n = Number(value);
+      if (!Number.isFinite(n)) return null;
+      return n > 1e12 ? n : n * 1000;
+    }
+
     function timeShort(value) {
-      if (!value) return '';
-      const d = new Date(value * 1000);
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const ms = toEpochMs(value);
+      if (ms == null) return '';
+      return new Date(ms).toLocaleTimeString('vi-VN', {
+        timeZone: VN_TZ,
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      });
     }
 
     function timeFull(value) {
-      if (!value) return '';
-      return new Date(value * 1000).toLocaleString();
+      const ms = toEpochMs(value);
+      if (ms == null) return '';
+      return new Date(ms).toLocaleString('vi-VN', {
+        timeZone: VN_TZ,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      });
+    }
+
+    function timeClock(value) {
+      const ms = toEpochMs(value);
+      if (ms == null) return '';
+      return new Date(ms).toLocaleTimeString('vi-VN', {
+        timeZone: VN_TZ,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        fractionalSecondDigits: 3,
+        hour12: false,
+      });
+    }
+
+    /** HH:MM:SS trong TIME tin → epoch ms (giờ máy trình duyệt / VN). */
+    function parseTargetClockMs(hhmmss, nowMs = Date.now()) {
+      const text = String(hhmmss || '').trim();
+      const parts = text.split(':');
+      if (parts.length !== 3) return null;
+      const rawH = Number(parts[0]);
+      const mm = Number(parts[1]);
+      const ss = Number(parts[2]);
+      if (![rawH, mm, ss].every(Number.isFinite)) return null;
+      const hh = rawH % 24;
+      const target = new Date(nowMs);
+      target.setHours(hh, mm, ss, 0);
+      if (target.getTime() < nowMs - 12 * 60 * 60 * 1000) {
+        target.setDate(target.getDate() + 1);
+      }
+      return target.getTime();
+    }
+
+    function formatTargetCountdown(targetMs, nowMs = Date.now()) {
+      if (targetMs == null || !Number.isFinite(targetMs)) return '';
+      const diffSec = (targetMs - nowMs) / 1000;
+      if (Math.abs(diffSec) <= 0.05) return 'đúng giờ';
+      if (diffSec > 0) return `còn ${diffSec.toFixed(1)}s tới giờ click`;
+      return `đã qua ${Math.abs(diffSec).toFixed(1)}s`;
+    }
+
+    function formatJunbDrift(messageTargetMs, junbEndMs) {
+      if (messageTargetMs == null || junbEndMs == null) return '';
+      const diffSec = (junbEndMs - messageTargetMs) / 1000;
+      if (Math.abs(diffSec) <= 2) return '';
+      const sign = diffSec >= 0 ? '+' : '';
+      return `Link junb lệch ${sign}${diffSec.toFixed(1)}s so với TIME tin`;
+    }
+
+    function updateTargetCountdowns() {
+      const now = Date.now();
+      els.feed.querySelectorAll('[data-target-ms]').forEach((node) => {
+        const targetMs = Number(node.dataset.targetMs);
+        const cd = node.querySelector('.target-cd');
+        if (!cd || !Number.isFinite(targetMs)) return;
+        cd.textContent = formatTargetCountdown(targetMs, now);
+      });
     }
 
     function badge(status) {
@@ -785,6 +865,17 @@
     function findTimeMeta(item) {
       const payload = item?.payload || {};
       const message = item?.message || {};
+      const serverMeta = item?.time_meta;
+      if (serverMeta && serverMeta.label) {
+        const label = String(serverMeta.label || '').trim();
+        const hhmmss = String(serverMeta.target_time_hhmmss || '').trim();
+        return {
+          label,
+          click_after_ms: Number(serverMeta.click_after_ms) || parseTimeDelayMs(label),
+          target_hhmmss: hhmmss,
+          target_ms: hhmmss ? parseTargetClockMs(hhmmss) : null,
+        };
+      }
       const candidates = [payload.TIME, payload.time, payload.Time, message.text];
       for (const value of candidates) {
         const text = String(value || '');
@@ -793,10 +884,24 @@
           || text.match(/(\d{1,2}:\d{2}\s*s?)/i);
         if (match) {
           const label = match[1].trim();
-          return { label, click_after_ms: parseTimeDelayMs(label) };
+          const hhmmssMatch = label.match(/-\s*(\d{1,2}:\d{2}:\d{2})/);
+          const target_hhmmss = hhmmssMatch ? hhmmssMatch[1].trim() : '';
+          return {
+            label,
+            click_after_ms: parseTimeDelayMs(label),
+            target_hhmmss,
+            target_ms: target_hhmmss ? parseTargetClockMs(target_hhmmss) : null,
+          };
         }
       }
-      return { label: '', click_after_ms: 0 };
+      return { label: '', click_after_ms: 0, target_hhmmss: '', target_ms: null };
+    }
+
+    function messageTelegramMs(item) {
+      if (item?.telegram_at_ms != null) return Number(item.telegram_at_ms);
+      const payloadMs = item?.payload?.telegram_timestamp_ms;
+      if (payloadMs != null) return Number(payloadMs);
+      return toEpochMs(item?.message?.created_at);
     }
 
     function phoneClickPoint() {
@@ -867,7 +972,9 @@
     }
 
     function renderLiveStatus(data) {
-      const t = data.generated_at ? new Date(data.generated_at).toLocaleTimeString() : '';
+      const t = data.generated_at
+        ? new Date(data.generated_at).toLocaleTimeString('vi-VN', { timeZone: VN_TZ, hour12: false })
+        : '';
       const dot = state.desktopOnline
         ? (state.queueUsername ? `Desktop ${state.queueUsername} ✓` : 'Desktop ✓')
         : (state.queueUsername ? `Desktop ${state.queueUsername} ✗` : 'Desktop ✗');
@@ -973,10 +1080,21 @@
       els.feed.innerHTML = sorted.map((item) => {
         const selected = item.id === state.selectedId ? 'selected' : '';
         const timeMeta = findTimeMeta(item);
+        const telegramMs = messageTelegramMs(item);
+        const junbEndMs = item.junb_end_time_ms != null ? Number(item.junb_end_time_ms) : null;
+        const junbDrift = formatJunbDrift(timeMeta.target_ms, junbEndMs);
         const bodyHtml = item.display_html || esc(item.message?.text || '');
         const hasLink = item.has_link || item.countdown_url || findLink(item);
         const superseded = String(item.last_error || '').includes('superseded');
         const canOpen = hasLink && item.status !== 'dead' && item.status !== 'failed';
+        const targetRow = timeMeta.target_ms
+          ? `<div class="chat-time-row" data-target-ms="${timeMeta.target_ms}">`
+            + `🎯 Giờ click: <strong>${esc(timeClock(timeMeta.target_ms))}</strong> · `
+            + `<span class="target-cd">${esc(formatTargetCountdown(timeMeta.target_ms))}</span></div>`
+          : '';
+        const telegramRow = telegramMs
+          ? `<div class="chat-time-row">📥 Telegram gửi: ${esc(timeFull(telegramMs))}</div>`
+          : '';
         return `
           <article class="chat-message ${esc(item.status)} ${selected}" data-id="${item.id}">
             <div class="chat-head">
@@ -985,8 +1103,11 @@
               <span class="chat-meta">#${item.id}</span>
             </div>
             <div class="chat-body tg-format">${bodyHtml}</div>
-            ${timeMeta.label ? `<div class="chat-time-row">⏱ ${esc(timeMeta.label)}</div>` : ''}
-            <div class="chat-time-row">${esc(timeFull(item.created_at))}</div>
+            ${timeMeta.label ? `<div class="chat-time-row">⏱ TIME trong tin: ${esc(timeMeta.label)}</div>` : ''}
+            ${targetRow}
+            ${junbDrift ? `<div class="chat-time-row time-warn">⚠ ${esc(junbDrift)}</div>` : ''}
+            ${telegramRow}
+            <div class="chat-time-row">📋 Bot nhận / vào queue: ${esc(timeFull(item.created_at))}</div>
             ${superseded ? `<div class="superseded-note">Đã thay bằng tin mới — vẫn giữ 30 phút trên queue</div>` : ''}
             <div class="chat-actions">
               <button type="button" class="button open-link" data-open-link="${item.id}" ${canOpen ? '' : 'disabled'}>Mở link</button>
@@ -1026,6 +1147,7 @@
 
       restoreScrollAfterRender(prevScrollTop, firstPaint);
       state.lastRenderedLatestId = latestId;
+      updateTargetCountdowns();
     }
 
     function effectiveRefreshSeconds() {
@@ -1155,6 +1277,10 @@
       .catch((err) => {
       els.liveStatus.textContent = err.message;
     });
+
+    if (!state.countdownTimer) {
+      state.countdownTimer = setInterval(updateTargetCountdowns, 1000);
+    }
   </script>
   <script>
 __LOGOUT_SCRIPT__
