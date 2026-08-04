@@ -104,6 +104,12 @@
       min-height: 42px;
     }
     .status strong { color: var(--text); }
+    .status .status-line { margin-top: 4px; }
+    .status .status-line:first-child { margin-top: 0; }
+    .status .drift-late { color: #f87171; font-weight: 600; }
+    .status .drift-early { color: #fbbf24; font-weight: 600; }
+    .status .drift-ok { color: var(--green); font-weight: 600; }
+    .status .offset-tip { color: #94a3b8; font-size: 11px; }
     .click-result {
       margin-top: 10px;
       padding: 10px 12px;
@@ -290,13 +296,13 @@
       <div class="status" id="status">Sẵn sàng.</div>
       <div class="job-timeline" id="jobTimeline"></div>
       <div class="click-result" id="lastClickResult">
-        <div class="row"><span class="label">Đã click tại</span><span class="value" id="lastClickPos">—</span></div>
-        <div class="row"><span class="label">Thời điểm click</span><span class="value" id="lastClickAt">—</span></div>
-        <div class="row"><span class="label">TIME gốc (tin)</span><span class="value" id="lastClickRawTime">—</span></div>
-        <div class="row"><span class="label">Mốc overlay 0.0s</span><span class="value" id="lastClickTarget">—</span></div>
-        <div class="row"><span class="label">Overlay lúc click</span><span class="value" id="lastClickOverlayRem">—</span></div>
-        <div class="row"><span class="label">Offset / lead</span><span class="value" id="lastClickOffsetLead">—</span></div>
-        <div class="row"><span class="label">Lệch vs 0.0s</span><span class="value" id="lastClickDrift">—</span></div>
+        <div class="row"><span class="label">Vị trí click</span><span class="value" id="lastClickPos">—</span></div>
+        <div class="row"><span class="label">Click thực tế</span><span class="value" id="lastClickAt">—</span></div>
+        <div class="row"><span class="label">Giờ chuẩn</span><span class="value" id="lastClickTarget">—</span></div>
+        <div class="row"><span class="label">TIME trong tin</span><span class="value" id="lastClickRawTime">—</span></div>
+        <div class="row"><span class="label">Lệch giờ chuẩn</span><span class="value" id="lastClickDrift">—</span></div>
+        <div class="row"><span class="label">Gợi ý offset</span><span class="value" id="lastClickOffsetHint">—</span></div>
+        <div class="row"><span class="label">Offset hiện tại</span><span class="value" id="lastClickOffsetLead">—</span></div>
       </div>
     </section>
 
