@@ -34,7 +34,7 @@ if errorlevel 1 (
 
 if not exist ".env" (
   if exist ".env.example" copy /Y ".env.example" ".env" >nul
-  echo [INFO] Created .env — chi can DESKTOP_TOOL_QUEUE_URL. Login user trong app.
+  echo [INFO] Created .env - chi can DESKTOP_TOOL_QUEUE_URL. Login user trong app.
   echo.
 )
 

@@ -175,7 +175,7 @@ function Ensure-EnvFile {
     }
   }
   Set-Content -Path $envFile -Value $out -Encoding ASCII
-  Write-Host "  OK .env: $envFile (login user in app — no pull token)"
+  Write-Host "  OK .env: $envFile (login user in app - no pull token)"
 }
 
 function New-RunShortcut {

@@ -862,12 +862,22 @@
       return 0;
     }
 
+    function normalizeTimeLabel(raw) {
+      const text = String(raw || '').trim();
+      if (!text) return '';
+      let m = text.match(/(\d{1,2}:\d{2}\s*s?\s*-\s*\d{1,2}:\d{2}:\d{2})/i);
+      if (m) return m[1].replace(/\s+/g, ' ').trim();
+      m = text.match(/^(\d{1,2}:\d{2}\s*s?)/i);
+      if (m) return m[1].trim();
+      return text.split(/\s+(?:🎁|BOX|📈|Rate)/i)[0].trim();
+    }
+
     function findTimeMeta(item) {
       const payload = item?.payload || {};
       const message = item?.message || {};
       const serverMeta = item?.time_meta;
       if (serverMeta && serverMeta.label) {
-        const label = String(serverMeta.label || '').trim();
+        const label = normalizeTimeLabel(serverMeta.label);
         const hhmmss = String(serverMeta.target_time_hhmmss || '').trim();
         return {
           label,
@@ -883,7 +893,7 @@
           || text.match(/(\d{1,2}:\d{2}\s*s?\s*-\s*\d{1,2}:\d{2}:\d{2})/i)
           || text.match(/(\d{1,2}:\d{2}\s*s?)/i);
         if (match) {
-          const label = match[1].trim();
+          const label = normalizeTimeLabel(match[1]);
           const hhmmssMatch = label.match(/-\s*(\d{1,2}:\d{2}:\d{2})/);
           const target_hhmmss = hhmmssMatch ? hhmmssMatch[1].trim() : '';
           return {

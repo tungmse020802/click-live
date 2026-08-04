@@ -72,47 +72,7 @@ def extract_link_from_item(item: Dict[str, Any]) -> str:
     return ""
 
 
-def _parse_time_delay_ms(value: Any) -> int:
-    text = str(value or "").strip()
-    match = re.search(r"(\d{1,2}):(\d{2})\s*s?", text, re.I)
-    if match:
-        return (int(match.group(1)) * 60 + int(match.group(2))) * 1000
-    match = re.search(r"(\d+(?:\.\d+)?)\s*s", text, re.I)
-    if match:
-        return int(float(match.group(1)) * 1000)
-    return 0
-
-
-def extract_time_from_item(item: Dict[str, Any]) -> Dict[str, object]:
-    payload = item.get("payload") or {}
-    message = item.get("message") or {}
-    candidates = [
-        payload.get("TIME"),
-        payload.get("time"),
-        payload.get("Time"),
-        payload.get("click_time"),
-        payload.get("open_time"),
-        message.get("text"),
-    ]
-    for value in candidates:
-        text = str(value or "")
-        match = (
-            re.search(r"TIME\s*[:：]\s*([^\n\r]+)", text, re.I)
-            or re.search(r"(\d{1,2}:\d{2}\s*s?\s*-\s*\d{1,2}:\d{2}:\d{2})", text, re.I)
-            or re.search(r"(\d{1,2}:\d{2}\s*s?)", text, re.I)
-        )
-        if match:
-            label = match.group(1).strip()
-            target_match = re.search(r"-\s*(\d{1,2}:\d{2}:\d{2})", label)
-            return {
-                "label": label,
-                "click_after_ms": _parse_time_delay_ms(label),
-                "target_time_hhmmss": target_match.group(1).strip() if target_match else "",
-            }
-    return {"label": "", "click_after_ms": 0, "target_time_hhmmss": ""}
-
-
-def phone_job_from_queue_item(item: Dict[str, Any]) -> Optional[Dict[str, object]]:
+from time_parse import extract_time_from_item
     url = extract_link_from_item(item)
     if not url:
         return None
