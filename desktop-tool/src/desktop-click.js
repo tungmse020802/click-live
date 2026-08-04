@@ -1,59 +1,38 @@
-const { execFile, spawn } = require("child_process");
+const { execFile } = require("child_process");
 const { promisify } = require("util");
 const fs = require("fs");
-const os = require("os");
 const path = require("path");
 
 const execFileAsync = promisify(execFile);
 const { windowsClickHelperPath } = require("./paths");
-const { clickLog, clickLogWarn, clickLogError } = require("./click-log");
+const { clickLog, clickLogWarn } = require("./click-log");
 const { isCurrentClickGeneration } = require("./click-scheduler");
+const {
+  parseHelperOkLine,
+  parseHelperPongLine,
+  parseHelperErrLine,
+} = require("./windows-click-protocol");
+const {
+  initWindowsSendInput,
+  clickAt: sendInputClickAt,
+  pingLatencyMs,
+  isWindowsSendInputReady,
+  getInitError,
+} = require("./windows-sendinput");
 
-let winClickHelper = null;
-let winClickReady = null;
 let winClickQueue = Promise.resolve();
-let helperClickSeq = 0;
-let helperSpawnGen = 0;
-let helperSuccessfulClicks = 0;
-let lastHelperPingAt = 0;
-/** Latency ping/pong gần đây — ổn định hơn đo từ click thật. */
-const helperLatencySamples = [];
-const HELPER_STARTUP_TIMEOUT_MS = 12000;
-const HELPER_CLICK_TIMEOUT_MS = 3000;
-const HELPER_PING_TIMEOUT_MS = 1500;
-const HELPER_MAX_LATENCY_SAMPLES = 16;
-const HELPER_WARMUP_PINGS = Math.max(
+const clickLatencySamples = [];
+const LATENCY_MAX_SAMPLES = 16;
+const LATENCY_WARMUP_PINGS = Math.max(
   1,
   Number(process.env.DESKTOP_CLICK_HELPER_WARMUP_PINGS) || 3
 );
-const HELPER_KEEPALIVE_MS = Math.max(
-  0,
-  Number(process.env.DESKTOP_CLICK_HELPER_KEEPALIVE_MS) || 30_000
-);
-const HELPER_MAX_CLICKS = Math.max(
-  20,
-  Number(process.env.DESKTOP_CLICK_HELPER_MAX_CLICKS) || 120
-);
-/** Stdout tích lũy — parse theo dòng, tránh nhầm ok cũ. */
-let helperStdoutBuffer = "";
 
-function parseHelperOkLine(line, clickId, px, py) {
-  const trimmed = String(line || "").trim();
-  const expected = `ok:${clickId},${px},${py}`;
-  return trimmed === expected || trimmed.startsWith(`${expected}\r`);
-}
-
-function parseHelperPongLine(line, pingId) {
-  const trimmed = String(line || "").trim();
-  const expected = `pong:${pingId}`;
-  return trimmed === expected || trimmed.startsWith(`${expected}\r`);
-}
-
-function recordHelperLatency(ms) {
+function recordClickLatency(ms) {
   const n = Number(ms);
   if (!Number.isFinite(n) || n < 0) return;
-  helperLatencySamples.push(Math.round(n));
-  while (helperLatencySamples.length > HELPER_MAX_LATENCY_SAMPLES) helperLatencySamples.shift();
+  clickLatencySamples.push(Math.round(n));
+  while (clickLatencySamples.length > LATENCY_MAX_SAMPLES) clickLatencySamples.shift();
 }
 
 function percentile(sorted, ratio) {
@@ -62,121 +41,13 @@ function percentile(sorted, ratio) {
   return sorted[idx];
 }
 
-/** Ước lượng latency pipe PS warm — dùng cho canh giờ click. */
+/** Ước lượng latency click Windows — dùng cho canh giờ. */
 function getHelperLatencyEstimateMs() {
-  if (!helperLatencySamples.length) {
-    return process.platform === "win32" ? 12 : 8;
+  if (!clickLatencySamples.length) {
+    return process.platform === "win32" ? 3 : 8;
   }
-  const sorted = [...helperLatencySamples].sort((a, b) => a - b);
+  const sorted = [...clickLatencySamples].sort((a, b) => a - b);
   return Math.round(percentile(sorted, 0.75));
-}
-
-function attachHelperStdoutPump() {
-  if (!winClickHelper || winClickHelper._clickLivePumpAttached) return;
-  winClickHelper._clickLivePumpAttached = true;
-  winClickHelper.stdout.on("data", (chunk) => {
-    helperStdoutBuffer += chunk.toString();
-    const parts = helperStdoutBuffer.split(/\r?\n/);
-    helperStdoutBuffer = parts.pop() || "";
-    for (const line of parts) {
-      if (line === "ready" || !line.trim()) continue;
-      winClickHelper.emit("helper-line", line);
-    }
-  });
-}
-
-function writeHelperLine(text) {
-  return new Promise((resolve, reject) => {
-    if (!winClickHelper || winClickHelper.killed) {
-      reject(new Error("Windows click helper not running"));
-      return;
-    }
-    const payload = `${text}\n`;
-    const ok = winClickHelper.stdin.write(payload, (err) => {
-      if (err) reject(err);
-    });
-    if (ok) {
-      resolve();
-      return;
-    }
-    winClickHelper.stdin.once("drain", resolve);
-    winClickHelper.stdin.once("error", reject);
-  });
-}
-
-function waitHelperLine({ match, timeoutMs, label }) {
-  return new Promise((resolve, reject) => {
-    if (!winClickHelper || winClickHelper.killed) {
-      reject(new Error("Windows click helper not running"));
-      return;
-    }
-
-    const sentAt = Date.now();
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`${label || "helper"} timeout`));
-    }, timeoutMs);
-
-    const onLine = (line) => {
-      if (match(line)) {
-        cleanup();
-        resolve(Date.now() - sentAt);
-      }
-    };
-
-    const cleanup = () => {
-      clearTimeout(timer);
-      winClickHelper?.off("helper-line", onLine);
-    };
-
-    winClickHelper.on("helper-line", onLine);
-  });
-}
-
-function pingHelper() {
-  const pingId = ++helperClickSeq;
-  return writeHelperLine(`ping:${pingId}`)
-    .then(() => waitHelperLine({
-      match: (line) => parseHelperPongLine(line, pingId),
-      timeoutMs: HELPER_PING_TIMEOUT_MS,
-      label: "Windows click helper ping",
-    }))
-    .then((latencyMs) => {
-      lastHelperPingAt = Date.now();
-      recordHelperLatency(latencyMs);
-      return latencyMs;
-    });
-}
-
-async function primeHelperLatency() {
-  if (process.platform !== "win32") return null;
-  await ensureWinClickHelper();
-  const samples = [];
-  for (let i = 0; i < HELPER_WARMUP_PINGS; i += 1) {
-    try {
-      samples.push(await pingHelper());
-    } catch (err) {
-      clickLogWarn("helper", "Windows click helper ping failed", {
-        error: String(err.message || err),
-        attempt: i + 1,
-      });
-    }
-  }
-  if (!samples.length) return null;
-  const sorted = [...samples].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  clickLog("helper", "Windows click helper latency primed", {
-    medianMs: median,
-    samples,
-    estimateMs: getHelperLatencyEstimateMs(),
-  });
-  try {
-    const { refreshSessionClickTiming } = require("./click-lead");
-    refreshSessionClickTiming();
-  } catch {
-    /* ignore */
-  }
-  return median;
 }
 
 function resolveCliclickBin() {
@@ -207,60 +78,20 @@ function dropStaleClick(clickGen, stage) {
   throw err;
 }
 
-async function restartWinClickHelper(reason) {
-  clickLog("helper", "restarting Windows click helper", {
-    reason,
-    successfulClicks: helperSuccessfulClicks,
-  });
-  helperSuccessfulClicks = 0;
-  shutdownWinClickHelper();
-  helperStdoutBuffer = "";
-  await ensureWinClickHelper();
-  await primeHelperLatency();
-}
-
 function helperScriptPath() {
   return windowsClickHelperPath();
 }
 
-function killHelperProcess(child) {
-  if (!child || child.killed) return;
+async function clickScreenPointWindowsFallback(px, py) {
+  const invokedAt = Date.now();
+  clickLogWarn("click", "Windows click fallback (PowerShell SendInput)", { x: px, y: py });
+  const ps1 = helperScriptPath();
+  if (!fs.existsSync(ps1)) {
+    throw new Error("windows-click-helper.ps1 not found");
+  }
+
   try {
-    if (process.platform === "win32" && child.pid) {
-      spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
-        windowsHide: true,
-        stdio: "ignore",
-      });
-    } else {
-      child.kill("SIGKILL");
-    }
-  } catch {
-    try { child.kill(); } catch { /* ignore */ }
-  }
-}
-
-function ensureWinClickHelper() {
-  if (winClickHelper && !winClickHelper.killed) {
-    return Promise.resolve();
-  }
-  if (winClickReady && winClickHelper && !winClickHelper.killed) {
-    return winClickReady;
-  }
-  winClickReady = null;
-
-  const spawnGen = ++helperSpawnGen;
-  winClickReady = new Promise((resolve, reject) => {
-    const ps1 = helperScriptPath();
-    if (!fs.existsSync(ps1)) {
-      winClickReady = null;
-      reject(new Error("windows-click-helper.ps1 not found"));
-      return;
-    }
-
-    const startedAt = Date.now();
-    clickLog("helper", "starting Windows click helper", { script: ps1, spawnGen });
-
-    const child = spawn("powershell.exe", [
+    await execFileAsync("powershell.exe", [
       "-NoProfile",
       "-ExecutionPolicy",
       "Bypass",
@@ -269,178 +100,66 @@ function ensureWinClickHelper() {
       "-NonInteractive",
       "-File",
       ps1,
-    ], {
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-    });
-
-    let buffer = "";
-    let settled = false;
-    const finish = (fn, value) => {
-      if (settled || spawnGen !== helperSpawnGen) return;
-      settled = true;
-      clearTimeout(timer);
-      fn(value);
-    };
-
-    const timer = setTimeout(() => {
-      clickLogError("helper", "Windows click helper startup timeout", {
-        spawnGen,
-        waitedMs: HELPER_STARTUP_TIMEOUT_MS,
-      });
-      killHelperProcess(child);
-      winClickReady = null;
-      winClickHelper = null;
-      finish(reject, new Error("Windows click helper startup timeout"));
-    }, HELPER_STARTUP_TIMEOUT_MS);
-
-    const fail = (err) => {
-      winClickReady = null;
-      winClickHelper = null;
-      finish(reject, err);
-    };
-
-    const onStartupData = (chunk) => {
-      if (spawnGen !== helperSpawnGen) return;
-      buffer += chunk.toString();
-      if (buffer.includes("ready")) {
-        if (settled) return;
-        child.stdout.off("data", onStartupData);
-        winClickHelper = child;
-        helperStdoutBuffer = "";
-        attachHelperStdoutPump();
-        clickLog("helper", "Windows click helper ready", {
-          startupMs: Date.now() - startedAt,
-          spawnGen,
-        });
-        finish(resolve);
-      }
-    };
-
-    child.stdout.on("data", onStartupData);
-
-    child.stderr.on("data", (chunk) => {
-      const msg = chunk.toString().trim();
-      if (msg) {
-        console.warn("win-click-helper:", msg);
-        clickLogWarn("helper", "Windows click helper stderr", { detail: msg });
-      }
-    });
-
-    child.on("error", (err) => {
-      clickLogError("helper", "Windows click helper spawn failed", { error: String(err.message || err) });
-      fail(err);
-    });
-    child.on("exit", (code) => {
-      if (spawnGen !== helperSpawnGen) return;
-      clickLogWarn("helper", "Windows click helper exited", { code, spawnGen });
-      winClickHelper = null;
-      winClickReady = null;
-    });
-  });
-
-  return winClickReady;
-}
-
-function clickViaHelper(px, py) {
-  const clickId = ++helperClickSeq;
-  const sentAt = Date.now();
-
-  return writeHelperLine(`${clickId},${px},${py}`)
-    .then(() => waitHelperLine({
-      match: (line) => parseHelperOkLine(line, clickId, px, py),
-      timeoutMs: HELPER_CLICK_TIMEOUT_MS,
-      label: "Windows click helper click",
-    }))
-    .then((roundTripMs) => {
-      recordHelperLatency(roundTripMs);
-      lastHelperPingAt = Date.now();
-      return {
-        method: "powershell-helper",
-        x: px,
-        y: py,
-        durationMs: Date.now() - sentAt,
-        roundTripMs,
-        invokedAt: sentAt,
-        clickId,
-      };
-    });
-}
-
-async function clickScreenPointWindowsFallback(px, py) {
-  const invokedAt = Date.now();
-  clickLogWarn("click", "Windows click fallback (spawn PowerShell)", { x: px, y: py });
-  const script = [
-    "$sig = @'",
-    "[DllImport(\"user32.dll\")] public static extern bool SetCursorPos(int X, int Y);",
-    "[DllImport(\"user32.dll\")] public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint cButtons, uint dwExtraInfo);",
-    "'@",
-    '$null = Add-Type -MemberDefinition $sig -Name WinMouse -Namespace ClickLive -PassThru',
-    `[ClickLive.WinMouse]::SetCursorPos(${px}, ${py}) | Out-Null`,
-    "[ClickLive.WinMouse]::mouse_event(0x0002, 0, 0, 0, 0)",
-    "[ClickLive.WinMouse]::mouse_event(0x0004, 0, 0, 0, 0)",
-    "",
-  ].join("\r\n");
-
-  const ps1 = path.join(os.tmpdir(), `click-live-click-${process.pid}-${Date.now()}.ps1`);
-  fs.writeFileSync(ps1, script, "utf8");
-
-  try {
-    await execFileAsync("powershell.exe", [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      ps1,
+      "-Once",
+      "-X",
+      String(px),
+      "-Y",
+      String(py),
     ]);
   } catch (err) {
     const detail = String(err.stderr || err.message || err).trim();
     throw new Error(detail || "Windows click failed");
-  } finally {
-    try {
-      fs.unlinkSync(ps1);
-    } catch {
-      /* ignore */
-    }
   }
 
   const durationMs = Date.now() - invokedAt;
   clickLogWarn("click", "Windows click fallback done", { x: px, y: py, durationMs });
-  return { method: "powershell", x: px, y: py, durationMs, invokedAt };
+  return { method: "powershell-sendinput", x: px, y: py, durationMs, invokedAt };
+}
+
+async function clickViaSendInput(px, py) {
+  const invokedAt = Date.now();
+  if (!initWindowsSendInput()) {
+    throw new Error(getInitError() || "SendInput init failed");
+  }
+
+  const result = sendInputClickAt(px, py);
+  const durationMs = Date.now() - invokedAt;
+  recordClickLatency(durationMs);
+
+  if (!result.ok) {
+    throw new Error(`SendInput rejected: ${result.detail}`);
+  }
+
+  return {
+    method: "sendinput",
+    x: px,
+    y: py,
+    durationMs,
+    invokedAt,
+    actualX: result.actualX,
+    actualY: result.actualY,
+  };
 }
 
 async function clickScreenPointWindowsInner(px, py, options = {}) {
   const { clickGen } = options;
   if (isStaleClickRequest(clickGen)) {
-    dropStaleClick(clickGen, "helper-inner");
+    dropStaleClick(clickGen, "win-inner");
   }
+
   try {
-    if (!isWinClickHelperReady()) {
-      await ensureWinClickHelper();
-      await primeHelperLatency();
-    } else if (
-      HELPER_KEEPALIVE_MS > 0
-      && Date.now() - lastHelperPingAt > HELPER_KEEPALIVE_MS
-    ) {
-      await pingHelper().catch(() => {});
-    }
     if (isStaleClickRequest(clickGen)) {
-      dropStaleClick(clickGen, "helper-after-ready");
+      dropStaleClick(clickGen, "win-before-click");
     }
-    const result = await clickViaHelper(px, py);
-    helperSuccessfulClicks += 1;
-    if (helperSuccessfulClicks >= HELPER_MAX_CLICKS) {
-      await restartWinClickHelper("max-clicks");
-    }
-    return result;
+    return await clickViaSendInput(px, py);
   } catch (err) {
     if (err?.code === "CLICK_STALE") throw err;
-    clickLogWarn("click", "Windows click helper failed, using fallback", {
+    clickLogWarn("click", "Windows SendInput failed, using PowerShell fallback", {
       error: String(err.message || err),
       x: px,
       y: py,
     });
-    console.warn("Windows click helper failed, fallback:", err.message || err);
+    console.warn("Windows SendInput failed, fallback:", err.message || err);
     if (isStaleClickRequest(clickGen)) {
       dropStaleClick(clickGen, "fallback-blocked");
     }
@@ -461,40 +180,76 @@ function clickScreenPointWindows(px, py, options = {}) {
   return task;
 }
 
+async function primeClickLatency() {
+  if (process.platform !== "win32") return null;
+  if (!initWindowsSendInput()) return null;
+
+  const samples = [];
+  for (let i = 0; i < LATENCY_WARMUP_PINGS; i += 1) {
+    try {
+      samples.push(pingLatencyMs());
+    } catch (err) {
+      clickLogWarn("helper", "Windows SendInput ping failed", {
+        error: String(err.message || err),
+        attempt: i + 1,
+      });
+    }
+  }
+  if (!samples.length) return null;
+
+  for (const ms of samples) recordClickLatency(ms);
+  const sorted = [...samples].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  clickLog("helper", "Windows SendInput latency primed", {
+    medianMs: median,
+    samples,
+    estimateMs: getHelperLatencyEstimateMs(),
+  });
+  try {
+    const { refreshSessionClickTiming } = require("./click-lead");
+    refreshSessionClickTiming();
+  } catch {
+    /* ignore */
+  }
+  return median;
+}
+
 function warmUpWinClickHelper() {
   if (process.platform !== "win32") return Promise.resolve();
-  return ensureWinClickHelper()
-    .then(() => primeHelperLatency())
+  return Promise.resolve()
     .then(() => {
-      clickLog("helper", "Windows click helper warmup OK", {
+      if (!initWindowsSendInput()) {
+        throw new Error(getInitError() || "SendInput init failed");
+      }
+      return primeClickLatency();
+    })
+    .then(() => {
+      clickLog("helper", "Windows SendInput warmup OK", {
         estimateMs: getHelperLatencyEstimateMs(),
       });
     })
     .catch((err) => {
-      clickLogWarn("helper", "Windows click helper warmup failed", {
+      clickLogWarn("helper", "Windows SendInput warmup failed", {
         error: String(err.message || err),
       });
-      console.warn("Windows click helper warmup failed:", err.message || err);
-      winClickReady = null;
-      winClickHelper = null;
+      console.warn("Windows SendInput warmup failed:", err.message || err);
     });
 }
 
 function shutdownWinClickHelper() {
-  if (winClickHelper && !winClickHelper.killed) {
-    try {
-      winClickHelper.stdin.write("quit\n");
-    } catch {
-      /* ignore */
-    }
-    try {
-      winClickHelper.kill();
-    } catch {
-      /* ignore */
-    }
-  }
-  winClickHelper = null;
-  winClickReady = null;
+  /* koffi in-process — không cần shutdown */
+}
+
+function pingHelper() {
+  const started = Date.now();
+  pingLatencyMs();
+  const latencyMs = Date.now() - started;
+  recordClickLatency(latencyMs);
+  return Promise.resolve(latencyMs);
+}
+
+function isWinClickHelperReady() {
+  return isWindowsSendInputReady();
 }
 
 async function clickScreenPointDarwin(px, py, options = {}) {
@@ -549,10 +304,6 @@ async function clickScreenPoint(x, y, options = {}) {
   throw new Error(`Desktop click chua ho tro nen tang: ${process.platform}`);
 }
 
-function isWinClickHelperReady() {
-  return Boolean(winClickHelper && !winClickHelper.killed);
-}
-
 module.exports = {
   clickScreenPoint,
   resolveCliclickBin,
@@ -560,6 +311,7 @@ module.exports = {
   shutdownWinClickHelper,
   parseHelperOkLine,
   parseHelperPongLine,
+  parseHelperErrLine,
   pingHelper,
   getHelperLatencyEstimateMs,
   isWinClickHelperReady,

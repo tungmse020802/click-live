@@ -19,6 +19,7 @@
     "dist:linux": "electron-builder --linux"
   },
   "dependencies": {
+    "koffi": "^2.16.3",
     "ws": "^8.18.3"
   },
   "devDependencies": {

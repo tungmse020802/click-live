@@ -51,7 +51,7 @@ desktop-tool\scripts\run-windows.bat
 powershell -ExecutionPolicy Bypass -File desktop-tool\scripts\install-windows.ps1 -SkipClone
 ```
 
-**Yêu cầu Windows:** Windows 10+, PowerShell 5.1+, quyền cài app (winget). Desktop click dùng PowerShell (không cần cài thêm).
+**Yêu cầu Windows:** Windows 10+. Desktop click dùng **SendInput (koffi)** trong Electron — fallback PowerShell nếu cần.
 
 ## Đóng gói — chạy không cần Node.js (portable)
 
@@ -157,8 +157,8 @@ Mỗi dòng JSON gồm event: `startup`, `poll`, `schedule`, `wait`, `click`, `h
 
 - `driftMs` — timer chờ lệch bao nhiêu so `executeAtMs`
 - `driftFromDisplayMs` — click thực tế lệch bao nhiêu so mốc overlay 0.0s (âm = sớm, dương = muộn)
-- `clickDurationMs` — PowerShell/cliclick mất bao lâu
-- `method` — `powershell-helper` (nhanh) vs `powershell` (fallback chậm)
+- `clickDurationMs` — SendInput/cliclick mất bao lâu
+- `method` — `sendinput` (koffi trong Electron, mặc định) vs `powershell-sendinput` (fallback)
 
 Settings lưu tại `~/Library/Application Support/click-live-desktop-tool/settings.json`.
 

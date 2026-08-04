@@ -33,5 +33,5 @@ alwaysApply: false
 
 - `DESKTOP_CLICK_EXECUTION_LEAD_MS=0` hoặc để adaptive (`click-lead.js` học từ `clickDurationMs`)
 - `DESKTOP_TOOL_POLL_MS=500` (mặc định 2000) — nhận link nhanh hơn
-- Windows: helper PowerShell phải `ready` lúc startup; log `method=powershell-helper` not `powershell`
+- Windows: SendInput (koffi) warmup lúc startup; log `method=sendinput` (fallback `powershell-sendinput`)
 - Offset âm trong UI nếu vẫn click muộn so overlay
