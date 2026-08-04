@@ -126,8 +126,8 @@ function initWindowsSendInput() {
     SendInput = user32.func(
       "uint32 __stdcall SendInput(uint32 cInputs, INPUT *pInputs, int32 cbSize)"
     );
-    SetCursorPos = user32.func("bool SetCursorPos(int32 x, int32 y)");
-    GetCursorPos = user32.func("bool GetCursorPos(_Out_ POINT *lpPoint)");
+    SetCursorPos = user32.func("bool __stdcall SetCursorPos(int32 x, int32 y)");
+    GetCursorPos = user32.func("bool __stdcall GetCursorPos(_Out_ POINT *lpPoint)");
 
     try {
       const setDpiAware = user32.func("bool SetProcessDPIAware()");
@@ -146,12 +146,11 @@ function initWindowsSendInput() {
 }
 
 function readCursorPos() {
-  const pt = koffi.alloc("POINT");
-  if (!GetCursorPos(pt)) {
+  const point = { x: 0, y: 0 };
+  if (!GetCursorPos(point)) {
     return null;
   }
-  const decoded = koffi.decode(pt, "POINT");
-  return { x: decoded.x, y: decoded.y };
+  return { x: point.x, y: point.y };
 }
 
 function sendRelativeClick() {
@@ -170,29 +169,33 @@ function clickAt(px, py) {
     };
   }
 
-  if (!SetCursorPos(px, py)) {
-    return { ok: false, detail: "setcursorpos-failed" };
-  }
+  try {
+    if (!SetCursorPos(px, py)) {
+      return { ok: false, detail: "setcursorpos-failed" };
+    }
 
-  const sent = sendRelativeClick();
-  if (sent !== 2) {
-    return { ok: false, detail: `sendinput:${sent}` };
-  }
+    const sent = sendRelativeClick();
+    if (sent !== 2) {
+      return { ok: false, detail: `sendinput:${sent}` };
+    }
 
-  const pt = readCursorPos();
-  if (!pt) {
-    return { ok: false, detail: "getcursorpos-failed" };
-  }
-  if (Math.abs(pt.x - px) > CURSOR_TOLERANCE_PX || Math.abs(pt.y - py) > CURSOR_TOLERANCE_PX) {
-    return {
-      ok: false,
-      detail: `cursor-at:${pt.x},${pt.y}`,
-      actualX: pt.x,
-      actualY: pt.y,
-    };
-  }
+    const pt = readCursorPos();
+    if (!pt) {
+      return { ok: false, detail: "getcursorpos-failed" };
+    }
+    if (Math.abs(pt.x - px) > CURSOR_TOLERANCE_PX || Math.abs(pt.y - py) > CURSOR_TOLERANCE_PX) {
+      return {
+        ok: false,
+        detail: `cursor-at:${pt.x},${pt.y}`,
+        actualX: pt.x,
+        actualY: pt.y,
+      };
+    }
 
-  return { ok: true, actualX: pt.x, actualY: pt.y };
+    return { ok: true, actualX: pt.x, actualY: pt.y };
+  } catch (err) {
+    return { ok: false, detail: String(err.message || err) };
+  }
 }
 
 function pingLatencyMs() {
