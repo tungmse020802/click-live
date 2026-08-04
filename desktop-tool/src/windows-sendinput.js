@@ -1,19 +1,13 @@
 /**
  * Windows click qua SendInput trực tiếp trong Electron main (koffi).
- * Không spawn PowerShell — ổn định latency và tránh false-positive "ok".
  */
 
+const fs = require("fs");
+const path = require("path");
+
 const INPUT_MOUSE = 0;
-const MOUSEEVENTF_MOVE = 0x0001;
 const MOUSEEVENTF_LEFTDOWN = 0x0002;
 const MOUSEEVENTF_LEFTUP = 0x0004;
-const MOUSEEVENTF_ABSOLUTE = 0x8000;
-const MOUSEEVENTF_VIRTUALDESK = 0x4000;
-
-const SM_XVIRTUALSCREEN = 76;
-const SM_YVIRTUALSCREEN = 77;
-const SM_CXVIRTUALSCREEN = 78;
-const SM_CYVIRTUALSCREEN = 79;
 
 const CURSOR_TOLERANCE_PX = 3;
 
@@ -23,8 +17,41 @@ let koffi = null;
 let INPUT = null;
 let inputSize = 0;
 let SendInput = null;
+let SetCursorPos = null;
 let GetCursorPos = null;
-let GetSystemMetrics = null;
+
+function resolveKoffiModule() {
+  const candidates = ["koffi"];
+
+  try {
+    const { app } = require("electron");
+    if (app) {
+      candidates.push(
+        path.join(process.resourcesPath, "app.asar.unpacked", "node_modules", "koffi"),
+        path.join(process.resourcesPath, "node_modules", "koffi"),
+      );
+    }
+  } catch {
+    /* outside Electron */
+  }
+
+  candidates.push(path.join(__dirname, "..", "node_modules", "koffi"));
+
+  let lastErr = null;
+  for (const candidate of candidates) {
+    try {
+      if (candidate === "koffi") {
+        return require("koffi");
+      }
+      if (fs.existsSync(path.join(candidate, "package.json"))) {
+        return require(candidate);
+      }
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error("Cannot find module 'koffi'");
+}
 
 function toAbsoluteCoord(coord, origin, span) {
   if (span <= 1) return 0;
@@ -37,13 +64,12 @@ function toAbsoluteCoord(coord, origin, span) {
 function initWindowsSendInput() {
   if (process.platform !== "win32") return false;
   if (initialized) return true;
-  if (initError) return false;
 
   try {
-    koffi = require("koffi");
+    koffi = resolveKoffiModule();
     const user32 = koffi.load("user32.dll");
 
-    const POINT = koffi.struct("POINT", {
+    koffi.struct("POINT", {
       x: "long",
       y: "long",
     });
@@ -64,8 +90,8 @@ function initWindowsSendInput() {
 
     inputSize = koffi.sizeof(INPUT);
     SendInput = user32.func("uint32 SendInput(uint32 nInputs, INPUT *pInputs, int32 cbSize)");
+    SetCursorPos = user32.func("bool SetCursorPos(int32 x, int32 y)");
     GetCursorPos = user32.func("bool GetCursorPos(_Out_ POINT *lpPoint)");
-    GetSystemMetrics = user32.func("int32 GetSystemMetrics(int32 nIndex)");
 
     try {
       const setDpiAware = user32.func("bool SetProcessDPIAware()");
@@ -75,6 +101,7 @@ function initWindowsSendInput() {
     }
 
     initialized = true;
+    initError = null;
     return true;
   } catch (err) {
     initError = err;
@@ -91,38 +118,10 @@ function readCursorPos() {
   return { x: decoded.x, y: decoded.y };
 }
 
-function readVirtualScreen() {
-  return {
-    x: GetSystemMetrics(SM_XVIRTUALSCREEN),
-    y: GetSystemMetrics(SM_YVIRTUALSCREEN),
-    width: GetSystemMetrics(SM_CXVIRTUALSCREEN),
-    height: GetSystemMetrics(SM_CYVIRTUALSCREEN),
-  };
-}
-
-function buildClickInputs(px, py) {
-  const screen = readVirtualScreen();
-  if (screen.width <= 0 || screen.height <= 0) {
-    return { error: "virtual-screen-metrics" };
-  }
-
-  const absX = toAbsoluteCoord(px, screen.x, screen.width);
-  const absY = toAbsoluteCoord(py, screen.y, screen.height);
-  const INPUT_3 = koffi.array(INPUT, 3);
-  const inputs = new INPUT_3();
-
+function sendRelativeClick() {
+  const INPUT_2 = koffi.array(INPUT, 2);
+  const inputs = new INPUT_2();
   inputs[0] = {
-    type: INPUT_MOUSE,
-    mi: {
-      dx: absX,
-      dy: absY,
-      mouseData: 0,
-      dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-      time: 0,
-      dwExtraInfo: 0,
-    },
-  };
-  inputs[1] = {
     type: INPUT_MOUSE,
     mi: {
       dx: 0,
@@ -133,7 +132,7 @@ function buildClickInputs(px, py) {
       dwExtraInfo: 0,
     },
   };
-  inputs[2] = {
+  inputs[1] = {
     type: INPUT_MOUSE,
     mi: {
       dx: 0,
@@ -144,8 +143,7 @@ function buildClickInputs(px, py) {
       dwExtraInfo: 0,
     },
   };
-
-  return { inputs, screen };
+  return SendInput(2, inputs, inputSize);
 }
 
 function clickAt(px, py) {
@@ -156,13 +154,12 @@ function clickAt(px, py) {
     };
   }
 
-  const built = buildClickInputs(px, py);
-  if (built.error) {
-    return { ok: false, detail: built.error };
+  if (!SetCursorPos(px, py)) {
+    return { ok: false, detail: "setcursorpos-failed" };
   }
 
-  const sent = SendInput(3, built.inputs, inputSize);
-  if (sent !== 3) {
+  const sent = sendRelativeClick();
+  if (sent !== 2) {
     return { ok: false, detail: `sendinput:${sent}` };
   }
 
@@ -200,23 +197,12 @@ function getInitError() {
 }
 
 module.exports = {
-  INPUT_MOUSE,
-  MOUSEEVENTF_MOVE,
-  MOUSEEVENTF_LEFTDOWN,
-  MOUSEEVENTF_LEFTUP,
-  MOUSEEVENTF_ABSOLUTE,
-  MOUSEEVENTF_VIRTUALDESK,
-  SM_XVIRTUALSCREEN,
-  SM_YVIRTUALSCREEN,
-  SM_CXVIRTUALSCREEN,
-  SM_CYVIRTUALSCREEN,
   CURSOR_TOLERANCE_PX,
   toAbsoluteCoord,
   initWindowsSendInput,
   clickAt,
   pingLatencyMs,
   readCursorPos,
-  readVirtualScreen,
   isWindowsSendInputReady,
   getInitError,
 };

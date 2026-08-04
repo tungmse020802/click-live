@@ -19,6 +19,14 @@ const {
   isWindowsSendInputReady,
   getInitError,
 } = require("./windows-sendinput");
+const {
+  ensureWinClickHelper,
+  clickViaPersistentHelper,
+  pingHelperProcess,
+  shutdownWinClickHelper,
+  isWinClickHelperReady: isPsHelperReady,
+  getLastHelperPingAt,
+} = require("./windows-click-helper-process");
 
 let winClickQueue = Promise.resolve();
 const clickLatencySamples = [];
@@ -26,6 +34,10 @@ const LATENCY_MAX_SAMPLES = 16;
 const LATENCY_WARMUP_PINGS = Math.max(
   1,
   Number(process.env.DESKTOP_CLICK_HELPER_WARMUP_PINGS) || 3
+);
+const HELPER_KEEPALIVE_MS = Math.max(
+  0,
+  Number(process.env.DESKTOP_CLICK_HELPER_KEEPALIVE_MS) || 30_000
 );
 
 function recordClickLatency(ms) {
@@ -82,9 +94,9 @@ function helperScriptPath() {
   return windowsClickHelperPath();
 }
 
-async function clickScreenPointWindowsFallback(px, py) {
+async function clickScreenPointWindowsOnce(px, py) {
   const invokedAt = Date.now();
-  clickLogWarn("click", "Windows click fallback (PowerShell SendInput)", { x: px, y: py });
+  clickLogWarn("click", "Windows click fallback (PowerShell once)", { x: px, y: py });
   const ps1 = helperScriptPath();
   if (!fs.existsSync(ps1)) {
     throw new Error("windows-click-helper.ps1 not found");
@@ -112,11 +124,11 @@ async function clickScreenPointWindowsFallback(px, py) {
   }
 
   const durationMs = Date.now() - invokedAt;
-  clickLogWarn("click", "Windows click fallback done", { x: px, y: py, durationMs });
+  clickLogWarn("click", "Windows click once fallback done", { x: px, y: py, durationMs });
   return { method: "powershell-sendinput", x: px, y: py, durationMs, invokedAt };
 }
 
-async function clickViaSendInput(px, py) {
+async function clickViaKoffi(px, py) {
   const invokedAt = Date.now();
   if (!initWindowsSendInput()) {
     throw new Error(getInitError() || "SendInput init failed");
@@ -141,29 +153,59 @@ async function clickViaSendInput(px, py) {
   };
 }
 
+async function clickViaPowerShellHelper(px, py) {
+  const result = await clickViaPersistentHelper(px, py);
+  recordClickLatency(result.durationMs);
+  return result;
+}
+
 async function clickScreenPointWindowsInner(px, py, options = {}) {
   const { clickGen } = options;
   if (isStaleClickRequest(clickGen)) {
     dropStaleClick(clickGen, "win-inner");
   }
 
-  try {
-    if (isStaleClickRequest(clickGen)) {
-      dropStaleClick(clickGen, "win-before-click");
+  const tryKoffi = isWindowsSendInputReady() || initWindowsSendInput();
+  if (tryKoffi) {
+    try {
+      if (isStaleClickRequest(clickGen)) dropStaleClick(clickGen, "win-before-koffi");
+      return await clickViaKoffi(px, py);
+    } catch (err) {
+      if (err?.code === "CLICK_STALE") throw err;
+      clickLogWarn("click", "koffi SendInput failed, trying PowerShell helper", {
+        error: String(err.message || err),
+        x: px,
+        y: py,
+      });
     }
-    return await clickViaSendInput(px, py);
+  } else {
+    clickLogWarn("helper", "koffi unavailable — run: npm install", {
+      error: getInitError(),
+    });
+  }
+
+  try {
+    if (isStaleClickRequest(clickGen)) dropStaleClick(clickGen, "win-before-helper");
+    if (!isPsHelperReady()) {
+      await ensureWinClickHelper();
+    } else if (
+      HELPER_KEEPALIVE_MS > 0
+      && Date.now() - getLastHelperPingAt() > HELPER_KEEPALIVE_MS
+    ) {
+      await pingHelperProcess().catch(() => {});
+    }
+    return await clickViaPowerShellHelper(px, py);
   } catch (err) {
     if (err?.code === "CLICK_STALE") throw err;
-    clickLogWarn("click", "Windows SendInput failed, using PowerShell fallback", {
+    clickLogWarn("click", "PowerShell helper failed, using once fallback", {
       error: String(err.message || err),
       x: px,
       y: py,
     });
-    console.warn("Windows SendInput failed, fallback:", err.message || err);
     if (isStaleClickRequest(clickGen)) {
       dropStaleClick(clickGen, "fallback-blocked");
     }
-    return clickScreenPointWindowsFallback(px, py);
+    return clickScreenPointWindowsOnce(px, py);
   }
 }
 
@@ -180,30 +222,57 @@ function clickScreenPointWindows(px, py, options = {}) {
   return task;
 }
 
-async function primeClickLatency() {
-  if (process.platform !== "win32") return null;
-  if (!initWindowsSendInput()) return null;
-
+async function primeClickLatencyKoffi() {
   const samples = [];
   for (let i = 0; i < LATENCY_WARMUP_PINGS; i += 1) {
     try {
       samples.push(pingLatencyMs());
     } catch (err) {
-      clickLogWarn("helper", "Windows SendInput ping failed", {
+      clickLogWarn("helper", "koffi ping failed", {
         error: String(err.message || err),
         attempt: i + 1,
       });
     }
+  }
+  return samples;
+}
+
+async function primeClickLatencyHelper() {
+  await ensureWinClickHelper();
+  const samples = [];
+  for (let i = 0; i < LATENCY_WARMUP_PINGS; i += 1) {
+    try {
+      samples.push(await pingHelperProcess());
+    } catch (err) {
+      clickLogWarn("helper", "PowerShell helper ping failed", {
+        error: String(err.message || err),
+        attempt: i + 1,
+      });
+    }
+  }
+  return samples;
+}
+
+async function primeClickLatency() {
+  if (process.platform !== "win32") return null;
+
+  let samples = [];
+  if (initWindowsSendInput()) {
+    samples = await primeClickLatencyKoffi();
+  }
+  if (!samples.length) {
+    samples = await primeClickLatencyHelper();
   }
   if (!samples.length) return null;
 
   for (const ms of samples) recordClickLatency(ms);
   const sorted = [...samples].sort((a, b) => a - b);
   const median = sorted[Math.floor(sorted.length / 2)];
-  clickLog("helper", "Windows SendInput latency primed", {
+  clickLog("helper", "Windows click latency primed", {
     medianMs: median,
     samples,
     estimateMs: getHelperLatencyEstimateMs(),
+    backend: isWindowsSendInputReady() ? "koffi" : "powershell-helper",
   });
   try {
     const { refreshSessionClickTiming } = require("./click-lead");
@@ -216,40 +285,42 @@ async function primeClickLatency() {
 
 function warmUpWinClickHelper() {
   if (process.platform !== "win32") return Promise.resolve();
-  return Promise.resolve()
+  return primeClickLatency()
     .then(() => {
-      if (!initWindowsSendInput()) {
-        throw new Error(getInitError() || "SendInput init failed");
-      }
-      return primeClickLatency();
-    })
-    .then(() => {
-      clickLog("helper", "Windows SendInput warmup OK", {
+      const backend = isWindowsSendInputReady()
+        ? "koffi"
+        : (isPsHelperReady() ? "powershell-helper" : "none");
+      clickLog("helper", "Windows click warmup OK", {
         estimateMs: getHelperLatencyEstimateMs(),
+        backend,
       });
+      if (backend === "none") {
+        throw new Error(getInitError() || "No click backend ready");
+      }
     })
     .catch((err) => {
-      clickLogWarn("helper", "Windows SendInput warmup failed", {
+      clickLogWarn("helper", "Windows click warmup failed", {
         error: String(err.message || err),
       });
-      console.warn("Windows SendInput warmup failed:", err.message || err);
+      console.warn("Windows click warmup failed:", err.message || err);
     });
 }
 
-function shutdownWinClickHelper() {
-  /* koffi in-process — không cần shutdown */
-}
-
 function pingHelper() {
-  const started = Date.now();
-  pingLatencyMs();
-  const latencyMs = Date.now() - started;
-  recordClickLatency(latencyMs);
-  return Promise.resolve(latencyMs);
-}
-
-function isWinClickHelperReady() {
-  return isWindowsSendInputReady();
+  if (isWindowsSendInputReady()) {
+    const started = Date.now();
+    pingLatencyMs();
+    const latencyMs = Date.now() - started;
+    recordClickLatency(latencyMs);
+    return Promise.resolve(latencyMs);
+  }
+  if (isPsHelperReady()) {
+    return pingHelperProcess().then((latencyMs) => {
+      recordClickLatency(latencyMs);
+      return latencyMs;
+    });
+  }
+  return Promise.reject(new Error("No Windows click backend ready"));
 }
 
 async function clickScreenPointDarwin(px, py, options = {}) {
@@ -294,6 +365,8 @@ async function clickScreenPoint(x, y, options = {}) {
     y: py,
     clickGen: options.clickGen ?? null,
     helperLatencyMs: getHelperLatencyEstimateMs(),
+    koffiReady: isWindowsSendInputReady(),
+    psHelperReady: isPsHelperReady(),
   });
   if (process.platform === "win32") {
     return clickScreenPointWindows(px, py, options);
@@ -314,5 +387,5 @@ module.exports = {
   parseHelperErrLine,
   pingHelper,
   getHelperLatencyEstimateMs,
-  isWinClickHelperReady,
+  isWinClickHelperReady: () => isWindowsSendInputReady() || isPsHelperReady(),
 };

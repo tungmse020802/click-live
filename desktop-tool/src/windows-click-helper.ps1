@@ -58,48 +58,29 @@ public class ClickLiveMouse {
   public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
   [DllImport("user32.dll")]
-  public static extern bool GetCursorPos(out POINT lpPoint);
+  public static extern bool SetCursorPos(int x, int y);
 
   [DllImport("user32.dll")]
-  static extern int GetSystemMetrics(int nIndex);
-
-  static int ToAbsolute(int coord, int origin, int span) {
-    if (span <= 1) return 0;
-    var normalized = (coord - origin) * 65535.0 / (span - 1);
-    if (normalized < 0) return 0;
-    if (normalized > 65535) return 65535;
-    return (int)Math.Round(normalized);
-  }
+  public static extern bool GetCursorPos(out POINT lpPoint);
 
   public static bool ClickAt(int x, int y, out string detail) {
     detail = "";
-    var vx = GetSystemMetrics(76); // SM_XVIRTUALSCREEN
-    var vy = GetSystemMetrics(77); // SM_YVIRTUALSCREEN
-    var vw = GetSystemMetrics(78); // SM_CXVIRTUALSCREEN
-    var vh = GetSystemMetrics(79); // SM_CYVIRTUALSCREEN
-    if (vw <= 0 || vh <= 0) {
-      detail = "virtual-screen-metrics";
+    if (!SetCursorPos(x, y)) {
+      detail = "setcursorpos-failed,gle=" + Marshal.GetLastWin32Error();
       return false;
     }
 
-    var absX = ToAbsolute(x, vx, vw);
-    var absY = ToAbsolute(y, vy, vh);
     var inputSize = Marshal.SizeOf(typeof(INPUT));
-    var inputs = new INPUT[3];
+    var inputs = new INPUT[2];
 
     inputs[0].type = INPUT_MOUSE;
-    inputs[0].mi.dx = absX;
-    inputs[0].mi.dy = absY;
-    inputs[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
 
     inputs[1].type = INPUT_MOUSE;
-    inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    inputs[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
 
-    inputs[2].type = INPUT_MOUSE;
-    inputs[2].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-
-    var sent = SendInput(3, inputs, inputSize);
-    if (sent != 3) {
+    var sent = SendInput(2, inputs, inputSize);
+    if (sent != 2) {
       detail = "sendinput:" + sent + ",gle=" + Marshal.GetLastWin32Error();
       return false;
     }

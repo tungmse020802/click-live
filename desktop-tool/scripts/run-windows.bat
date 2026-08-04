@@ -52,6 +52,16 @@ if not exist "node_modules\electron\package.json" (
   echo.
   echo npm install OK.
   echo.
+) else if not exist "node_modules\koffi\package.json" (
+  echo [INFO] koffi chua cai - chay npm install ...
+  call npm install
+  if errorlevel 1 (
+    echo.
+    echo [ERROR] npm install failed.
+    pause
+    exit /b 1
+  )
+  echo.
 )
 
 echo Starting desktop-tool ...

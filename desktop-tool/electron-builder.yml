@@ -10,14 +10,18 @@ files:
   - src/**/*
   - ui/**/*
   - package.json
+  - node_modules/**/*
+
+asar: true
+
+asarUnpack:
+  - node_modules/koffi/**/*
 
 extraResources:
   - from: src/windows-click-helper.ps1
     to: windows-click-helper.ps1
   - from: .env.example
     to: .env.example
-
-asar: true
 
 mac:
   category: public.app-category.utilities
