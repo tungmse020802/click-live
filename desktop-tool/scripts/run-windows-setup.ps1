@@ -284,7 +284,8 @@ function Build-ClickHelper {
     Write-Host "  go build ..."
     $code = Invoke-External { go build -trimpath "-ldflags=-s -w" -o $out . }
     if ($code -ne 0) {
-      throw "go build failed with code $code"
+      Write-Warn "go build failed - PowerShell click helper fallback will be used"
+      return
     }
     $size = (Get-Item $out).Length
     Write-Host "  OK $out ($([math]::Round($size / 1KB)) KB)"

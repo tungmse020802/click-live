@@ -124,11 +124,13 @@ func sendMouseButton(down bool) (int, error) {
 		unsafe.Sizeof(inp),
 	)
 	if ret != 1 {
-		gle := syscall.GetLastError()
-		if gle == 0 && err != syscall.Errno(0) {
+		if err != nil && err != syscall.Errno(0) {
 			return int(ret), fmt.Errorf("sendinput-failed,gle=%v", err)
 		}
-		return int(ret), fmt.Errorf("sendinput-failed,gle=%d", gle)
+		if gle := syscall.GetLastError(); gle != nil {
+			return int(ret), fmt.Errorf("sendinput-failed,gle=%v", gle)
+		}
+		return int(ret), fmt.Errorf("sendinput-failed")
 	}
 	return 1, nil
 }
@@ -157,8 +159,10 @@ func performButtonClicks() error {
 func clickAt(x, y int) (string, bool) {
 	ok, _, _ := procSetCursorPos.Call(uintptr(x), uintptr(y))
 	if ok == 0 {
-		gle := syscall.GetLastError()
-		return fmt.Sprintf("setcursorpos-failed,gle=%d", gle), false
+		if gle := syscall.GetLastError(); gle != nil {
+			return fmt.Sprintf("setcursorpos-failed,gle=%v", gle), false
+		}
+		return "setcursorpos-failed", false
 	}
 
 	if err := performButtonClicks(); err != nil {
