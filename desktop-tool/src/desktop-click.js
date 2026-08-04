@@ -168,7 +168,7 @@ async function clickScreenPointWindowsInner(px, py, options = {}) {
     dropStaleClick(clickGen, "win-inner");
   }
 
-  // Process nền (native exe hoặc PowerShell) — ổn định hơn gọi SendInput từ Electron.
+  // PowerShell helper process (mac dinh) — delay thap, on dinh hon koffi trong Electron.
   try {
     if (isStaleClickRequest(clickGen)) dropStaleClick(clickGen, "win-before-helper");
     if (!isPsHelperReady()) {

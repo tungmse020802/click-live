@@ -1,5 +1,5 @@
 /**
- * Persistent Windows click helper — native exe (ưu tiên) hoặc PowerShell fallback.
+ * Persistent Windows click helper — PowerShell (mac dinh) hoac native exe (tuy chon).
  * Protocol stdin/stdout: ready | id,x,y | ping:id | quit → ok:/err:/pong:
  */
 
@@ -35,7 +35,7 @@ const HELPER_MAX_CLICKS = Math.max(
 );
 
 function resolveHelperBackend() {
-  const pref = String(process.env.DESKTOP_CLICK_HELPER || "auto").trim().toLowerCase();
+  const pref = String(process.env.DESKTOP_CLICK_HELPER || "powershell").trim().toLowerCase();
   const nativePath = windowsClickNativeHelperPath();
   const psPath = windowsClickHelperPath();
   const nativeExists = fs.existsSync(nativePath);
@@ -47,11 +47,12 @@ function resolveHelperBackend() {
   if (pref === "native" || pref === "exe") {
     return nativeExists ? { kind: "native", cmd: nativePath, args: [] } : null;
   }
-  if (nativeExists) {
-    return { kind: "native", cmd: nativePath, args: [] };
-  }
+  // auto: PowerShell truoc (delay thap hon), native exe fallback
   if (psExists) {
     return { kind: "powershell", cmd: "powershell.exe", args: psArgs(psPath) };
+  }
+  if (nativeExists) {
+    return { kind: "native", cmd: nativePath, args: [] };
   }
   return null;
 }

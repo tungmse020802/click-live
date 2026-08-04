@@ -354,7 +354,6 @@ try {
   Write-Step "Check dependencies"
   Ensure-Git
   Ensure-NodeJs
-  $goReady = Ensure-Go
 
   Stop-ClickLive
 
@@ -366,17 +365,12 @@ try {
   Ensure-EnvFile -DesktopToolDir $desktopToolDir
 
   Install-NpmDeps -DesktopToolDir $desktopToolDir
-  Build-ClickHelper -DesktopToolDir $desktopToolDir -GoReady $goReady
   Test-Syntax -DesktopToolDir $desktopToolDir
 
   Write-Host ""
   Write-Host "Setup complete." -ForegroundColor Green
   Write-Host "  Folder : $desktopToolDir"
-  if (Test-Path (Join-Path $desktopToolDir "resources\bin\win32\click-helper.exe")) {
-    Write-Host "  Click  : native click-helper.exe"
-  } else {
-    Write-Host "  Click  : PowerShell helper (fallback)"
-  }
+  Write-Host "  Click  : PowerShell helper (windows-click-helper.ps1)"
   Write-Host ""
 
   if (-not $SkipStart) {
