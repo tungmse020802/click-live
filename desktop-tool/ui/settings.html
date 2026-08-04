@@ -104,6 +104,48 @@
       min-height: 42px;
     }
     .status strong { color: var(--text); }
+    .click-result {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #0d1218;
+      border: 1px solid var(--line);
+      font-size: 12px;
+      line-height: 1.55;
+      display: none;
+    }
+    .click-result.visible { display: block; }
+    .click-result .row { display: flex; gap: 8px; margin-bottom: 4px; }
+    .click-result .label { color: var(--muted); min-width: 108px; flex-shrink: 0; }
+    .click-result .value { color: var(--text); font-variant-numeric: tabular-nums; }
+    .click-result .drift-late { color: #f87171; font-weight: 600; }
+    .click-result .drift-early { color: #fbbf24; font-weight: 600; }
+    .click-result .drift-ok { color: var(--green); font-weight: 600; }
+    .job-timeline {
+      margin-top: 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #0a0e14;
+      border: 1px solid var(--line);
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      max-height: 120px;
+      overflow-y: auto;
+      display: none;
+    }
+    .job-timeline.visible { display: block; }
+    .job-timeline .tl-line { color: var(--muted); margin-bottom: 3px; word-break: break-word; }
+    .job-timeline .tl-line .evt { color: #94a3b8; font-weight: 600; }
+    .offset-hint-box {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #0d1218;
+      border: 1px solid var(--line);
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .offset-hint-box strong { color: var(--text); }
     .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
     .auth-badge {
       display: inline-block;
@@ -215,7 +257,8 @@
           <button class="small" data-delta="50">+0.05</button>
         </div>
       </div>
-      <p class="hint">Offset âm (vd <strong>−0.09s</strong>) = click khi đồng hồ còn <strong>~0.09s</strong>. App tự bù độ trễ OS (adaptive lead — xem log). Chỉ job <strong>mở cuối</strong> / acc desktop khớp web.</p>
+      <p class="hint">Offset dời <strong>mốc overlay 0.0s</strong> so với TIME trong tin (không phải số overlay lúc click).</p>
+      <div class="offset-hint-box" id="offsetExplain">—</div>
     </section>
 
     <section>
@@ -245,6 +288,16 @@
     <section>
       <h2>Trạng thái</h2>
       <div class="status" id="status">Sẵn sàng.</div>
+      <div class="job-timeline" id="jobTimeline"></div>
+      <div class="click-result" id="lastClickResult">
+        <div class="row"><span class="label">Đã click tại</span><span class="value" id="lastClickPos">—</span></div>
+        <div class="row"><span class="label">Thời điểm click</span><span class="value" id="lastClickAt">—</span></div>
+        <div class="row"><span class="label">TIME gốc (tin)</span><span class="value" id="lastClickRawTime">—</span></div>
+        <div class="row"><span class="label">Mốc overlay 0.0s</span><span class="value" id="lastClickTarget">—</span></div>
+        <div class="row"><span class="label">Overlay lúc click</span><span class="value" id="lastClickOverlayRem">—</span></div>
+        <div class="row"><span class="label">Offset / lead</span><span class="value" id="lastClickOffsetLead">—</span></div>
+        <div class="row"><span class="label">Lệch vs 0.0s</span><span class="value" id="lastClickDrift">—</span></div>
+      </div>
     </section>
 
     <section>

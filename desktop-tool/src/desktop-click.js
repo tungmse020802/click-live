@@ -7,7 +7,6 @@ const path = require("path");
 const execFileAsync = promisify(execFile);
 const { windowsClickHelperPath } = require("./paths");
 const { clickLog, clickLogWarn, clickLogError } = require("./click-log");
-const { recordClickDuration } = require("./click-lead");
 
 let winClickHelper = null;
 let winClickReady = null;
@@ -356,14 +355,10 @@ async function clickScreenPoint(x, y) {
 
   clickLog("click", "invoke clickScreenPoint", { x: px, y: py });
   if (process.platform === "win32") {
-    const result = await clickScreenPointWindows(px, py);
-    if (result.durationMs != null) recordClickDuration(result.durationMs);
-    return result;
+    return clickScreenPointWindows(px, py);
   }
   if (process.platform === "darwin") {
-    const result = await clickScreenPointDarwin(px, py);
-    if (result.durationMs != null) recordClickDuration(result.durationMs);
-    return result;
+    return clickScreenPointDarwin(px, py);
   }
   throw new Error(`Desktop click chua ho tro nen tang: ${process.platform}`);
 }

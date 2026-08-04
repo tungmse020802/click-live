@@ -1,5 +1,15 @@
 const delayLabel = document.getElementById('delayLabel');
 const statusEl = document.getElementById('status');
+const lastClickResult = document.getElementById('lastClickResult');
+const lastClickPos = document.getElementById('lastClickPos');
+const lastClickAt = document.getElementById('lastClickAt');
+const lastClickRawTime = document.getElementById('lastClickRawTime');
+const lastClickTarget = document.getElementById('lastClickTarget');
+const lastClickOverlayRem = document.getElementById('lastClickOverlayRem');
+const lastClickOffsetLead = document.getElementById('lastClickOffsetLead');
+const lastClickDrift = document.getElementById('lastClickDrift');
+const jobTimeline = document.getElementById('jobTimeline');
+const offsetExplain = document.getElementById('offsetExplain');
 const defaultWaitSec = document.getElementById('defaultWaitSec');
 const clickX = document.getElementById('clickX');
 const clickY = document.getElementById('clickY');
@@ -17,6 +27,8 @@ const logPath = document.getElementById('logPath');
 
 let logAutoScroll = true;
 const MAX_LOG_LINES_UI = 200;
+const MAX_TIMELINE_LINES = 8;
+let currentTimelineJobId = null;
 
 function formatLogDetail(entry) {
   const d = entry.data;
@@ -31,6 +43,9 @@ function formatLogDetail(entry) {
   if (d.fireDelayMs != null) parts.push(`fire=${d.fireDelayMs}ms`);
   if (d.offsetMs != null) parts.push(`off=${d.offsetMs}ms`);
   if (d.leadMs != null) parts.push(`lead=${d.leadMs}ms`);
+  if (d.baseLeadMs != null) parts.push(`base=${d.baseLeadMs}ms`);
+  if (d.correctionMs != null && d.correctionMs !== 0) parts.push(`corr=${d.correctionMs}ms`);
+  if (d.driftEma != null) parts.push(`driftEma=${d.driftEma}ms`);
   if (d.startupMs != null) parts.push(`startup=${d.startupMs}ms`);
   if (d.error) parts.push(String(d.error));
   return parts.length ? ` · ${parts.join(' · ')}` : '';
@@ -124,12 +139,138 @@ window.desktopTool.onLog((entry) => {
   appendLogEntry(entry);
 });
 
+function formatClockTime(ms) {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  try {
+    return new Date(ms).toLocaleTimeString('vi-VN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      fractionalSecondDigits: 3,
+      hour12: false,
+    });
+  } catch {
+    return '—';
+  }
+}
+
+function updateOffsetExplain(offsetMs) {
+  const ms = Number(offsetMs) || 0;
+  const sec = Math.abs(ms / 1000).toFixed(2);
+  if (ms < 0) {
+    offsetExplain.innerHTML = `Offset <strong>${(ms / 1000).toFixed(2)}s</strong>: mốc overlay <strong>0.0s</strong> sớm hơn TIME trong tin <strong>${sec}s</strong> → click sớm hơn TIME gốc. Số còn lại trên overlay lúc click (~0.08–0.10s) là do <strong>lead</strong> (bù độ trễ OS), không phải offset.`;
+  } else if (ms > 0) {
+    offsetExplain.innerHTML = `Offset <strong>+${sec}s</strong>: mốc overlay 0.0s muộn hơn TIME trong tin ${sec}s → click muộn hơn TIME gốc. Lead vẫn khiến click chạy sớm ~0.1s trên overlay so với 0.0s.`;
+  } else {
+    offsetExplain.innerHTML = 'Offset <strong>0.00s</strong>: mốc overlay 0.0s trùng TIME trong tin. Click vẫn chạy sớm ~lead (≈0.1s trên overlay) để bù độ trễ OS.';
+  }
+}
+
+function formatOverlayRem(ms) {
+  if (ms == null || !Number.isFinite(ms)) return '—';
+  const sec = ms / 1000;
+  return `${sec.toFixed(3)}s (còn trên overlay lúc gọi click)`;
+}
+
+function appendTimelineLine(event, msg, detailParts) {
+  jobTimeline.classList.add('visible');
+  const line = document.createElement('div');
+  line.className = 'tl-line';
+  const now = formatLogTime(new Date().toISOString());
+  const parts = (detailParts || []).filter(Boolean);
+  const detail = parts.length ? ` · ${parts.join(' · ')}` : '';
+  line.innerHTML = `<span class="time">${now}</span> `
+    + `<span class="evt">[${event}]</span> `
+    + `<span class="msg">${msg}</span>`
+    + (detail ? `<span class="detail">${detail}</span>` : '');
+  jobTimeline.appendChild(line);
+  while (jobTimeline.children.length > MAX_TIMELINE_LINES) {
+    jobTimeline.removeChild(jobTimeline.firstChild);
+  }
+  jobTimeline.scrollTop = jobTimeline.scrollHeight;
+}
+
+function resetJobTimeline(jobId) {
+  currentTimelineJobId = jobId;
+  jobTimeline.innerHTML = '';
+  jobTimeline.classList.remove('visible');
+}
+
+function formatDriftSec(ms) {
+  if (ms == null || !Number.isFinite(ms)) {
+    return { text: '—', className: '' };
+  }
+  const sec = ms / 1000;
+  const sign = sec >= 0 ? '+' : '';
+  let hint = 'đúng giờ';
+  if (sec > 0.05) hint = 'muộn';
+  else if (sec < -0.05) hint = 'sớm';
+  return {
+    text: `${sign}${sec.toFixed(3)}s (${hint})`,
+    className: sec > 0.05 ? 'drift-late' : sec < -0.05 ? 'drift-early' : 'drift-ok',
+  };
+}
+
+function renderLastClickResult(payload) {
+  if (!payload || payload.type !== 'clicked') return;
+
+  lastClickResult.classList.add('visible');
+  const who = payload.isTest ? ' (test)' : '';
+  lastClickPos.textContent = `${payload.x}, ${payload.y}${payload.method ? ` · ${payload.method}` : ''}${who}`;
+
+  lastClickAt.textContent = formatClockTime(payload.clickedAt);
+
+  lastClickRawTime.textContent = payload.endTimeMs != null
+    ? formatClockTime(payload.endTimeMs)
+    : (payload.isTest ? '— (test)' : '—');
+
+  if (payload.displayTargetMs != null) {
+    lastClickTarget.textContent = formatClockTime(payload.displayTargetMs);
+  } else {
+    lastClickTarget.textContent = payload.isTest ? '— (test)' : '—';
+  }
+
+  lastClickOverlayRem.textContent = formatOverlayRem(payload.overlayRemainingMs);
+
+  const off = payload.offsetMs != null ? `${payload.offsetMs >= 0 ? '+' : ''}${payload.offsetMs}ms` : '—';
+  const lead = payload.leadMs != null ? `${payload.leadMs}ms` : '—';
+  lastClickOffsetLead.textContent = `offset ${off} · lead ${lead}`;
+
+  const drift = formatDriftSec(payload.driftFromDisplayMs);
+  lastClickDrift.textContent = drift.text;
+  lastClickDrift.className = `value ${drift.className}`.trim();
+
+  const jobLabel = payload.isTest ? 'Test click' : `Job #${payload.jobId || '?'}`;
+  const driftShort = payload.driftFromDisplayMs != null
+    ? formatDriftSec(payload.driftFromDisplayMs).text
+    : '—';
+  const overlayShort = payload.overlayRemainingMs != null
+    ? `${(payload.overlayRemainingMs / 1000).toFixed(3)}s trên overlay`
+    : '';
+  statusEl.innerHTML = `<strong>${jobLabel}</strong> · click <strong>${payload.x}, ${payload.y}</strong> lúc <strong>${formatClockTime(payload.clickedAt)}</strong>`
+    + (overlayShort ? ` · overlay <strong>${overlayShort}</strong>` : '')
+    + ` · lệch 0.0s <strong>${driftShort}</strong>`;
+
+  if (!payload.isTest) {
+    appendTimelineLine('click', `job #${payload.jobId} clicked`, [
+      `#${payload.jobId}`,
+      payload.source ? `src=${payload.source}` : null,
+      payload.method || null,
+      payload.driftFromDisplayMs != null ? `drift=${payload.driftFromDisplayMs}ms` : null,
+      payload.clickDurationMs != null ? `click=${payload.clickDurationMs}ms` : null,
+      payload.offsetMs != null ? `off=${payload.offsetMs}ms` : null,
+      payload.leadMs != null ? `lead=${payload.leadMs}ms` : null,
+    ]);
+  }
+}
+
 function formatOffset(ms) {
   const sec = ms / 1000;
   const text = `${sec >= 0 ? '+' : ''}${sec.toFixed(2)}s`;
   delayLabel.textContent = text;
   delayLabel.classList.toggle('positive', ms > 0);
   delayLabel.classList.toggle('negative', ms < 0);
+  updateOffsetExplain(ms);
 }
 
 function applySettings(s) {
@@ -206,8 +347,8 @@ document.getElementById('testClickBtn').addEventListener('click', async () => {
   statusEl.textContent = 'Đang test click...';
   try {
     await window.desktopTool.ensureAccessibility();
-    const result = await window.desktopTool.testClick();
-    statusEl.innerHTML = `Test click OK tại <strong>${result.x}, ${result.y}</strong> (${result.method})`;
+    await window.desktopTool.testClick();
+    /* notifySchedule từ main → onSchedule → renderLastClickResult */
   } catch (err) {
     statusEl.textContent = `Lỗi click: ${err.message}`;
   }
@@ -259,11 +400,33 @@ queueUrlInput.addEventListener('change', () => {
 
 window.desktopTool.onSchedule((payload) => {
   if (payload.type === 'scheduled') {
+    if (payload.jobId !== currentTimelineJobId) {
+      resetJobTimeline(payload.jobId);
+    }
     const sec = (payload.waitMs / 1000).toFixed(2);
-    const closeSec = payload.closeWaitMs ? (payload.closeWaitMs / 1000).toFixed(0) : '30';
-    statusEl.innerHTML = `Job #${payload.jobId || '?'} · click <strong>${sec}s</strong> (0.0s) · đóng tab +${closeSec}s${payload.timeLabel ? ` · ${payload.timeLabel}` : ''}`;
+    statusEl.innerHTML = `Job #${payload.jobId || '?'} · đếm <strong>${sec}s</strong> tới 0.0s${payload.timeLabel ? ` · ${payload.timeLabel}` : ''}`;
+    appendTimelineLine('schedule', `job #${payload.jobId} scheduled`, [
+      `#${payload.jobId}`,
+      payload.source ? `src=${payload.source}` : null,
+      payload.fireDelayMs != null ? `fire=${payload.fireDelayMs}ms` : null,
+      payload.offsetMs != null ? `off=${payload.offsetMs}ms` : null,
+      payload.leadMs != null ? `lead=${payload.leadMs}ms` : null,
+    ]);
+  } else if (payload.type === 'wait') {
+    statusEl.innerHTML = `Job #${payload.jobId || '?'} · chờ xong · drift <strong>${payload.driftMs != null ? `${payload.driftMs}ms` : '—'}</strong>`;
+    appendTimelineLine('wait', `job #${payload.jobId} wait done`, [
+      `#${payload.jobId}`,
+      payload.driftMs != null ? `drift=${payload.driftMs}ms` : null,
+      payload.offsetMs != null ? `off=${payload.offsetMs}ms` : null,
+    ]);
   } else if (payload.type === 'clicked') {
-    statusEl.innerHTML = `Đã click desktop tại <strong>${payload.x}, ${payload.y}</strong> · job #${payload.jobId || '?'}`;
+    renderLastClickResult(payload);
+  } else if (payload.type === 'error') {
+    statusEl.innerHTML = `Lỗi job #${payload.jobId || '?'}: ${payload.error || '?'}`;
+    appendTimelineLine('error', `job #${payload.jobId} failed`, [
+      `#${payload.jobId}`,
+      payload.error || null,
+    ]);
   }
 });
 

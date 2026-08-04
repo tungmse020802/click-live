@@ -23,6 +23,7 @@ const {
   isScheduleTooStale,
   scheduleStaleMs,
 } = require("./junb-url");
+const { recordClickOutcome, getClickLeadStats } = require("./click-lead");
 const {
   ensureCountdownOverlay,
   setCountdownOverlay,
@@ -268,6 +269,11 @@ async function scheduleDesktopClick({
     ? `${schedule.source === "thanhtai_end_time" ? "thanhtai" : schedule.source === "junb_end_time" ? "junb" : schedule.source === "server_end_time" ? "server" : schedule.source === "queued_click_after" ? "queue+after" : schedule.source === "message_clock" ? "TIME" : schedule.source} @ ${displaySec}s (offset ${offsetMs >= 0 ? "+" : ""}${(offsetMs / 1000).toFixed(2)}s)`
     : (timeLabel || `${sec}s`);
 
+  const execLead = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
+  const displayTargetMs = schedule.endTimeMs
+    ? clickDisplayTargetMs(schedule.endTimeMs, offsetMs)
+    : null;
+
   notifySchedule({
     type: "scheduled",
     jobId: key,
@@ -276,13 +282,13 @@ async function scheduleDesktopClick({
     timeLabel: label,
     endTimeMs: schedule.endTimeMs,
     offsetMs,
+    leadMs: execLead,
+    source: schedule.source,
+    fireDelayMs,
+    displayTargetMs,
     displayRemainingMs: displaySec != null ? Math.round(Number(displaySec) * 1000) : null,
   });
 
-  const execLead = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
-  const displayTargetMs = schedule.endTimeMs
-    ? clickDisplayTargetMs(schedule.endTimeMs, offsetMs)
-    : null;
   const executeAtMsPlanned = schedule.endTimeMs
     ? clickExecuteAtMs(schedule.endTimeMs, offsetMs)
     : scheduledAt + Math.max(0, Number(schedule.clickWaitMs) || 0) + execLead;
@@ -355,6 +361,13 @@ async function scheduleDesktopClick({
           offsetMs: liveOffset,
           clickGen,
         });
+        notifySchedule({
+          type: "wait",
+          jobId: key,
+          driftMs: waitEndedAt - executeAtMs,
+          offsetMs: liveOffset,
+          executeAtMs,
+        });
         break;
       }
 
@@ -389,14 +402,23 @@ async function scheduleDesktopClick({
       const displayTarget = schedule.endTimeMs
         ? clickDisplayTargetMs(schedule.endTimeMs, Number(latest.delayOffsetMs) || 0)
         : null;
+      const execLeadDone = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
       notifySchedule({
         type: "clicked",
         jobId: key,
         x: result.x,
         y: result.y,
         method: result.method,
+        clickedAt,
+        endTimeMs: schedule.endTimeMs,
+        displayTargetMs: displayTarget,
+        driftFromDisplayMs: displayTarget != null ? clickedAt - displayTarget : null,
+        overlayRemainingMs: displayTarget != null ? displayTarget - clickInvokeAt : null,
+        source: schedule.source,
+        clickDurationMs: result.durationMs,
+        offsetMs: latest.delayOffsetMs,
+        leadMs: execLeadDone,
       });
-      const execLeadDone = schedule.executionLeadMs ?? resolveClickExecutionLeadMs();
       clickLog("click", `job #${key} clicked`, {
         jobId: key,
         clickGen,
@@ -413,6 +435,17 @@ async function scheduleDesktopClick({
         displayTargetMs: displayTarget,
         clickedAt,
       });
+      if (displayTarget != null && result.durationMs != null) {
+        const beforeLead = execLeadDone;
+        recordClickOutcome({
+          clickDurationMs: result.durationMs,
+          driftFromDisplayMs: clickedAt - displayTarget,
+        });
+        const leadStats = getClickLeadStats();
+        if (leadStats.leadMs !== beforeLead) {
+          clickLog("lead", "adaptive lead adjusted", leadStats);
+        }
+      }
       console.log(
         `Desktop click job #${key} at ${result.x},${result.y} (${result.method})`
         + ` source=${schedule.source} offset=${latest.delayOffsetMs}ms lead=${execLeadDone}ms`
@@ -566,6 +599,19 @@ function registerIpcHandlers() {
       method: result.method,
       clickDurationMs: result.durationMs,
     });
+    const clickedAt = Date.now();
+    notifySchedule({
+      type: "clicked",
+      jobId: "test",
+      x: result.x,
+      y: result.y,
+      method: result.method,
+      clickedAt,
+      displayTargetMs: null,
+      driftFromDisplayMs: null,
+      isTest: true,
+      clickDurationMs: result.durationMs,
+    });
     return result;
   });
   ipcMain.handle("settings:ensure-accessibility", async () => ensureAccessibility(true));
@@ -678,6 +724,7 @@ async function startServer() {
     logsDir: resolveLogsDir(),
     logFile: logFilePath(),
     leadMs: resolveClickExecutionLeadMs(),
+    leadStats: getClickLeadStats(),
     pollMs: POLL_MS,
   });
   console.log(`Click logs: ${logFilePath()}`);
