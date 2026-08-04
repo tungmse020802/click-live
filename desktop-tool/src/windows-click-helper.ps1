@@ -6,47 +6,27 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Giữ system-DPI-aware — khớp tọa độ screenX/screenY từ Electron (tránh lệch PerMonitorV2).
 try {
   Add-Type @"
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 public class ClickLiveDpi {
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 "@
   [ClickLiveDpi]::SetProcessDPIAware() | Out-Null
 } catch {
-  # DPI API không có trên một số bản Windows — bỏ qua
 }
 
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 public class ClickLiveMouse {
-  public const uint INPUT_MOUSE = 0;
-  public const uint MOUSEEVENTF_MOVE = 0x0001;
   public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
   public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-  public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
-  public const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
-
-  [StructLayout(LayoutKind.Sequential)]
-  public struct INPUT {
-    public uint type;
-    public MOUSEINPUT mi;
-  }
-
-  [StructLayout(LayoutKind.Sequential)]
-  public struct MOUSEINPUT {
-    public int dx;
-    public int dy;
-    public uint mouseData;
-    public uint dwFlags;
-    public uint time;
-    public IntPtr dwExtraInfo;
-  }
 
   [StructLayout(LayoutKind.Sequential)]
   public struct POINT {
@@ -54,20 +34,63 @@ public class ClickLiveMouse {
     public int Y;
   }
 
-  [DllImport("user32.dll", SetLastError = true)]
-  public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
   [DllImport("user32.dll")]
   public static extern bool SetCursorPos(int x, int y);
 
   [DllImport("user32.dll")]
   public static extern bool GetCursorPos(out POINT lpPoint);
 
+  [DllImport("user32.dll")]
+  public static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, UIntPtr dwExtraInfo);
+
+  [DllImport("user32.dll")]
+  static extern uint GetDoubleClickTime();
+
   static bool IsDoubleClickEnabled() {
     var v = Environment.GetEnvironmentVariable("DESKTOP_CLICK_DOUBLE");
     if (string.IsNullOrEmpty(v)) return true;
     v = v.Trim().ToLowerInvariant();
     return v != "0" && v != "false" && v != "no";
+  }
+
+  static int ClickSettleMs() {
+    var v = Environment.GetEnvironmentVariable("DESKTOP_CLICK_SETTLE_MS");
+    int n;
+    if (int.TryParse(v, out n) && n >= 0) return n;
+    return 20;
+  }
+
+  static int ClickStepMs() {
+    var v = Environment.GetEnvironmentVariable("DESKTOP_CLICK_STEP_MS");
+    int n;
+    if (int.TryParse(v, out n) && n >= 0) return n;
+    return 12;
+  }
+
+  static int DoubleClickGapMs() {
+    var v = Environment.GetEnvironmentVariable("DESKTOP_CLICK_DOUBLE_GAP_MS");
+    int n;
+    if (int.TryParse(v, out n) && n >= 0) return n;
+    var sys = GetDoubleClickTime();
+    if (sys > 0) return Math.Max(40, Math.Min(180, (int)(sys / 3)));
+    return 60;
+  }
+
+  static void PressButton(bool down) {
+    mouse_event(down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
+  }
+
+  static void PerformButtonClicks() {
+    Thread.Sleep(ClickSettleMs());
+    PressButton(true);
+    Thread.Sleep(ClickStepMs());
+    PressButton(false);
+    if (IsDoubleClickEnabled()) {
+      Thread.Sleep(DoubleClickGapMs());
+      PressButton(true);
+      Thread.Sleep(ClickStepMs());
+      PressButton(false);
+    }
   }
 
   public static bool ClickAt(int x, int y, out string detail) {
@@ -77,31 +100,7 @@ public class ClickLiveMouse {
       return false;
     }
 
-    bool isDouble = IsDoubleClickEnabled();
-    var inputSize = Marshal.SizeOf(typeof(INPUT));
-    var inputs = new INPUT[isDouble ? 4 : 2];
-    int n = 0;
-
-    inputs[n].type = INPUT_MOUSE;
-    inputs[n].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-    n++;
-    inputs[n].type = INPUT_MOUSE;
-    inputs[n].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-    n++;
-    if (isDouble) {
-      inputs[n].type = INPUT_MOUSE;
-      inputs[n].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
-      n++;
-      inputs[n].type = INPUT_MOUSE;
-      inputs[n].mi.dwFlags = MOUSEEVENTF_LEFTUP;
-      n++;
-    }
-
-    var sent = SendInput((uint)n, inputs, inputSize);
-    if (sent != n) {
-      detail = "sendinput:" + sent + ",gle=" + Marshal.GetLastWin32Error();
-      return false;
-    }
+    PerformButtonClicks();
 
     POINT pt;
     if (!GetCursorPos(out pt)) {

@@ -1,35 +1,55 @@
 /**
- * Windows click qua SendInput trực tiếp trong Electron main (koffi).
+ * Windows click: SetCursorPos + mouse_event (nút) — SendInput từ Electron thường chỉ di chuột.
  */
 
 const fs = require("fs");
 const path = require("path");
 
-const INPUT_MOUSE = 0;
 const MOUSEEVENTF_LEFTDOWN = 0x0002;
 const MOUSEEVENTF_LEFTUP = 0x0004;
 
 const CURSOR_TOLERANCE_PX = 3;
-const CLICK_EVENTS_SINGLE = 2;
-const CLICK_EVENTS_DOUBLE = 4;
+
+let initialized = false;
+let initError = null;
+let koffi = null;
+let SetCursorPos = null;
+let GetCursorPos = null;
+let MouseEvent = null;
+let GetDoubleClickTime = null;
 
 function isDoubleClickEnabled() {
   const v = String(process.env.DESKTOP_CLICK_DOUBLE ?? "true").trim().toLowerCase();
   return v !== "0" && v !== "false" && v !== "no";
 }
 
-function expectedClickEventCount() {
-  return isDoubleClickEnabled() ? CLICK_EVENTS_DOUBLE : CLICK_EVENTS_SINGLE;
+function clickSettleMs() {
+  const env = Number(process.env.DESKTOP_CLICK_SETTLE_MS);
+  if (Number.isFinite(env) && env >= 0) return Math.round(env);
+  return 20;
 }
 
-let initialized = false;
-let initError = null;
-let koffi = null;
-let INPUT = null;
-let inputSize = 0;
-let SendInput = null;
-let SetCursorPos = null;
-let GetCursorPos = null;
+function clickStepMs() {
+  const env = Number(process.env.DESKTOP_CLICK_STEP_MS);
+  if (Number.isFinite(env) && env >= 0) return Math.round(env);
+  return 12;
+}
+
+function doubleClickGapMs() {
+  const env = Number(process.env.DESKTOP_CLICK_DOUBLE_GAP_MS);
+  if (Number.isFinite(env) && env >= 0) return Math.round(env);
+  try {
+    if (GetDoubleClickTime) {
+      const sys = GetDoubleClickTime();
+      if (Number.isFinite(sys) && sys > 0) {
+        return Math.max(40, Math.min(180, Math.round(sys / 3)));
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return 60;
+}
 
 function resolveKoffiModule() {
   const candidates = ["koffi"];
@@ -72,20 +92,13 @@ function toAbsoluteCoord(coord, origin, span) {
   return Math.round(normalized);
 }
 
-function makeMouseButtonEvent(flags) {
-  return {
-    type: INPUT_MOUSE,
-    u: {
-      mi: {
-        dx: 0,
-        dy: 0,
-        mouseData: 0,
-        dwFlags: flags,
-        time: 0,
-        dwExtraInfo: 0,
-      },
-    },
-  };
+function sleepMs(ms) {
+  const wait = Math.max(0, Math.round(ms));
+  if (wait <= 0) return;
+  const end = Date.now() + wait;
+  while (Date.now() < end) {
+    /* busy-wait — chính xác hơn setTimeout cho chuỗi click */
+  }
 }
 
 function initWindowsSendInput() {
@@ -101,47 +114,15 @@ function initWindowsSendInput() {
       y: "long",
     });
 
-    const MOUSEINPUT = koffi.struct("MOUSEINPUT", {
-      dx: "long",
-      dy: "long",
-      mouseData: "uint32",
-      dwFlags: "uint32",
-      time: "uint32",
-      dwExtraInfo: "uintptr_t",
-    });
-
-    const KEYBDINPUT = koffi.struct("KEYBDINPUT", {
-      wVk: "uint16",
-      wScan: "uint16",
-      dwFlags: "uint32",
-      time: "uint32",
-      dwExtraInfo: "uintptr_t",
-    });
-
-    const HARDWAREINPUT = koffi.struct("HARDWAREINPUT", {
-      uMsg: "uint32",
-      wParamL: "uint16",
-      wParamH: "uint16",
-    });
-
-    INPUT = koffi.struct("INPUT", {
-      type: "uint32",
-      u: koffi.union({
-        mi: MOUSEINPUT,
-        ki: KEYBDINPUT,
-        hi: HARDWAREINPUT,
-      }),
-    });
-
-    inputSize = koffi.sizeof(INPUT);
-    SendInput = user32.func(
-      "uint32 __stdcall SendInput(uint32 cInputs, INPUT *pInputs, int32 cbSize)"
-    );
     SetCursorPos = user32.func("bool __stdcall SetCursorPos(int32 x, int32 y)");
     GetCursorPos = user32.func("bool __stdcall GetCursorPos(_Out_ POINT *lpPoint)");
+    MouseEvent = user32.func(
+      "void __stdcall mouse_event(uint32 dwFlags, uint32 dx, uint32 dy, uint32 dwData, uintptr_t dwExtraInfo)"
+    );
+    GetDoubleClickTime = user32.func("uint32 __stdcall GetDoubleClickTime()");
 
     try {
-      const setDpiAware = user32.func("bool SetProcessDPIAware()");
+      const setDpiAware = user32.func("bool __stdcall SetProcessDPIAware()");
       setDpiAware();
     } catch {
       /* optional */
@@ -164,25 +145,29 @@ function readCursorPos() {
   return { x: point.x, y: point.y };
 }
 
-function sendRelativeClick() {
-  const events = [
-    makeMouseButtonEvent(MOUSEEVENTF_LEFTDOWN),
-    makeMouseButtonEvent(MOUSEEVENTF_LEFTUP),
-  ];
+function pressButton(down) {
+  const flag = down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
+  MouseEvent(flag, 0, 0, 0, 0);
+}
+
+function performButtonClicks() {
+  sleepMs(clickSettleMs());
+  pressButton(true);
+  sleepMs(clickStepMs());
+  pressButton(false);
   if (isDoubleClickEnabled()) {
-    events.push(
-      makeMouseButtonEvent(MOUSEEVENTF_LEFTDOWN),
-      makeMouseButtonEvent(MOUSEEVENTF_LEFTUP),
-    );
+    sleepMs(doubleClickGapMs());
+    pressButton(true);
+    sleepMs(clickStepMs());
+    pressButton(false);
   }
-  return { sent: SendInput(events.length, events, inputSize), expected: events.length };
 }
 
 function clickAt(px, py) {
   if (!initWindowsSendInput()) {
     return {
       ok: false,
-      detail: initError ? String(initError.message || initError) : "sendinput-not-initialized",
+      detail: initError ? String(initError.message || initError) : "mouse-init-not-ready",
     };
   }
 
@@ -191,10 +176,7 @@ function clickAt(px, py) {
       return { ok: false, detail: "setcursorpos-failed" };
     }
 
-    const { sent, expected } = sendRelativeClick();
-    if (sent !== expected) {
-      return { ok: false, detail: `sendinput:${sent}` };
-    }
+    performButtonClicks();
 
     const pt = readCursorPos();
     if (!pt) {
@@ -217,7 +199,7 @@ function clickAt(px, py) {
 
 function pingLatencyMs() {
   if (!initWindowsSendInput()) {
-    throw new Error("SendInput not initialized");
+    throw new Error("Mouse API not initialized");
   }
   const started = Date.now();
   readCursorPos();

@@ -141,11 +141,11 @@ async function clickViaKoffi(px, py) {
   recordClickLatency(durationMs);
 
   if (!result.ok) {
-    throw new Error(`SendInput rejected: ${result.detail}`);
+    throw new Error(`Mouse click rejected: ${result.detail}`);
   }
 
   return {
-    method: isDoubleClickEnabled() ? "sendinput-double" : "sendinput",
+    method: isDoubleClickEnabled() ? "mouse-event-double" : "mouse-event",
     x: px,
     y: py,
     durationMs,
@@ -167,25 +167,7 @@ async function clickScreenPointWindowsInner(px, py, options = {}) {
     dropStaleClick(clickGen, "win-inner");
   }
 
-  const tryKoffi = isWindowsSendInputReady() || initWindowsSendInput();
-  if (tryKoffi) {
-    try {
-      if (isStaleClickRequest(clickGen)) dropStaleClick(clickGen, "win-before-koffi");
-      return await clickViaKoffi(px, py);
-    } catch (err) {
-      if (err?.code === "CLICK_STALE") throw err;
-      clickLogWarn("click", "koffi SendInput failed, trying PowerShell helper", {
-        error: String(err.message || err),
-        x: px,
-        y: py,
-      });
-    }
-  } else {
-    clickLogWarn("helper", "koffi unavailable — run: npm install", {
-      error: getInitError(),
-    });
-  }
-
+  // PowerShell helper (process riêng) — click nút ổn định hơn từ Electron.
   try {
     if (isStaleClickRequest(clickGen)) dropStaleClick(clickGen, "win-before-helper");
     if (!isPsHelperReady()) {
@@ -199,16 +181,36 @@ async function clickScreenPointWindowsInner(px, py, options = {}) {
     return await clickViaPowerShellHelper(px, py);
   } catch (err) {
     if (err?.code === "CLICK_STALE") throw err;
-    clickLogWarn("click", "PowerShell helper failed, using once fallback", {
+    clickLogWarn("click", "PowerShell helper failed, trying koffi mouse_event", {
       error: String(err.message || err),
       x: px,
       y: py,
     });
-    if (isStaleClickRequest(clickGen)) {
-      dropStaleClick(clickGen, "fallback-blocked");
-    }
-    return clickScreenPointWindowsOnce(px, py);
   }
+
+  const tryKoffi = isWindowsSendInputReady() || initWindowsSendInput();
+  if (tryKoffi) {
+    try {
+      if (isStaleClickRequest(clickGen)) dropStaleClick(clickGen, "win-before-koffi");
+      return await clickViaKoffi(px, py);
+    } catch (err) {
+      if (err?.code === "CLICK_STALE") throw err;
+      clickLogWarn("click", "koffi mouse_event failed, using once fallback", {
+        error: String(err.message || err),
+        x: px,
+        y: py,
+      });
+    }
+  } else {
+    clickLogWarn("helper", "koffi unavailable — run: npm install", {
+      error: getInitError(),
+    });
+  }
+
+  if (isStaleClickRequest(clickGen)) {
+    dropStaleClick(clickGen, "fallback-blocked");
+  }
+  return clickScreenPointWindowsOnce(px, py);
 }
 
 function clickScreenPointWindows(px, py, options = {}) {
@@ -259,11 +261,11 @@ async function primeClickLatency() {
   if (process.platform !== "win32") return null;
 
   let samples = [];
-  if (initWindowsSendInput()) {
-    samples = await primeClickLatencyKoffi();
-  }
-  if (!samples.length) {
+  if (isPsHelperReady() || await ensureWinClickHelper().then(() => true).catch(() => false)) {
     samples = await primeClickLatencyHelper();
+  }
+  if (!samples.length && initWindowsSendInput()) {
+    samples = await primeClickLatencyKoffi();
   }
   if (!samples.length) return null;
 
@@ -274,7 +276,7 @@ async function primeClickLatency() {
     medianMs: median,
     samples,
     estimateMs: getHelperLatencyEstimateMs(),
-    backend: isWindowsSendInputReady() ? "koffi" : "powershell-helper",
+    backend: isPsHelperReady() ? "powershell-helper" : (isWindowsSendInputReady() ? "koffi" : "none"),
   });
   try {
     const { refreshSessionClickTiming } = require("./click-lead");
@@ -289,9 +291,9 @@ function warmUpWinClickHelper() {
   if (process.platform !== "win32") return Promise.resolve();
   return primeClickLatency()
     .then(() => {
-      const backend = isWindowsSendInputReady()
-        ? "koffi"
-        : (isPsHelperReady() ? "powershell-helper" : "none");
+      const backend = isPsHelperReady()
+        ? "powershell-helper"
+        : (isWindowsSendInputReady() ? "koffi" : "none");
       clickLog("helper", "Windows click warmup OK", {
         estimateMs: getHelperLatencyEstimateMs(),
         backend,
