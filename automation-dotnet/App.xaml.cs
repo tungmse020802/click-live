@@ -11,12 +11,15 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += (s, args) =>
         {
             var ex = args.ExceptionObject as Exception;
-            MessageBox.Show($"Lỗi ứng dụng: {ex?.Message}\n\n{ex?.StackTrace}", "Lỗi Fatal", MessageBoxButton.OK, MessageBoxImage.Error);
+            var realEx = ex?.InnerException ?? ex;
+            MessageBox.Show($"Lỗi ứng dụng: {realEx?.Message}\n\n{realEx?.StackTrace}", "Lỗi Fatal", MessageBoxButton.OK, MessageBoxImage.Error);
         };
 
         DispatcherUnhandledException += (s, args) =>
         {
-            MessageBox.Show($"Lỗi giao diện WPF: {args.Exception.Message}\n\n{args.Exception.StackTrace}", "Lỗi WPF", MessageBoxButton.OK, MessageBoxImage.Error);
+            var ex = args.Exception;
+            var realEx = ex.InnerException ?? ex;
+            MessageBox.Show($"Lỗi giao diện WPF: {realEx.Message}\n\n{realEx.StackTrace}", "Lỗi WPF", MessageBoxButton.OK, MessageBoxImage.Error);
             args.Handled = true;
         };
     }

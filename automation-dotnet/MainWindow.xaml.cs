@@ -17,12 +17,13 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
-        InitializeComponent();
-
+        // Initialize services BEFORE InitializeComponent so controls firing events during XAML parsing don't hit null services!
         _settingsService = new SettingsService();
         _logger = new LoggerService();
         _poller = new QueuePollerService(_logger);
         _scheduler = new ClickSchedulerService(_logger, _settingsService);
+
+        InitializeComponent();
 
         LstLogs.ItemsSource = _logger.UIEntries;
         TxtLogPath.Text = _logger.LogDirectory;
@@ -59,6 +60,7 @@ public partial class MainWindow : Window
 
     private void UpdateDelayLabel()
     {
+        if (_settingsService?.Settings == null) return;
         double offsetMs = _settingsService.Settings.DelayOffsetMs;
         double sec = offsetMs / 1000.0;
         TxtDelayLabel.Text = $"{sec:+0.00;-0.00;0.00}s";
@@ -165,6 +167,7 @@ public partial class MainWindow : Window
 
     private void BtnOffset_Click(object sender, RoutedEventArgs e)
     {
+        if (_settingsService?.Settings == null) return;
         if (sender is Button btn && int.TryParse(btn.Tag?.ToString(), out int deltaMs))
         {
             _settingsService.Settings.DelayOffsetMs += deltaMs * 10;
@@ -175,6 +178,7 @@ public partial class MainWindow : Window
 
     private void TxtDefaultWaitSec_TextChanged(object sender, TextChangedEventArgs e)
     {
+        if (_settingsService?.Settings == null) return;
         if (double.TryParse(TxtDefaultWaitSec?.Text, out double val))
         {
             _settingsService.Settings.DefaultWaitSec = val;
@@ -184,12 +188,14 @@ public partial class MainWindow : Window
 
     private void ChkAutoClick_Changed(object sender, RoutedEventArgs e)
     {
+        if (_settingsService?.Settings == null) return;
         _settingsService.Settings.AutoClickEnabled = ChkAutoClick.IsChecked == true;
         _settingsService.SaveSettings();
     }
 
     private void TxtClickCoords_TextChanged(object sender, TextChangedEventArgs e)
     {
+        if (_settingsService?.Settings == null) return;
         if (int.TryParse(TxtClickX?.Text, out int x) && int.TryParse(TxtClickY?.Text, out int y))
         {
             _settingsService.Settings.ClickX = x;
