@@ -1,4 +1,4 @@
-using System.Collections.ObservableCollection;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Windows;
 using AutomationDotNet.Models;
