@@ -3,6 +3,7 @@
 [Oo]bj/
 [Dd]ist/
 dist-standalone/
+installer/
 .vs/
 *.user
 *.suo
