@@ -10,6 +10,8 @@ public class ClickSchedulerService
 
     public event Action<long>? OnCountdownStarted;
     public event Action? OnCountdownEnded;
+    public event Action? PrepareForClick;
+    public event Action? RestoreAfterClick;
     public event Action<ClickResult>? OnClickCompleted;
 
     public ClickSchedulerService(LoggerService logger, SettingsService settingsService)
@@ -67,10 +69,24 @@ public class ClickSchedulerService
                 DateTime actualClickTime = TimingHelper.TargetAtMsToLocalDateTime(clickAtMsActual);
 
                 bool clicked = false;
+                string clickDetail = "";
                 if (settings.AutoClickEnabled && (settings.ClickX > 0 || settings.ClickY > 0))
                 {
-                    _logger.Log("click", $"Thực thi click tại ({settings.ClickX}, {settings.ClickY})");
-                    clicked = Win32Native.PerformClick(settings.ClickX, settings.ClickY);
+                    PrepareForClick?.Invoke();
+                    try
+                    {
+                        Thread.Sleep(80);
+                        _logger.Log("click", $"Thực thi click tại ({settings.ClickX}, {settings.ClickY})");
+                        var clickResult = Win32Native.PerformClickDetailed(settings.ClickX, settings.ClickY);
+                        clicked = clickResult.Ok;
+                        clickDetail = $"{clickResult.Method}: {clickResult.Detail}";
+                        _logger.Log(clicked ? "click" : "error", clicked ? "Click OK" : "Click thất bại", clickDetail);
+                    }
+                    finally
+                    {
+                        Thread.Sleep(120);
+                        RestoreAfterClick?.Invoke();
+                    }
                 }
                 else
                 {

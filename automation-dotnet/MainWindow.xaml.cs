@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -16,6 +17,8 @@ public partial class MainWindow : Window
     private readonly ClickSchedulerService _scheduler;
     private readonly CountdownOverlayWindow _overlayWindow;
     private readonly List<string> _logLines = new();
+    private bool _mainHiddenForClick;
+    private bool _overlayHiddenForClick;
 
     public MainWindow()
     {
@@ -36,6 +39,8 @@ public partial class MainWindow : Window
 
         _scheduler.OnCountdownStarted += targetAtMs => Dispatcher.Invoke(() => _overlayWindow.StartCountdown(targetAtMs));
         _scheduler.OnCountdownEnded += () => Dispatcher.Invoke(() => _overlayWindow.StopCountdown());
+        _scheduler.PrepareForClick += () => Dispatcher.Invoke(HideWindowsForClick);
+        _scheduler.RestoreAfterClick += () => Dispatcher.Invoke(RestoreWindowsAfterClick);
 
         LoadSettingsToUI();
 
@@ -282,6 +287,36 @@ public partial class MainWindow : Window
         }
     }
 
+    private void HideWindowsForClick()
+    {
+        if (_overlayWindow.IsVisible)
+        {
+            _overlayWindow.Hide();
+            _overlayHiddenForClick = true;
+        }
+
+        if (IsVisible)
+        {
+            Hide();
+            _mainHiddenForClick = true;
+        }
+    }
+
+    private void RestoreWindowsAfterClick()
+    {
+        if (_overlayHiddenForClick)
+        {
+            _overlayWindow.Show();
+            _overlayHiddenForClick = false;
+        }
+
+        if (_mainHiddenForClick)
+        {
+            Show();
+            _mainHiddenForClick = false;
+        }
+    }
+
     private void BtnTestClick_Click(object sender, RoutedEventArgs e)
     {
         int x = _settingsService.Settings.ClickX;
@@ -294,14 +329,26 @@ public partial class MainWindow : Window
         }
 
         _logger.Log("click", $"Test click tại ({x}, {y})");
-        bool ok = Win32Native.PerformClick(x, y);
-        if (ok)
+        HideWindowsForClick();
+        try
         {
-            TxtStatus.Text = $"Đã test click tại ({x}, {y}) thành công.";
+            Thread.Sleep(80);
+            var result = Win32Native.PerformClickDetailed(x, y);
+            if (result.Ok)
+            {
+                TxtStatus.Text = $"Test click OK ({result.Method}) tại ({x}, {y}).";
+                _logger.Log("click", "Test click OK", $"{result.Method}: {result.Detail}");
+            }
+            else
+            {
+                TxtStatus.Text = $"Test click thất bại: {result.Detail}";
+                _logger.Log("error", "Test click thất bại", result.Detail);
+            }
         }
-        else
+        finally
         {
-            TxtStatus.Text = $"Test click yêu cầu chạy trên hệ điều hành Windows.";
+            Thread.Sleep(120);
+            RestoreWindowsAfterClick();
         }
     }
 

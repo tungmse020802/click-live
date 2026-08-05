@@ -106,7 +106,7 @@
                         <Button x:Name="BtnTestClick" Content="Test click" Margin="0,0,8,6" Click="BtnTestClick_Click"/>
                     </WrapPanel>
 
-                    <TextBlock Text="Native Win32 SetCursorPos + mouse_event (nhanh và chính xác cao)." Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,6,0,0"/>
+                    <TextBlock Text="Win32 deep click: focus cửa sổ đích + SendMessage + mouse_event. Tool tự ẩn trước khi click." Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="0,6,0,0"/>
                 </StackPanel>
             </GroupBox>
 
