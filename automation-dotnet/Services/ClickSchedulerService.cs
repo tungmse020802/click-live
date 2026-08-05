@@ -9,6 +9,8 @@ public class ClickSchedulerService
     private readonly SettingsService _settingsService;
     private CancellationTokenSource? _clickCts;
 
+    public event Action<DateTime>? OnCountdownStarted;
+    public event Action? OnCountdownEnded;
     public event Action<ClickResult>? OnClickCompleted;
 
     public ClickSchedulerService(LoggerService logger, SettingsService settingsService)
@@ -30,12 +32,6 @@ public class ClickSchedulerService
             {
                 var settings = _settingsService.Settings;
 
-                if (!string.IsNullOrEmpty(item.Url))
-                {
-                    _logger.Log("schedule", "Mở URL Chrome", item.Url);
-                    OpenChromeUrl(item.Url);
-                }
-
                 double targetWaitMs = item.ClickAfterMs > 0 ? item.ClickAfterMs : settings.DefaultWaitSec * 1000;
                 double offsetMs = settings.DelayOffsetMs;
 
@@ -45,6 +41,7 @@ public class ClickSchedulerService
                 DateTime targetDisplayTime = DateTime.Now.AddMilliseconds(targetWaitMs + offsetMs);
 
                 _logger.Log("wait", $"Hẹn click sau {totalDelayMs:F0}ms", $"Target={targetDisplayTime:HH:mm:ss.fff}, Offset={offsetMs:+0.00;-0.00;0.00}ms");
+                OnCountdownStarted?.Invoke(targetDisplayTime);
 
                 var sw = Stopwatch.StartNew();
                 double remainingMs = totalDelayMs - sw.Elapsed.TotalMilliseconds;
@@ -54,6 +51,7 @@ public class ClickSchedulerService
                     if (token.IsCancellationRequested)
                     {
                         _logger.Log("schedule", "Hủy job click cũ");
+                        OnCountdownEnded?.Invoke();
                         return;
                     }
 
@@ -112,26 +110,20 @@ public class ClickSchedulerService
 
                 _logger.Log("click", $"Kết quả click: {driftStatus}", hint);
                 OnClickCompleted?.Invoke(result);
+
+                // Stop overlay after 2 seconds
+                await Task.Delay(2000, token);
+                OnCountdownEnded?.Invoke();
             }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException)
+            {
+                OnCountdownEnded?.Invoke();
+            }
             catch (Exception ex)
             {
                 _logger.Log("error", "Lỗi thực thi job click", ex.Message);
+                OnCountdownEnded?.Invoke();
             }
         }, token);
-    }
-
-    private static void OpenChromeUrl(string url)
-    {
-        try
-        {
-            var psi = new ProcessStartInfo
-            {
-                FileName = url,
-                UseShellExecute = true
-            };
-            Process.Start(psi);
-        }
-        catch { }
     }
 }

@@ -14,6 +14,7 @@ public partial class MainWindow : Window
     private readonly LoggerService _logger;
     private readonly QueuePollerService _poller;
     private readonly ClickSchedulerService _scheduler;
+    private readonly CountdownOverlayWindow _overlayWindow;
     private readonly List<string> _logLines = new();
 
     public MainWindow()
@@ -22,6 +23,7 @@ public partial class MainWindow : Window
         _logger = new LoggerService();
         _poller = new QueuePollerService(_logger);
         _scheduler = new ClickSchedulerService(_logger, _settingsService);
+        _overlayWindow = new CountdownOverlayWindow();
 
         InitializeComponent();
 
@@ -32,9 +34,21 @@ public partial class MainWindow : Window
         _poller.OnNewJobArrived += Poller_OnNewJobArrived;
         _scheduler.OnClickCompleted += Scheduler_OnClickCompleted;
 
+        _scheduler.OnCountdownStarted += targetTime => Dispatcher.Invoke(() => _overlayWindow.StartCountdown(targetTime));
+        _scheduler.OnCountdownEnded += () => Dispatcher.Invoke(() => _overlayWindow.StopCountdown());
+
         LoadSettingsToUI();
 
-        Loaded += async (_, _) => await TryAutoConnectAsync();
+        Loaded += (_, _) =>
+        {
+            _overlayWindow.Show();
+            _ = TryAutoConnectAsync();
+        };
+
+        Closing += (_, _) =>
+        {
+            try { _overlayWindow.Close(); } catch { }
+        };
     }
 
     private async Task TryAutoConnectAsync()
@@ -49,21 +63,25 @@ public partial class MainWindow : Window
 
         try
         {
-            TxtStatus.Text = "Đang kết nối queue server...";
-            if (await _poller.LoginAsync(url, user, pass))
+            BtnLogin.IsEnabled = false;
+            TxtStatus.Text = "Đang tự động đăng nhập kết nối queue server...";
+            bool ok = await _poller.LoginAsync(url, user, pass);
+            if (ok)
             {
                 _settingsService.Settings.PullToken = _poller.ActivePullToken;
                 _settingsService.SaveSettings();
+
                 _poller.StartPolling(url, _poller.ActivePullToken, user);
-                TxtStatus.Text = "Sẵn sàng — đã kết nối queue server.";
+                TxtStatus.Text = "Sẵn sàng — đã tự động kết nối queue server.";
             }
         }
         catch (Exception ex)
         {
-            _settingsService.Settings.PullToken = "";
-            _settingsService.SaveSettings();
-            Poller_OnAuthStatusChanged("");
-            TxtStatus.Text = $"Không kết nối được queue: {ex.Message}. Kiểm tra URL/user/pass rồi bấm Đăng nhập.";
+            TxtStatus.Text = $"Tự động đăng nhập chưa thành công: {ex.Message}";
+        }
+        finally
+        {
+            BtnLogin.IsEnabled = true;
         }
     }
 
@@ -239,7 +257,6 @@ public partial class MainWindow : Window
 
     private void BtnPickPoint_Click(object sender, RoutedEventArgs e)
     {
-        // Ẩn MainWindow tạm thời để chọn điểm trên toàn màn hình
         Hide();
         try
         {

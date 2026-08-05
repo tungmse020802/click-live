@@ -1,0 +1,28 @@
+<Window x:Class="AutomationDotNet.CountdownOverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Countdown Overlay"
+        Height="110" Width="300"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        Left="20" Top="20"
+        Focusable="False"
+        IsHitTestVisible="False">
+    <Grid Margin="4">
+        <TextBlock x:Name="TxtClock" 
+                   Text="--" 
+                   FontSize="36" 
+                   FontWeight="Black" 
+                   FontFamily="Consolas, SF Mono, Courier New, monospace"
+                   Foreground="#88FFFFFF"
+                   VerticalAlignment="Top"
+                   HorizontalAlignment="Left">
+            <TextBlock.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="12" ShadowDepth="3" Opacity="0.9"/>
+            </TextBlock.Effect>
+        </TextBlock>
+    </Grid>
+</Window>
