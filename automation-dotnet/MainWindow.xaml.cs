@@ -221,7 +221,7 @@ public partial class MainWindow : Window
         if (_settingsService?.Settings == null) return;
         if (sender is Button btn && int.TryParse(btn.Tag?.ToString(), out int deltaMs))
         {
-            _settingsService.Settings.DelayOffsetMs += deltaMs * 10;
+            _settingsService.Settings.DelayOffsetMs += deltaMs;
             _settingsService.SaveSettings();
             UpdateDelayLabel();
         }
