@@ -1,35 +1,31 @@
 using System.Windows;
 using System.Windows.Media;
-using System.Windows.Threading;
 using AutomationDotNet.Services;
 
 namespace AutomationDotNet;
 
 public partial class CountdownOverlayWindow : Window
 {
-    private readonly DispatcherTimer _renderTimer;
-    private DateTime? _targetTime;
+    private long? _targetAtMs;
     private bool _isActive;
+    private double _lastRenderedSec = -1;
+    private EventHandler? _renderHandler;
 
     public CountdownOverlayWindow()
     {
         InitializeComponent();
-
-        _renderTimer = new DispatcherTimer(DispatcherPriority.Render)
-        {
-            Interval = TimeSpan.FromMilliseconds(16) // ~60fps
-        };
-        _renderTimer.Tick += RenderTimer_Tick;
     }
 
-    public void StartCountdown(DateTime targetDisplayTime)
+    public void StartCountdown(long targetAtMs)
     {
-        _targetTime = targetDisplayTime;
+        _targetAtMs = targetAtMs;
         _isActive = true;
+        _lastRenderedSec = -1;
 
-        if (!_renderTimer.IsEnabled)
+        if (_renderHandler == null)
         {
-            _renderTimer.Start();
+            _renderHandler = (_, _) => UpdateDisplay();
+            CompositionTarget.Rendering += _renderHandler;
         }
 
         UpdateDisplay();
@@ -38,34 +34,40 @@ public partial class CountdownOverlayWindow : Window
     public void StopCountdown()
     {
         _isActive = false;
-        _targetTime = null;
-        _renderTimer.Stop();
+        _targetAtMs = null;
+        _lastRenderedSec = -1;
 
-        Dispatcher.Invoke(() =>
+        if (_renderHandler != null)
         {
-            TxtClock.Text = "--";
-            TxtClock.FontSize = 36;
-            TxtClock.Foreground = new SolidColorBrush(Color.FromArgb(140, 255, 255, 255));
-        });
-    }
+            CompositionTarget.Rendering -= _renderHandler;
+            _renderHandler = null;
+        }
 
-    private void RenderTimer_Tick(object? sender, EventArgs e)
-    {
-        UpdateDisplay();
+        TxtClock.Text = "--";
+        TxtClock.FontSize = 36;
+        Width = 300;
+        TxtClock.Foreground = new SolidColorBrush(Color.FromArgb(140, 255, 255, 255));
     }
 
     private void UpdateDisplay()
     {
-        if (!_isActive || !_targetTime.HasValue)
+        if (!_isActive || !_targetAtMs.HasValue)
         {
             TxtClock.Text = "--";
             TxtClock.FontSize = 36;
+            Width = 300;
             TxtClock.Foreground = new SolidColorBrush(Color.FromArgb(140, 255, 255, 255));
             return;
         }
 
-        double remainingMs = (_targetTime.Value - DateTime.Now).TotalMilliseconds;
-        double remainingSec = Math.Max(0, remainingMs / 1000.0);
+        long nowMs = TimingHelper.NowMs();
+        double remainingMs = Math.Max(0, _targetAtMs.Value - nowMs);
+        double remainingSec = remainingMs / 1000.0;
+
+        if (Math.Abs(remainingSec - _lastRenderedSec) < 0.005)
+            return;
+
+        _lastRenderedSec = remainingSec;
         bool longFormat = remainingSec >= 60;
 
         TxtClock.Text = TimingHelper.FormatRemainingSeconds(remainingSec);
@@ -74,11 +76,11 @@ public partial class CountdownOverlayWindow : Window
 
         if (remainingMs <= 0)
         {
-            TxtClock.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#4ADE80")); // Green
+            TxtClock.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#4ADE80"));
         }
         else if (remainingMs <= 3000)
         {
-            TxtClock.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FCD34D")); // Yellow
+            TxtClock.Foreground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#FCD34D"));
         }
         else
         {

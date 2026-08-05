@@ -5,13 +5,15 @@ namespace AutomationDotNet.Services;
 
 public readonly record struct ClickSchedule(
     double TotalDelayMs,
-    DateTime TargetDisplayTime,
+    long TargetAtMs,
     double DisplayRemainingMs,
     string Source);
 
 public static class TimingHelper
 {
     private const double MaxStaleMs = 3000;
+
+    public static long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     public static double ParseTimeDelayMs(string? label)
     {
@@ -53,43 +55,45 @@ public static class TimingHelper
         return remainingSec.ToString("F2");
     }
 
+    public static DateTime TargetAtMsToLocalDateTime(long targetAtMs) =>
+        DateTimeOffset.FromUnixTimeMilliseconds(targetAtMs).LocalDateTime;
+
     public static ClickSchedule ResolveSchedule(DesktopPullItem item, AppSettings settings, double leadAdvanceMs)
     {
         double offsetMs = settings.DelayOffsetMs;
-        long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        long nowMs = NowMs();
 
         double? absoluteEndMs = ParseAbsoluteTargetMs(item.TimeLabel, nowMs);
         if (absoluteEndMs is > 0 && !IsScheduleTooStale(absoluteEndMs.Value, offsetMs, nowMs))
             return BuildEndTimeSchedule(absoluteEndMs.Value, offsetMs, leadAdvanceMs, nowMs, "message_clock");
 
-        double? endMs = null;
-        string source = "";
-        if (item.EndTimeMs is > 0)
+        double? serverEndMs = item.EndTimeMs is > 0 ? NormalizeEndTimeMs(item.EndTimeMs.Value) : null;
+        if (absoluteEndMs is > 0 && serverEndMs is > 0)
         {
-            endMs = NormalizeEndTimeMs(item.EndTimeMs.Value);
-            source = absoluteEndMs is > 0 ? "junb_end_time_after_stale_clock" : "server_end_time";
+            if (!IsScheduleTooStale(serverEndMs.Value, offsetMs, nowMs))
+                return BuildEndTimeSchedule(serverEndMs.Value, offsetMs, leadAdvanceMs, nowMs, "junb_end_time_after_stale_clock");
         }
 
-        if (absoluteEndMs is > 0 && endMs is null)
+        if (absoluteEndMs is > 0)
             return BuildEndTimeSchedule(absoluteEndMs.Value, offsetMs, leadAdvanceMs, nowMs, "message_clock_stale");
 
-        if (endMs is null && item.QueuedAtMs is > 0 && item.ClickAfterMs > 0)
-        {
-            endMs = NormalizeEndTimeMs(item.QueuedAtMs.Value + item.ClickAfterMs);
-            source = "queued_click_after";
-        }
+        if (serverEndMs is > 0)
+            return BuildEndTimeSchedule(serverEndMs.Value, offsetMs, leadAdvanceMs, nowMs, "server_end_time");
 
-        if (endMs is > 0)
-            return BuildEndTimeSchedule(endMs.Value, offsetMs, leadAdvanceMs, nowMs, source);
+        if (item.QueuedAtMs is > 0 && item.ClickAfterMs > 0)
+        {
+            double endMs = NormalizeEndTimeMs(item.QueuedAtMs.Value + item.ClickAfterMs);
+            return BuildEndTimeSchedule(endMs, offsetMs, leadAdvanceMs, nowMs, "queued_click_after");
+        }
 
         double rawDelayMs = ResolveRawDelayMs(item);
         if (rawDelayMs <= 0)
             rawDelayMs = Math.Max(0, settings.DefaultWaitSec * 1000);
 
-        double displayRemainingMs = rawDelayMs + offsetMs;
+        long targetAtMs = nowMs + (long)Math.Round(rawDelayMs + offsetMs);
+        double displayRemainingMs = targetAtMs - nowMs;
         double totalDelayMs = Math.Max(0, displayRemainingMs - leadAdvanceMs);
-        var targetDisplayTime = DateTime.Now.AddMilliseconds(displayRemainingMs);
-        return new ClickSchedule(totalDelayMs, targetDisplayTime, displayRemainingMs, "click_after");
+        return new ClickSchedule(totalDelayMs, targetAtMs, displayRemainingMs, "click_after");
     }
 
     private static ClickSchedule BuildEndTimeSchedule(
@@ -99,11 +103,10 @@ public static class TimingHelper
         long nowMs,
         string source)
     {
-        double displayRemainingMs = endTimeMs - nowMs + offsetMs;
-        double targetEpochMs = endTimeMs + offsetMs;
-        var targetDisplay = DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(targetEpochMs)).LocalDateTime;
-        double totalDelayMs = Math.Max(0, endTimeMs - nowMs + offsetMs - leadAdvanceMs);
-        return new ClickSchedule(totalDelayMs, targetDisplay, displayRemainingMs, source);
+        long targetAtMs = (long)Math.Round(endTimeMs + offsetMs);
+        double displayRemainingMs = targetAtMs - nowMs;
+        double totalDelayMs = Math.Max(0, displayRemainingMs - leadAdvanceMs);
+        return new ClickSchedule(totalDelayMs, targetAtMs, displayRemainingMs, source);
     }
 
     private static double NormalizeEndTimeMs(double raw)

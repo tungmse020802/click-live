@@ -34,7 +34,7 @@ public partial class MainWindow : Window
         _poller.OnNewJobArrived += Poller_OnNewJobArrived;
         _scheduler.OnClickCompleted += Scheduler_OnClickCompleted;
 
-        _scheduler.OnCountdownStarted += targetTime => Dispatcher.Invoke(() => _overlayWindow.StartCountdown(targetTime));
+        _scheduler.OnCountdownStarted += targetAtMs => Dispatcher.Invoke(() => _overlayWindow.StartCountdown(targetAtMs));
         _scheduler.OnCountdownEnded += () => Dispatcher.Invoke(() => _overlayWindow.StopCountdown());
 
         LoadSettingsToUI();

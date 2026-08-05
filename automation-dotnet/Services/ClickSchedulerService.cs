@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using AutomationDotNet.Models;
 
 namespace AutomationDotNet.Services;
@@ -9,7 +8,7 @@ public class ClickSchedulerService
     private readonly SettingsService _settingsService;
     private CancellationTokenSource? _clickCts;
 
-    public event Action<DateTime>? OnCountdownStarted;
+    public event Action<long>? OnCountdownStarted;
     public event Action? OnCountdownEnded;
     public event Action<ClickResult>? OnClickCompleted;
 
@@ -36,18 +35,17 @@ public class ClickSchedulerService
 
                 var schedule = TimingHelper.ResolveSchedule(item, settings, leadAdvanceMs);
                 double totalDelayMs = schedule.TotalDelayMs;
-                DateTime targetDisplayTime = schedule.TargetDisplayTime;
+                long targetAtMs = schedule.TargetAtMs;
+                DateTime targetDisplayTime = TimingHelper.TargetAtMsToLocalDateTime(targetAtMs);
 
                 _logger.Log(
                     "wait",
                     $"Hẹn click sau {totalDelayMs:F0}ms ({schedule.Source})",
-                    $"Display={schedule.DisplayRemainingMs:F0}ms, Target={targetDisplayTime:HH:mm:ss.fff}, Offset={offsetMs:+0.00;-0.00;0.00}ms");
-                OnCountdownStarted?.Invoke(targetDisplayTime);
+                    $"Display={schedule.DisplayRemainingMs:F0}ms, Target={targetDisplayTime:HH:mm:ss.fff}, TargetAtMs={targetAtMs}, Offset={offsetMs:+0.00;-0.00;0.00}ms");
+                OnCountdownStarted?.Invoke(targetAtMs);
 
-                var sw = Stopwatch.StartNew();
-                double remainingMs = totalDelayMs - sw.Elapsed.TotalMilliseconds;
-
-                while (remainingMs > 0)
+                long clickAtMs = targetAtMs - (long)Math.Round(leadAdvanceMs);
+                while (TimingHelper.NowMs() < clickAtMs)
                 {
                     if (token.IsCancellationRequested)
                     {
@@ -56,24 +54,17 @@ public class ClickSchedulerService
                         return;
                     }
 
+                    long remainingMs = clickAtMs - TimingHelper.NowMs();
                     if (remainingMs > 50)
-                    {
                         await Task.Delay((int)(remainingMs - 20), token);
-                    }
                     else if (remainingMs > 5)
-                    {
                         await Task.Delay(1, token);
-                    }
                     else
-                    {
                         Thread.SpinWait(100);
-                    }
-
-                    remainingMs = totalDelayMs - sw.Elapsed.TotalMilliseconds;
                 }
 
-                sw.Stop();
-                DateTime actualClickTime = DateTime.Now;
+                long clickAtMsActual = TimingHelper.NowMs();
+                DateTime actualClickTime = TimingHelper.TargetAtMsToLocalDateTime(clickAtMsActual);
 
                 bool clicked = false;
                 if (settings.AutoClickEnabled && (settings.ClickX > 0 || settings.ClickY > 0))
@@ -86,7 +77,7 @@ public class ClickSchedulerService
                     _logger.Log("click", "Tắt tự click hoặc chưa chọn tọa độ (X=0, Y=0)");
                 }
 
-                double driftMs = (actualClickTime - targetDisplayTime).TotalMilliseconds;
+                double driftMs = clickAtMsActual - targetAtMs;
                 string driftStatus = driftMs switch
                 {
                     > 30 => $"+{driftMs:F1}ms (trễ)",
