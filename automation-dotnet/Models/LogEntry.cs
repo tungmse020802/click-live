@@ -18,4 +18,6 @@ public class LogEntry
     public string EventType { get; set; } = "info"; // poll, schedule, wait, click, error
     public string Message { get; set; } = "";
     public string Details { get; set; } = "";
+
+    public string FullLogLine => $"[{Timestamp:HH:mm:ss.fff}] [{EventType.ToUpper()}] {Message} {(string.IsNullOrEmpty(Details) ? "" : "— " + Details)}".Trim();
 }

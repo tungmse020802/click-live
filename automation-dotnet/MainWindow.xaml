@@ -168,15 +168,19 @@
                     </Grid>
 
                     <Border Background="{StaticResource InputBgBrush}" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="6" Height="200">
-                        <ListBox x:Name="LstLogs" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}" FontSize="11" FontFamily="Consolas, monospace">
+                        <ListBox x:Name="LstLogs" Background="Transparent" BorderThickness="0" Foreground="{StaticResource TextBrush}" FontSize="11" FontFamily="Consolas, monospace" HorizontalContentAlignment="Stretch">
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
-                                    <StackPanel Orientation="Horizontal" Margin="0,2">
-                                        <TextBlock Text="{Binding Timestamp, StringFormat='[{0:HH:mm:ss.fff}]'}" Foreground="#64748B" Margin="0,0,6,0"/>
-                                        <TextBlock Text="{Binding EventType, StringFormat='[{0}]'}" Foreground="{StaticResource BlueBrush}" FontWeight="Bold" Margin="0,0,6,0"/>
-                                        <TextBlock Text="{Binding Message}" Foreground="{StaticResource TextBrush}" Margin="0,0,6,0"/>
-                                        <TextBlock Text="{Binding Details}" Foreground="{StaticResource MutedBrush}"/>
-                                    </StackPanel>
+                                    <TextBox Text="{Binding FullLogLine, Mode=OneWay}" 
+                                             IsReadOnly="True" 
+                                             BorderThickness="0" 
+                                             Background="Transparent" 
+                                             Foreground="{StaticResource TextBrush}" 
+                                             FontFamily="Consolas, monospace" 
+                                             FontSize="11" 
+                                             Padding="0" 
+                                             Margin="0,1" 
+                                             SelectionBrush="#3B82F6"/>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
                         </ListBox>
