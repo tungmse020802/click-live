@@ -18,6 +18,7 @@ public class QueuePollerService
 
     public bool IsAuthenticated { get; private set; }
     public string ActiveUser { get; private set; } = "";
+    public string ActivePullToken { get; private set; } = "";
 
     public QueuePollerService(LoggerService logger)
     {
@@ -51,6 +52,7 @@ public class QueuePollerService
 
             IsAuthenticated = true;
             ActiveUser = result.User ?? username;
+            ActivePullToken = result.PullToken;
             OnAuthStatusChanged?.Invoke(ActiveUser);
             _logger.Log("auth", $"Đăng nhập thành công user={ActiveUser}");
             return true;
@@ -59,6 +61,7 @@ public class QueuePollerService
         {
             IsAuthenticated = false;
             ActiveUser = "";
+            ActivePullToken = "";
             OnAuthStatusChanged?.Invoke("");
             _logger.Log("error", "Đăng nhập thất bại", ex.Message);
             throw;
@@ -74,10 +77,13 @@ public class QueuePollerService
             return;
         }
 
+        ActivePullToken = pullToken;
         _cts = new CancellationTokenSource();
         _isPolling = true;
         var token = _cts.Token;
         var baseUri = queueUrl.TrimEnd('/');
+
+        _logger.Log("poll", "Bắt đầu kết nối polling với queue server...");
 
         Task.Run(async () =>
         {
@@ -88,17 +94,24 @@ public class QueuePollerService
                     var pollUrl = $"{baseUri}/api/desktop/pull?token={Uri.EscapeDataString(pullToken)}";
                     var data = await _client.GetFromJsonAsync<DesktopPullResponse>(pollUrl, token);
 
-                    if (data != null && data.Ok && data.Opens != null && data.Opens.Count > 0)
+                    if (data != null && data.Ok)
                     {
-                        var lastItem = data.Opens.Last();
-                        _logger.Log("poll", "Pull job mới", $"JobId={lastItem.JobId}, clickAfterMs={lastItem.ClickAfterMs}, timeLabel={lastItem.TimeLabel}");
-                        OnNewJobArrived?.Invoke(lastItem);
+                        if (data.Opens != null && data.Opens.Count > 0)
+                        {
+                            var lastItem = data.Opens.Last();
+                            _logger.Log("poll", "Pull job mới", $"JobId={lastItem.JobId}, clickAfterMs={lastItem.ClickAfterMs}, timeLabel={lastItem.TimeLabel}");
+                            OnNewJobArrived?.Invoke(lastItem);
+                        }
+                    }
+                    else if (data != null && !data.Ok)
+                    {
+                        _logger.Log("poll", "Poll bị từ chối", data.Error ?? "Unauthorized");
                     }
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
                 {
-                    _logger.Log("poll", "Poll lỗi", ex.Message);
+                    _logger.Log("poll", "Poll lỗi kết nối", ex.Message);
                 }
 
                 await Task.Delay(intervalMs, token);

@@ -107,10 +107,10 @@ public partial class MainWindow : Window
                 _settingsService.Settings.QueueUrl = url;
                 _settingsService.Settings.QueueUsername = user;
                 _settingsService.Settings.QueuePassword = pass;
-                _settingsService.Settings.PullToken = _poller.ActiveUser;
+                _settingsService.Settings.PullToken = _poller.ActivePullToken; // Real token!
                 _settingsService.SaveSettings();
 
-                _poller.StartPolling(url, _poller.ActiveUser, user);
+                _poller.StartPolling(url, _poller.ActivePullToken, user);
                 TxtStatus.Text = "Sẵn sàng — đã kết nối queue server.";
             }
         }
