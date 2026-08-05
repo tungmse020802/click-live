@@ -4,6 +4,7 @@
 [Dd]ist/
 dist-standalone/
 installer/
+ClickLiveDesktopTool-Package/
 .vs/
 *.user
 *.suo
