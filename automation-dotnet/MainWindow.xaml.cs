@@ -208,6 +208,7 @@ public partial class MainWindow : Window
             TxtResultPos.Text = $"({result.X}, {result.Y})";
             TxtResultClickedAt.Text = result.ClickedAt.ToString("HH:mm:ss.fff");
             TxtResultTarget.Text = result.TargetTime?.ToString("HH:mm:ss.fff") ?? "—";
+            TxtResultRawTime.Text = string.IsNullOrEmpty(result.RawTimeLabel) ? "—" : result.RawTimeLabel;
             TxtResultDrift.Text = $"{result.DriftMs:+0.0;-0.0;0.0}ms";
             TxtResultDrift.Foreground = (Brush)FindResource(Math.Abs(result.DriftMs) <= 30 ? "GreenBrush" : "RedBrush");
             TxtResultHint.Text = result.OffsetHint;

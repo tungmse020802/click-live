@@ -127,6 +127,7 @@
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
                                     <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
                                 </Grid.RowDefinitions>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="110"/>
@@ -142,14 +143,17 @@
                                 <TextBlock Grid.Row="2" Grid.Column="0" Text="Giờ chuẩn" Foreground="{StaticResource MutedBrush}"/>
                                 <TextBlock Grid.Row="2" Grid.Column="1" x:Name="TxtResultTarget" Text="—"/>
 
-                                <TextBlock Grid.Row="3" Grid.Column="0" Text="Lệch giờ chuẩn" Foreground="{StaticResource MutedBrush}"/>
-                                <TextBlock Grid.Row="3" Grid.Column="1" x:Name="TxtResultDrift" Text="—" FontWeight="Bold"/>
+                                <TextBlock Grid.Row="3" Grid.Column="0" Text="TIME trong tin" Foreground="{StaticResource MutedBrush}"/>
+                                <TextBlock Grid.Row="3" Grid.Column="1" x:Name="TxtResultRawTime" Text="—"/>
 
-                                <TextBlock Grid.Row="4" Grid.Column="0" Text="Gợi ý offset" Foreground="{StaticResource MutedBrush}"/>
-                                <TextBlock Grid.Row="4" Grid.Column="1" x:Name="TxtResultHint" Text="—"/>
+                                <TextBlock Grid.Row="4" Grid.Column="0" Text="Lệch giờ chuẩn" Foreground="{StaticResource MutedBrush}"/>
+                                <TextBlock Grid.Row="4" Grid.Column="1" x:Name="TxtResultDrift" Text="—" FontWeight="Bold"/>
 
-                                <TextBlock Grid.Row="5" Grid.Column="0" Text="Offset hiện tại" Foreground="{StaticResource MutedBrush}"/>
-                                <TextBlock Grid.Row="5" Grid.Column="1" x:Name="TxtResultOffset" Text="—"/>
+                                <TextBlock Grid.Row="5" Grid.Column="0" Text="Gợi ý offset" Foreground="{StaticResource MutedBrush}"/>
+                                <TextBlock Grid.Row="5" Grid.Column="1" x:Name="TxtResultHint" Text="—"/>
+
+                                <TextBlock Grid.Row="6" Grid.Column="0" Text="Offset hiện tại" Foreground="{StaticResource MutedBrush}"/>
+                                <TextBlock Grid.Row="6" Grid.Column="1" x:Name="TxtResultOffset" Text="—"/>
                             </Grid>
                         </Border>
                     </StackPanel>
