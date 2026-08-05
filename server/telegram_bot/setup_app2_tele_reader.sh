@@ -24,14 +24,15 @@ ENV_MAIN="${ENV_MAIN:-.env}"
 PHONE="${TELEGRAM_PHONE_APP2:-+84567660222}"
 API_ID="${TELEGRAM_API_ID_APP2:-34689959}"
 API_HASH="${TELEGRAM_API_HASH_APP2:-7d02feb77b3fad33fbe5aafbdba59e2d}"
-TARGETS="${TELEGRAM_CLIENT_TARGETS_APP2:-}"
+TARGETS="${TELEGRAM_CLIENT_TARGETS_APP2:-OliverNguyen|#-3734576353;OliverNguyen_2|#-3832976333;OliverNguyen_4|#-3800124066;OliverNguyen_3|#-3619339043}"
 
 if [[ -z "$TARGETS" && -f "$ENV_MAIN" ]]; then
   # shellcheck disable=SC1090
   source "$ENV_MAIN"
-  TARGETS="${TELEGRAM_CLIENT_TARGETS:-}"
+  # Acc app-2 (hipzp) thường ở nhóm OliverNguyen — khác app-1 nếu chưa copy từ .env
+  TARGETS="${TELEGRAM_CLIENT_TARGETS_APP2:-${TELEGRAM_WEB_TARGETS:-${TELEGRAM_CLIENT_TARGETS:-}}}"
   if [[ -n "$TARGETS" ]]; then
-    echo "Dùng TELEGRAM_CLIENT_TARGETS từ $ENV_MAIN (đổi TELEGRAM_CLIENT_TARGETS_APP2 nếu acc-2 vào nhóm khác)"
+    echo "Targets từ env (đổi TELEGRAM_CLIENT_TARGETS_APP2 nếu acc-2 vào nhóm khác)"
   fi
 fi
 
