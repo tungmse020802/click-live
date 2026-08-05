@@ -49,3 +49,27 @@ wda_control_panel/node_modules/
 # iOS app build artifacts
 ios_tiktok_agent/build-queue/
 ios_tiktok_agent/build-signed/
+
+# .NET Core / WPF
+[Bb]in/
+[Oo]bj/
+[Dd]ist/
+.vs/
+*.user
+*.suo
+
+# CodeGraph & temp database files
+*.codegraph
+*.codegraph-shm
+*.codegraph-wal
+.codegraph/*
+!.codegraph/.gitignore
+
+# Backup & temporary server files
+*.bak*
+*.server
+server/telegram_bot/data.backup.*/
+profile_playwright/*.json
+
+# Zip archives
+*.zip

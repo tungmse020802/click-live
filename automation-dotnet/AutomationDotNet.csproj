@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <Title>Click Live Desktop Tool (.NET Core Native)</Title>
+    <Authors>ClickLive Team</Authors>
+    <Product>Click Live Desktop Automation Tool</Product>
+    <Description>Native .NET 8 WPF Desktop Tool for high-precision timing and auto-clicking</Description>
+  </PropertyGroup>
+
+</Project>

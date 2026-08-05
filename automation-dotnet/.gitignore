@@ -1,0 +1,10 @@
+# .NET / WPF Build and Publish Artifacts
+[Bb]in/
+[Oo]bj/
+[Dd]ist/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.zip

@@ -79,7 +79,97 @@ def _load_queue_html() -> str:
     return template.replace("__LOGOUT_SCRIPT__", LOGOUT_SCRIPT)
 
 
-def _enrich_queue_item(item: Dict[str, Any]) -> Dict[str, Any]:
+def _is_numeric_chat_id(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(text) and text.lstrip("-").isdigit()
+
+
+def _chat_id_aliases(chat_id: str) -> set[str]:
+    from config import _telegram_client_entity_ref, normalize_client_chat_ref
+
+    aliases: set[str] = set()
+    raw = str(chat_id or "").strip()
+    if not raw:
+        return aliases
+    normalized = normalize_client_chat_ref(raw)
+    if normalized:
+        aliases.add(normalized)
+        aliases.add(_telegram_client_entity_ref(normalized))
+    if raw.startswith("-100") and len(raw) > 4:
+        aliases.add("-" + raw[4:])
+    elif raw.startswith("-") and not raw.startswith("-100"):
+        aliases.add("-100" + raw[1:])
+    aliases.discard("")
+    return aliases
+
+
+def _watch_group_name_lookup(watch_groups: List[Dict[str, Any]]) -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    for group in watch_groups:
+        name = str(group.get("name") or "").strip()
+        if not name or _is_numeric_chat_id(name):
+            continue
+        for alias in _chat_id_aliases(str(group.get("chat_id") or "")):
+            lookup[alias] = name
+    return lookup
+
+
+def _resolve_room_display_name(
+    room: Dict[str, Any],
+    payload: Dict[str, Any],
+    name_lookup: Dict[str, str],
+) -> str:
+    target_label = str(payload.get("target_label") or "").strip()
+    if target_label and not _is_numeric_chat_id(target_label):
+        return target_label
+
+    room_title = str(room.get("title") or "").strip()
+    if room_title and not _is_numeric_chat_id(room_title):
+        return room_title
+
+    chat_id = str(room.get("chat_id") or "").strip()
+    for alias in _chat_id_aliases(chat_id):
+        if alias in name_lookup:
+            return name_lookup[alias]
+    if room_title in name_lookup:
+        return name_lookup[room_title]
+
+    if target_label:
+        return target_label
+    if room_title:
+        return room_title
+    if chat_id:
+        return chat_id
+    return "Nhóm"
+
+
+def _watch_groups_summary(watch_groups: List[Dict[str, Any]]) -> Dict[str, Any]:
+    enabled = [g for g in watch_groups if g.get("enabled", True)]
+    by_reader: Dict[str, List[str]] = {}
+    labels: List[str] = []
+    seen: set[str] = set()
+    for group in enabled:
+        name = str(group.get("name") or "").strip()
+        chat_id = str(group.get("chat_id") or "").strip()
+        label = name if name and not _is_numeric_chat_id(name) else chat_id
+        reader_id = str(group.get("reader_id") or "app1").strip() or "app1"
+        by_reader.setdefault(reader_id, []).append(label)
+        if label not in seen:
+            seen.add(label)
+            labels.append(label)
+    return {
+        "total": len(watch_groups),
+        "enabled": len(enabled),
+        "labels": labels,
+        "by_reader": by_reader,
+    }
+
+
+def _enrich_queue_item(
+    item: Dict[str, Any],
+    *,
+    name_lookup: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     payload = item.get("payload") or {}
     message = item.get("message") or {}
     message_text = str(message.get("text") or "")
@@ -126,6 +216,13 @@ def _enrich_queue_item(item: Dict[str, Any]) -> Dict[str, Any]:
             pass
     if junb_end_time_ms is not None:
         enriched["junb_end_time_ms"] = int(junb_end_time_ms)
+    if name_lookup is not None:
+        room = dict(enriched.get("room") or {})
+        display_name = _resolve_room_display_name(room, payload, name_lookup)
+        room["display_name"] = display_name
+        if not room.get("title") or _is_numeric_chat_id(str(room.get("title") or "")):
+            room["title"] = display_name
+        enriched["room"] = room
     return enriched
 
 
@@ -234,11 +331,13 @@ FILTERS_HTML = r"""<!doctype html>
     <header class="topbar">
       <div class="topbar-main">
         <button type="button" id="headerCollapseBtn" class="button header-collapse-btn" title="Thu gọn header" aria-expanded="true">▲</button>
-        <div class="brand"><h1>Setup Filter</h1><span id="filterPath"></span></div>
+        <div class="brand"><h1>Setup System Filter</h1><span id="filterPath"></span></div>
       </div>
       <div class="toolbar header-collapsible">
         <div id="filterReaderTabs" style="display:flex;gap:8px;flex-wrap:wrap;margin-right:8px;"></div>
         <button id="queueBtn" class="button">Hàng đợi</button>
+        <button id="systemFiltersBtn" class="button primary">Lọc System</button>
+        <button id="clientFiltersBtn" class="button">Lọc Client</button>
         <button id="reloadBtn" class="button">Tải lại</button>
         <button id="saveBtn" class="button primary">Lưu</button>
         <button id="logoutBtn" class="button">Đăng xuất</button>
@@ -488,13 +587,14 @@ FILTERS_HTML = r"""<!doctype html>
       }
       els.listenGroupGrid.innerHTML = state.watchGroups.map((group) => {
         const chatId = String(group.chat_id || '');
-        const name = esc(group.name || chatId);
+        const name = String(group.name || '').trim();
+        const label = name && !/^-?\d+$/.test(name) ? name : (name || chatId);
         const reader = esc(readerLabel(group.reader_id || 'app1'));
         const listening = !excluded.has(chatId);
         const checked = listening ? 'checked' : '';
         const cls = listening ? 'group-card on' : 'group-card off';
         const badge = listening ? '<span class="group-badge on">Đang bật</span>' : '<span class="group-badge off">Tắt</span>';
-        return `<label class="${cls}"><input type="checkbox" value="${esc(chatId)}" ${checked}><div class="group-card-body"><div class="group-card-top"><div class="group-card-name">${name}</div>${badge}</div><div class="group-card-id">${reader} · ${esc(chatId)}</div></div></label>`;
+        return `<label class="${cls}" title="${esc(chatId)}"><input type="checkbox" value="${esc(chatId)}" ${checked}><div class="group-card-body"><div class="group-card-top"><div class="group-card-name">${esc(label)}</div>${badge}</div><div class="group-card-id">${reader}</div></div></label>`;
       }).join('');
       els.listenGroupGrid.querySelectorAll('input[type=checkbox]').forEach((input) => {
         input.addEventListener('change', () => {
@@ -590,7 +690,7 @@ FILTERS_HTML = r"""<!doctype html>
         const res = await fetch('/api/watch-groups?_=' + Date.now(), { cache:'no-store' });
         const data = await res.json();
         state.readers = data.readers || state.readers;
-        state.watchGroups = (data.groups || []).filter((g) => g.enabled !== false && (g.reader_id || 'app1') === state.readerId);
+        state.watchGroups = (data.groups || []).filter((g) => g.enabled !== false);
       } catch (_) {
         state.watchGroups = [];
       }
@@ -669,6 +769,8 @@ FILTERS_HTML = r"""<!doctype html>
       });
     })();
     $('queueBtn').addEventListener('click', () => window.location.href = '/');
+    $('systemFiltersBtn')?.addEventListener('click', () => window.location.href = '/filters');
+    $('clientFiltersBtn')?.addEventListener('click', () => window.location.href = '/client-filters');
     $('reloadBtn').addEventListener('click', () => loadFilters().catch((err) => els.status.textContent = err.message));
     $('saveBtn').addEventListener('click', () => saveFilters().catch((err) => els.status.textContent = err.message));
     $('addBtn').addEventListener('click', () => { syncFormToFilter(); state.filters.push(newFilter()); state.selected = state.filters.length - 1; render(); els.status.textContent = 'Đã thêm'; });
@@ -700,6 +802,43 @@ FILTERS_HTML = r"""<!doctype html>
 </body>
 </html>
 """
+
+CLIENT_FILTERS_HTML = (
+    FILTERS_HTML.replace("<title>Setup Filter</title>", "<title>Setup Client Filter (Lọc Trình Duyệt)</title>")
+    .replace("<h1>Setup System Filter</h1>", "<h1>Setup Client Filter</h1>")
+    .replace(
+        '<div id="filterReaderTabs" style="display:flex;gap:8px;flex-wrap:wrap;margin-right:8px;"></div>',
+        '<div id="filterReaderTabs" style="display:none;"></div>',
+    )
+    .replace(
+        '<button id="systemFiltersBtn" class="button primary">Lọc System</button>',
+        '<button id="systemFiltersBtn" class="button">Lọc System</button>',
+    )
+    .replace(
+        '<button id="clientFiltersBtn" class="button">Lọc Client</button>',
+        '<button id="clientFiltersBtn" class="button primary">Lọc Client</button>',
+    )
+    .replace(
+        "fetch('/api/filters?reader_id=' + encodeURIComponent(state.readerId) + '&_=' + Date.now(), { cache:'no-store' });",
+        "fetch('/api/client-filters?_=' + Date.now(), { cache:'no-store' });",
+    )
+    .replace(
+        "fetch('/api/filters', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ reader_id: state.readerId, filters:state.filters, reject:state.reject, exclude_telegram_groups:state.excludeGroups }) });",
+        "fetch('/api/client-filters', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ filters:state.filters, reject:state.reject, exclude_telegram_groups:state.excludeGroups }) });",
+    )
+    .replace(
+        "els.path.textContent = `${state.path} · ${readerLabel(state.readerId)}`;",
+        "els.path.textContent = `${state.path} · Client (trình duyệt)`;",
+    )
+    .replace(
+        "els.status.textContent = `Đã tải ${state.filters.length} bộ lọc (${state.readerId})`",
+        "els.status.textContent = `Đã tải ${state.filters.length} bộ lọc Client`",
+    )
+    .replace(
+        "els.status.textContent = `Đã lưu ${state.filters.length} bộ lọc (${state.readerId})`",
+        "localStorage.setItem('click-live-client-filters', JSON.stringify(data)); els.status.textContent = `Đã lưu ${state.filters.length} bộ lọc Client`",
+    )
+)
 
 BROADCAST_HTML = r"""<!doctype html>
 <html lang="vi">
@@ -1590,6 +1729,63 @@ PHONE_MONITOR_HTML = r"""<!doctype html>
 </html>
 """
 
+CLIENT_FILTERS_PATH = Path("data/client_message_filters.json")
+
+
+def _load_client_filters_data() -> Dict[str, Any]:
+    if not CLIENT_FILTERS_PATH.exists():
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "path": str(CLIENT_FILTERS_PATH),
+            "enabled": True,
+            "filters": [],
+            "reject": [],
+            "exclude_telegram_groups": [],
+        }
+    try:
+        with open(CLIENT_FILTERS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return {
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "path": str(CLIENT_FILTERS_PATH),
+                    "enabled": bool(data.get("enabled", True)),
+                    "filters": data.get("filters") if isinstance(data.get("filters"), list) else [],
+                    "reject": data.get("reject") if isinstance(data.get("reject"), list) else [],
+                    "exclude_telegram_groups": data.get("exclude_telegram_groups") if isinstance(data.get("exclude_telegram_groups"), list) else [],
+                }
+    except Exception:
+        pass
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "path": str(CLIENT_FILTERS_PATH),
+        "enabled": True,
+        "filters": [],
+        "reject": [],
+        "exclude_telegram_groups": [],
+    }
+
+
+def _save_client_filters_data(payload: Dict[str, Any]) -> Dict[str, Any]:
+    CLIENT_FILTERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    filters = _normalize_filter_rules(payload.get("filters", []))
+    reject = _normalize_reject_rules(payload.get("reject", [])) if "reject" in payload else []
+    exclude_groups = _normalize_exclude_groups(payload.get("exclude_telegram_groups", [])) if "exclude_telegram_groups" in payload else []
+    data = {
+        "enabled": bool(payload.get("enabled", True)),
+        "filters": filters,
+        "reject": reject,
+        "exclude_telegram_groups": exclude_groups,
+    }
+    with open(CLIENT_FILTERS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "path": str(CLIENT_FILTERS_PATH),
+        **data,
+    }
+
+
 class QueueUiHandler(BaseHTTPRequestHandler):
     db: ChatDatabase
     config: QueueUiConfig
@@ -1744,6 +1940,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_headers("text/html; charset=utf-8", len(FILTERS_HTML.encode("utf-8")))
             return
 
+        if parsed.path == "/client-filters":
+            self._send_headers("text/html; charset=utf-8", len(CLIENT_FILTERS_HTML.encode("utf-8")))
+            return
+
         if parsed.path == "/broadcast":
             self._send_headers("text/html; charset=utf-8", len(BROADCAST_HTML.encode("utf-8")))
             return
@@ -1773,6 +1973,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/filters":
+            self._send_headers("application/json; charset=utf-8", 0)
+            return
+
+        if parsed.path == "/api/client-filters":
             self._send_headers("application/json; charset=utf-8", 0)
             return
 
@@ -1837,15 +2041,19 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/":
-            self._send_html(HTML)
+            self._send_html(_load_queue_html())
             return
 
         if parsed.path == "/desktop-tool":
-            self._send_html(HTML)
+            self._send_html(_load_queue_html())
             return
 
         if parsed.path == "/filters":
             self._send_html(FILTERS_HTML)
+            return
+
+        if parsed.path == "/client-filters":
+            self._send_html(CLIENT_FILTERS_HTML)
             return
 
         if parsed.path == "/broadcast":
@@ -1884,6 +2092,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             reader_id = str((query.get("reader_id") or ["app1"])[0]).strip() or "app1"
             self._send_json(self._filters_snapshot(reader_id=reader_id))
+            return
+
+        if parsed.path == "/api/client-filters":
+            self._send_json(_load_client_filters_data())
             return
 
         if parsed.path == "/api/broadcast-groups":
@@ -1975,6 +2187,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/filters":
             self._save_filters()
+            return
+
+        if parsed.path == "/api/client-filters":
+            self._save_client_filters()
             return
 
         if parsed.path == "/api/broadcast-groups":
@@ -2387,11 +2603,15 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         requested_limit = _int_query(query, "limit", self.config.limit)
         limit = min(requested_limit, self.config.limit)
         statuses = _statuses_query(query)
+        group = (query.get("group") or [""])[0].strip() or None
         items = self.db.get_queue_items(
             limit=limit,
             statuses=statuses or None,
+            group=group or None,
         )
-        items = [_enrich_queue_item(item) for item in items]
+        watch_groups = self.db.list_watch_groups()
+        name_lookup = _watch_group_name_lookup(watch_groups)
+        items = [_enrich_queue_item(item, name_lookup=name_lookup) for item in items]
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "db_path": self.config.db_path,
@@ -2403,6 +2623,9 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             "latest_pending_id": _latest_pending_id(items),
             "stats": self.db.get_queue_stats(),
             "items": items,
+            "watch_groups": watch_groups,
+            "watch_summary": _watch_groups_summary(watch_groups),
+            "readers": TELEGRAM_READERS,
         }
 
     def _prune_queue_ttl(self) -> None:
@@ -2411,6 +2634,12 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             return
         QueueUiHandler._last_queue_prune_at = now
         deleted = self.db.prune_queue_older_than(self.config.queue_ttl_seconds)
+        try:
+            synced = self.db.sync_room_titles_from_watch_groups()
+            if synced:
+                logger.info("Synced %s chat room titles from watch groups", synced)
+        except Exception:
+            logger.exception("Failed to sync chat room titles from watch groups")
         if deleted["queue"] or deleted["messages"]:
             logger.info(
                 "Pruned queue TTL queue=%s messages=%s ttl=%ss",
@@ -2914,6 +3143,17 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=400)
             return
         self._send_json(result)
+
+    def _save_client_filters(self) -> None:
+        try:
+            payload = self._read_json_body()
+            saved = _save_client_filters_data(payload)
+            self._send_json(saved)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, status=400)
+        except Exception as exc:
+            logger.exception("Failed to save client filters")
+            self._send_json({"error": str(exc)}, status=500)
 
     def _save_filters(self) -> None:
         try:

@@ -817,6 +817,38 @@ class ChatDatabase:
             self.set_watch_group_bots(chat_id, bot_ids)
         return self.list_watch_groups(reader_id=reader_id)
 
+    def sync_room_titles_from_watch_groups(self) -> int:
+        from config import _telegram_client_entity_ref, normalize_client_chat_ref
+
+        updated = 0
+        now = _now()
+        for group in self.list_watch_groups():
+            if not group.get("enabled", True):
+                continue
+            name = str(group.get("name") or "").strip()
+            if not name or name.lstrip("-").isdigit():
+                continue
+            chat_ref = normalize_client_chat_ref(str(group.get("chat_id") or ""))
+            aliases = {chat_ref, _telegram_client_entity_ref(chat_ref)}
+            if chat_ref.startswith("-100") and len(chat_ref) > 4:
+                aliases.add("-" + chat_ref[4:])
+            elif chat_ref.startswith("-") and not chat_ref.startswith("-100"):
+                aliases.add("-100" + chat_ref[1:])
+            aliases.discard("")
+            with self._connect() as conn:
+                for alias in aliases:
+                    cursor = conn.execute(
+                        """
+                        UPDATE chat_rooms
+                        SET title = ?, updated_at = ?
+                        WHERE chat_id = ?
+                          AND (title IS NULL OR title = '' OR title = chat_id OR title GLOB '-[0-9]*')
+                        """,
+                        (name, now, alias),
+                    )
+                    updated += int(cursor.rowcount or 0)
+        return updated
+
     def list_reader_group_filter_map(self) -> Dict[tuple, Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -1444,13 +1476,20 @@ class ChatDatabase:
         self,
         limit: int,
         statuses: Optional[List[str]] = None,
+        group: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         params: List[Any] = []
-        status_clause = ""
+        where_clauses: List[str] = []
         if statuses:
             placeholders = ", ".join("?" for _ in statuses)
-            status_clause = f"WHERE q.status IN ({placeholders})"
+            where_clauses.append(f"q.status IN ({placeholders})")
             params.extend(statuses)
+
+        if group:
+            where_clauses.append("(r.chat_id = ? OR r.title = ? OR CAST(r.id AS TEXT) = ?)")
+            params.extend([group, group, group])
+
+        status_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
         params.append(limit)
         with self._connect() as conn:

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#17212b">
-  <meta name="click-live-queue-version" content="countdown-href-v2">
+  <meta name="click-live-queue-version" content="group-name-display-v4">
   <title>Hàng đợi — Telegram</title>
   <style>
     :root {
@@ -45,6 +45,15 @@
       overflow: hidden;
     }
 
+    .queue-subheader {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      border-bottom: 1px solid var(--tg-border);
+      background: var(--tg-panel);
+    }
+
     .topbar {
       display: flex;
       align-items: center;
@@ -79,8 +88,107 @@
     .shell.header-collapsed .stats-bar,
     .shell.header-collapsed .toolbar,
     .shell.header-collapsed .live-status,
-    .shell.header-collapsed .brand .sub {
+    .shell.header-collapsed .brand .sub,
+    .shell.header-collapsed .group-filter-bar {
       display: none !important;
+    }
+
+    .shell.header-collapsed .queue-subheader {
+      border-bottom: 0;
+    }
+
+    .group-filter-bar {
+      display: flex;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 8px 12px;
+      background: #131c27;
+      border-top: 1px solid var(--tg-border);
+      width: 100%;
+      max-width: 100%;
+      box-sizing: border-box;
+      font-size: 12px;
+    }
+    .group-filter-title {
+      font-weight: 600;
+      color: var(--tg-muted);
+      font-size: 12px;
+      white-space: nowrap;
+      flex: 0 0 auto;
+      line-height: 28px;
+    }
+    .group-checkbox-list {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      flex: 1 1 240px;
+      min-width: 0;
+    }
+    .group-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      flex: 0 0 auto;
+      max-width: min(100%, 280px);
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--tg-input);
+      border: 1px solid var(--tg-border);
+      color: var(--tg-muted);
+      font-size: 12px;
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    .group-chip-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
+    .group-chip-reader {
+      opacity: 0.72;
+      font-size: 10px;
+      font-weight: 600;
+      flex: 0 0 auto;
+    }
+    .group-chip:hover {
+      background: #2a3746;
+      color: var(--tg-text);
+    }
+    .group-chip.active {
+      background: rgba(82, 136, 193, 0.25);
+      border-color: var(--tg-accent);
+      color: #9ecbfa;
+      font-weight: 600;
+    }
+    .group-chip input[type="checkbox"] {
+      cursor: pointer;
+      accent-color: var(--tg-accent);
+      margin: 0;
+      width: 14px;
+      height: 14px;
+    }
+    .group-filter-actions {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .chip-btn {
+      height: 26px;
+      padding: 0 8px;
+      border-radius: 6px;
+      border: 1px solid var(--tg-border);
+      background: var(--tg-input);
+      color: var(--tg-muted);
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .chip-btn:hover {
+      background: #2a3746;
+      color: var(--tg-text);
     }
 
     .shell.header-collapsed .topbar {
@@ -407,7 +515,9 @@
         </select>
         <label class="checkbox"><input id="autoRefresh" type="checkbox" checked> Live</label>
         <button id="reloadBtn" class="button" title="Tải lại">↻</button>
-        <button id="filtersBtn" class="button">Lọc</button>
+        <button id="systemFiltersBtn" class="button" title="Lọc Ingestion Backend">Lọc System</button>
+        <button id="clientFiltersBtn" class="button" title="Lọc UI Trình Duyệt">Lọc Client</button>
+        <label class="group-chip active" style="margin:0 4px; padding:3px 8px; font-weight:600;" title="Bật/Tắt Lọc Client trên UI"><input type="checkbox" id="clientFilterToggle" checked> Lọc Client</label>
         <button id="watchBtn" class="button">Theo dõi</button>
         <button id="phoneBtn" class="button">Điện thoại</button>
         <button id="nextPhoneBtn" class="button primary">Tin mới nhất</button>
@@ -416,7 +526,17 @@
       <div class="live-status" id="liveStatus">Đang khởi động...</div>
     </header>
 
-    <div class="stats-bar" id="stats"></div>
+    <div class="queue-subheader">
+      <div class="stats-bar" id="stats"></div>
+      <div class="group-filter-bar" id="groupFilterBar" style="display: none;">
+        <span class="group-filter-title">Hiển thị nhóm:</span>
+        <div class="group-checkbox-list" id="groupCheckboxList"></div>
+        <div class="group-filter-actions">
+          <button type="button" class="chip-btn" id="selectAllGroupsBtn">Tất cả</button>
+          <button type="button" class="chip-btn" id="deselectAllGroupsBtn">Bỏ chọn</button>
+        </div>
+      </div>
+    </div>
 
     <main class="chat-shell">
       <div class="chat-feed" id="chatFeed">
@@ -436,6 +556,9 @@
 
     const state = {
       items: [],
+      watchGroups: [],
+      disabledGroupKeys: null,
+      lastData: null,
       selectedId: null,
       timer: null,
       refreshSeconds: MIN_REFRESH_SECONDS,
@@ -453,18 +576,89 @@
     };
 
     const els = {
-      dbPath: document.getElementById('dbPath'),
-      stats: document.getElementById('stats'),
-      feed: document.getElementById('chatFeed'),
-      empty: document.getElementById('emptyState'),
-      status: document.getElementById('statusFilter'),
-      limit: document.getElementById('limitFilter'),
-      auto: document.getElementById('autoRefresh'),
-      reload: document.getElementById('reloadBtn'),
-      liveStatus: document.getElementById('liveStatus'),
-      jumpNewestBtn: document.getElementById('jumpNewestBtn'),
-      jumpNewestCount: document.getElementById('jumpNewestCount')
+      get dbPath() { return document.getElementById('dbPath'); },
+      get stats() { return document.getElementById('stats'); },
+      get feed() { return document.getElementById('chatFeed'); },
+      get empty() { return document.getElementById('emptyState'); },
+      get groupFilterBar() { return document.getElementById('groupFilterBar'); },
+      get groupCheckboxList() { return document.getElementById('groupCheckboxList'); },
+      get selectAllGroupsBtn() { return document.getElementById('selectAllGroupsBtn'); },
+      get deselectAllGroupsBtn() { return document.getElementById('deselectAllGroupsBtn'); },
+      get status() { return document.getElementById('statusFilter'); },
+      get limit() { return document.getElementById('limitFilter'); },
+      get auto() { return document.getElementById('autoRefresh'); },
+      get reload() { return document.getElementById('reloadBtn'); },
+      get liveStatus() { return document.getElementById('liveStatus'); },
+      get systemFiltersBtn() { return document.getElementById('systemFiltersBtn'); },
+      get clientFiltersBtn() { return document.getElementById('clientFiltersBtn'); },
+      get clientFilterToggle() { return document.getElementById('clientFilterToggle'); },
+      get jumpNewestBtn() { return document.getElementById('jumpNewestBtn'); },
+      get jumpNewestCount() { return document.getElementById('jumpNewestCount'); }
     };
+
+    function isNumericId(value) {
+      const text = String(value || '').trim();
+      return text !== '' && /^-?\d+$/.test(text);
+    }
+
+    function chatIdAliases(chatId) {
+      const aliases = new Set();
+      const raw = String(chatId || '').trim();
+      if (!raw) return aliases;
+      let normalized = raw.replace(/^#+/, '');
+      aliases.add(normalized);
+      if (normalized.startsWith('-100') && normalized.length > 4) {
+        aliases.add('-' + normalized.slice(4));
+      } else if (normalized.startsWith('-') && !normalized.startsWith('-100')) {
+        aliases.add('-100' + normalized.slice(1));
+      }
+      aliases.add('-100' + normalized.replace(/^-/, ''));
+      return aliases;
+    }
+
+    function buildGroupNameLookup(watchGroups = []) {
+      const lookup = new Map();
+      (watchGroups || []).forEach((group) => {
+        const name = String(group.name || '').trim();
+        if (!name || isNumericId(name)) return;
+        chatIdAliases(group.chat_id).forEach((alias) => lookup.set(alias, name));
+      });
+      return lookup;
+    }
+
+    function resolveGroupLabel({ name = '', chatId = '', title = '', targetLabel = '' }, lookup) {
+      const cleanTarget = String(targetLabel || '').trim();
+      if (cleanTarget && !isNumericId(cleanTarget)) return cleanTarget;
+      const cleanName = String(name || '').trim();
+      if (cleanName && !isNumericId(cleanName)) return cleanName;
+      const cleanTitle = String(title || '').trim();
+      for (const alias of chatIdAliases(chatId || cleanTitle)) {
+        if (lookup.has(alias)) return lookup.get(alias);
+      }
+      if (cleanTitle && !isNumericId(cleanTitle)) return cleanTitle;
+      if (cleanName) return cleanName;
+      if (cleanTarget) return cleanTarget;
+      return chatId || cleanTitle || 'Nhóm';
+    }
+
+    function formatWatchSummary(summary, readers = []) {
+      if (!summary) return '';
+      const enabled = Number(summary.enabled || 0);
+      const labels = Array.isArray(summary.labels) ? summary.labels.filter(Boolean) : [];
+      if (!enabled) return 'Chưa có nhóm đang theo dõi';
+      const preview = labels.slice(0, 4).join(', ');
+      const more = labels.length > 4 ? ` +${labels.length - 4}` : '';
+      const readerMap = Object.fromEntries((readers || []).map((r) => [r.id, r.label || r.id]));
+      const byReader = summary.by_reader || {};
+      const readerParts = Object.entries(byReader).map(([id, names]) => {
+        const readerLabel = readerMap[id] || id;
+        const list = (names || []).slice(0, 3).join(', ');
+        const extra = (names || []).length > 3 ? ` +${names.length - 3}` : '';
+        return `${readerLabel}: ${list}${extra}`;
+      });
+      const readerNote = readerParts.length ? ` · ${readerParts.join(' | ')}` : '';
+      return `${enabled} nhóm · ${preview}${more}${readerNote}`;
+    }
 
     function esc(value) {
       return String(value ?? '')
@@ -570,7 +764,15 @@
 
     function roomLabel(item) {
       const room = item.room || {};
-      return room.title || room.chat_id || 'Nhóm';
+      const payload = item.payload || {};
+      const lookup = state.groupNameLookup || buildGroupNameLookup(state.watchGroups);
+      if (room.display_name) return room.display_name;
+      return resolveGroupLabel({
+        name: room.title,
+        chatId: room.chat_id,
+        title: room.title,
+        targetLabel: payload.target_label,
+      }, lookup);
     }
 
     function decodeHtmlUrl(url) {
@@ -990,8 +1192,11 @@
         : (state.queueUsername ? `Desktop ${state.queueUsername} ✗` : 'Desktop ✗');
       const ttlMin = Math.round((state.queueTtlSeconds || 1800) / 60);
       const shown = getDisplayItems().length;
+      const watchNote = state.watchSummary?.enabled
+        ? ` · theo dõi ${state.watchSummary.enabled} nhóm`
+        : '';
       const buffered = state.newArrivalCount > 0 ? ` · +${state.newArrivalCount} tin mới (bấm ↑)` : '';
-      els.liveStatus.textContent = `${dot} · ${t} · ${shown} tin${buffered} · giữ ${ttlMin} phút · Mở link → desktop + deeplink điện thoại`;
+      els.liveStatus.textContent = `${dot} · ${t} · ${shown} tin${watchNote}${buffered} · giữ ${ttlMin} phút · Mở link → desktop + deeplink điện thoại`;
     }
 
     function sortedItems(items = state.items) {
@@ -1003,9 +1208,282 @@
       return sorted[0]?.id || 0;
     }
 
+    function loadDisabledGroupKeys() {
+      try {
+        localStorage.removeItem('click-live-selected-group-keys');
+        localStorage.removeItem('click-live-group-filter');
+        const saved = localStorage.getItem('click-live-disabled-group-keys');
+        if (saved) {
+          const arr = JSON.parse(saved);
+          if (Array.isArray(arr)) return new Set(arr);
+        }
+      } catch {}
+      return new Set();
+    }
+
+    function saveDisabledGroupKeys() {
+      if (!state.disabledGroupKeys) return;
+      localStorage.setItem('click-live-disabled-group-keys', JSON.stringify([...state.disabledGroupKeys]));
+    }
+
+    function itemMatchesGroup(item) {
+      if (!state.disabledGroupKeys || state.disabledGroupKeys.size === 0) return true;
+      const room = item.room || {};
+      const chatId = String(room.chat_id || '').trim();
+      const title = String(room.title || room.display_name || '').trim();
+      const aliases = new Set([...chatIdAliases(chatId), ...chatIdAliases(title)]);
+      for (const alias of aliases) {
+        if (state.disabledGroupKeys.has(alias)) return false;
+      }
+      const itemAliases = aliases;
+      for (const g of state.watchGroups || []) {
+        const groupAliases = [...chatIdAliases(g.chat_id)];
+        const disabled = groupAliases.some((key) => state.disabledGroupKeys.has(key))
+          || state.disabledGroupKeys.has(String(g.chat_id || '').trim())
+          || state.disabledGroupKeys.has(String(g.name || '').trim());
+        if (!disabled) continue;
+        if (groupAliases.some((ga) => itemAliases.has(ga))) return false;
+      }
+      return true;
+    }
+
+    function updateGroupCheckboxes(watchGroups = [], items = []) {
+      if (!els.groupFilterBar || !els.groupCheckboxList) return;
+
+      state.groupNameLookup = buildGroupNameLookup(watchGroups);
+      const groupsMap = new Map();
+
+      (watchGroups || []).filter((g) => g.enabled !== false).forEach((g) => {
+        const chatId = String(g.chat_id || '').trim();
+        const name = String(g.name || '').trim();
+        const readerId = String(g.reader_id || 'app1').trim() || 'app1';
+        const readerLabel = (state.readers || []).find((r) => r.id === readerId)?.label || readerId;
+        const label = resolveGroupLabel({ name, chatId }, state.groupNameLookup);
+        const key = chatId || label;
+        if (!key) return;
+        groupsMap.set(key, {
+          key,
+          label,
+          readerLabel,
+          name,
+          chat_id: chatId,
+          aliases: [...chatIdAliases(chatId)],
+        });
+      });
+
+      (items || []).forEach((item) => {
+        const room = item.room || {};
+        const payload = item.payload || {};
+        const chatId = String(room.chat_id || '').trim();
+        const title = String(room.title || room.display_name || '').trim();
+        const label = resolveGroupLabel({
+          name: title,
+          chatId,
+          title,
+          targetLabel: payload.target_label,
+        }, state.groupNameLookup);
+        const itemAliases = [...chatIdAliases(chatId), ...chatIdAliases(title)];
+        let matched = false;
+        for (const group of groupsMap.values()) {
+          if (group.aliases.some((alias) => itemAliases.includes(alias))) {
+            if (label && !isNumericId(label)) group.label = label;
+            matched = true;
+            break;
+          }
+        }
+        if (matched) return;
+        const key = chatId || label;
+        if (!key || groupsMap.has(key)) return;
+        groupsMap.set(key, {
+          key,
+          label,
+          readerLabel: '',
+          name: label,
+          chat_id: chatId,
+          aliases: itemAliases,
+        });
+      });
+
+      const allGroups = Array.from(groupsMap.values()).sort((a, b) => a.label.localeCompare(b.label, 'vi'));
+
+      if (!allGroups.length) {
+        els.groupFilterBar.style.display = 'none';
+        return;
+      }
+
+      els.groupFilterBar.style.display = 'flex';
+
+      if (!state.disabledGroupKeys) {
+        state.disabledGroupKeys = loadDisabledGroupKeys();
+      }
+
+      const sig = allGroups.map(g => `${g.key}:${g.label}`).sort().join('||');
+      if (sig === state.groupKeysSignature) {
+        els.groupCheckboxList.querySelectorAll('input[type="checkbox"]').forEach((chk) => {
+          const isChecked = !state.disabledGroupKeys.has(chk.dataset.groupKey);
+          chk.checked = isChecked;
+          chk.closest('.group-chip')?.classList.toggle('active', isChecked);
+        });
+        return;
+      }
+
+      state.groupKeysSignature = sig;
+
+      els.groupCheckboxList.innerHTML = allGroups.map((g) => {
+        const isChecked = !state.disabledGroupKeys.has(g.key);
+        const label = esc(g.label || g.name || g.chat_id || 'Nhóm');
+        const readerBadge = g.readerLabel
+          ? `<span class="group-chip-reader">${esc(g.readerLabel.replace(/^Acc\s+\d+\s*/, 'A'))}</span>`
+          : '';
+        return `
+          <label class="group-chip ${isChecked ? 'active' : ''}" title="${esc(g.chat_id || g.key)}">
+            <input type="checkbox" data-group-key="${esc(g.key)}" ${isChecked ? 'checked' : ''}>
+            <span class="group-chip-text">${label}</span>
+            ${readerBadge}
+          </label>
+        `;
+      }).join('');
+
+      els.groupCheckboxList.querySelectorAll('input[type="checkbox"]').forEach((chk) => {
+        chk.addEventListener('change', () => {
+          const key = chk.dataset.groupKey;
+          if (chk.checked) {
+            state.disabledGroupKeys.delete(key);
+          } else {
+            state.disabledGroupKeys.add(key);
+          }
+          saveDisabledGroupKeys();
+          chk.closest('.group-chip')?.classList.toggle('active', chk.checked);
+          renderChat();
+          renderLiveStatus(state.lastData || {});
+        });
+      });
+    }
+
+    async function loadClientFilterConfig() {
+      try {
+        const res = await fetch('/api/client-filters?_=' + Date.now(), { cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          state.clientFilterConfig = data;
+          localStorage.setItem('click-live-client-filters', JSON.stringify(data));
+          return;
+        }
+      } catch {}
+      try {
+        const saved = localStorage.getItem('click-live-client-filters');
+        if (saved) state.clientFilterConfig = JSON.parse(saved);
+      } catch {}
+    }
+
+    function parseItemMetadata(item) {
+      const displayHtml = String(item.display_html || '').replace(/<[^>]*>/g, ' ');
+      const rawText = String(item.message?.text || item.payload?.text || displayHtml || '');
+      const timeMeta = findTimeMeta(item) || {};
+
+      let box1 = item.junb_box1 != null ? Number(item.junb_box1) : (timeMeta.box1 != null ? Number(timeMeta.box1) : null);
+      let box2 = item.junb_box2 != null ? Number(item.junb_box2) : (timeMeta.box2 != null ? Number(timeMeta.box2) : null);
+      let rate = item.rate != null ? Number(item.rate) : (timeMeta.rate != null ? Number(timeMeta.rate) : null);
+      let level = item.level != null ? Number(item.level) : (timeMeta.level != null ? Number(timeMeta.level) : null);
+
+      if (box1 === null || box2 === null) {
+        const bagMatch = rawText.match(/BAG\s*:\s*(\d+)\s*\/\s*(\d+)/i) || rawText.match(/BOX\s*:\s*(\d+)\s*\/\s*(\d+)/i) || rawText.match(/(\d+)\s*\/\s*(\d+)/);
+        if (bagMatch) {
+          if (box1 === null) box1 = Number(bagMatch[1]);
+          if (box2 === null) box2 = Number(bagMatch[2]);
+        }
+      }
+      if (rate === null) {
+        const rateMatch = rawText.match(/Rate\s*:\s*(\d+(?:\.\d+)?)/i);
+        if (rateMatch) rate = Number(rateMatch[1]);
+      }
+      if (level === null) {
+        const levelMatch = rawText.match(/Level\s*:\s*(\d+)/i);
+        if (levelMatch) level = Number(levelMatch[1]);
+      }
+
+      const commentLines = rawText.split('\n').filter(l => l.includes('💬') || l.includes('comment')).join('\n');
+
+      return {
+        rawText,
+        commentLines,
+        box1,
+        box2,
+        rate,
+        level,
+        room: item.room || {}
+      };
+    }
+
+    function matchesClientFilter(item, config) {
+      if (!config || config.enabled === false) return true;
+
+      const meta = parseItemMetadata(item);
+      const textLower = meta.rawText.toLowerCase();
+
+      // 1. Evaluate Reject Rules
+      const rejectRules = (config.reject || []).filter(r => r && r.enabled !== false);
+      for (const rule of rejectRules) {
+        if (rule.comment_contains && Array.isArray(rule.comment_contains)) {
+          for (const phrase of rule.comment_contains) {
+            if (phrase && meta.commentLines.includes(phrase)) return false;
+          }
+        }
+        if (rule.text_contains && Array.isArray(rule.text_contains)) {
+          for (const phrase of rule.text_contains) {
+            if (phrase && textLower.includes(String(phrase).toLowerCase())) return false;
+          }
+        }
+      }
+
+      // 2. Evaluate Match Filter Rules
+      const filterRules = (config.filters || []).filter(r => r && r.enabled !== false);
+      if (!filterRules.length) return true;
+
+      for (const rule of filterRules) {
+        if (ruleMatchesItem(rule, meta, textLower)) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    function ruleMatchesItem(rule, meta, textLower) {
+      if (rule.telegram_groups && Array.isArray(rule.telegram_groups) && rule.telegram_groups.length) {
+        const chatId = String(meta.room.chat_id || '').trim();
+        const title = String(meta.room.title || meta.room.display_name || '').trim();
+        const aliases = new Set([...chatIdAliases(chatId), ...chatIdAliases(title)]);
+        const matchesGroup = rule.telegram_groups.some(g => aliases.has(String(g).trim()));
+        if (!matchesGroup) return false;
+      }
+
+      if (rule.min_box1 != null && rule.min_box1 !== '' && (meta.box1 === null || meta.box1 < Number(rule.min_box1))) return false;
+      if (rule.max_box1 != null && rule.max_box1 !== '' && (meta.box1 === null || meta.box1 > Number(rule.max_box1))) return false;
+
+      if (rule.min_box2 != null && rule.min_box2 !== '' && (meta.box2 === null || meta.box2 < Number(rule.min_box2))) return false;
+      if (rule.max_box2 != null && rule.max_box2 !== '' && (meta.box2 === null || meta.box2 > Number(rule.max_box2))) return false;
+
+      if (rule.min_rate != null && rule.min_rate !== '' && (meta.rate === null || meta.rate < Number(rule.min_rate))) return false;
+      if (rule.max_rate != null && rule.max_rate !== '' && (meta.rate === null || meta.rate > Number(rule.max_rate))) return false;
+
+      if (rule.min_level != null && rule.min_level !== '' && (meta.level === null || meta.level < Number(rule.min_level))) return false;
+      if (rule.max_level != null && rule.max_level !== '' && (meta.level === null || meta.level > Number(rule.max_level))) return false;
+
+      if (rule.text_contains && Array.isArray(rule.text_contains) && rule.text_contains.length) {
+        const hasPhrase = rule.text_contains.some(phrase => phrase && textLower.includes(String(phrase).toLowerCase()));
+        if (!hasPhrase) return false;
+      }
+
+      return true;
+    }
+
     /** Tin mới luôn buffer — chỉ thêm card khi user bấm ↑ */
     function getDisplayItems() {
-      const sorted = sortedItems();
+      let sorted = sortedItems().filter(itemMatchesGroup);
+      if (els.clientFilterToggle?.checked && state.clientFilterConfig) {
+        sorted = sorted.filter((item) => matchesClientFilter(item, state.clientFilterConfig));
+      }
       if (!sorted.length || state.displayTopId === 0) {
         return sorted;
       }
@@ -1013,16 +1491,19 @@
     }
 
     function syncDisplayWindow() {
-      const sorted = sortedItems();
+      let sorted = sortedItems().filter(itemMatchesGroup);
+      if (els.clientFilterToggle?.checked && state.clientFilterConfig) {
+        sorted = sorted.filter((item) => matchesClientFilter(item, state.clientFilterConfig));
+      }
       if (state.displayTopId === 0) {
-        state.displayTopId = latestItemId();
+        state.displayTopId = latestItemId(sorted);
         state.newArrivalCount = 0;
       } else if (sorted.length) {
         const stillVisible = sorted.some(
           (item) => Number(item.id) <= Number(state.displayTopId)
         );
         if (!stillVisible) {
-          state.displayTopId = latestItemId();
+          state.displayTopId = latestItemId(sorted);
           state.newArrivalCount = 0;
         } else {
           state.newArrivalCount = sorted.filter(
@@ -1043,49 +1524,53 @@
     }
 
     function isPinnedToTop() {
-      return els.feed.scrollTop <= state.scrollPinThreshold;
+      return (els.feed?.scrollTop || 0) <= state.scrollPinThreshold;
     }
 
     function updateJumpNewestButton() {
+      if (!els.jumpNewestBtn) return;
       const show = state.newArrivalCount > 0;
       els.jumpNewestBtn.classList.toggle('visible', show);
       els.jumpNewestBtn.classList.toggle('at-top', show && isPinnedToTop());
-      els.jumpNewestCount.textContent = String(state.newArrivalCount);
+      if (els.jumpNewestCount) {
+        els.jumpNewestCount.textContent = String(state.newArrivalCount);
+      }
     }
 
     function jumpToNewest() {
       releaseBufferedItems();
-      els.feed.scrollTo({ top: 0, behavior: 'smooth' });
+      els.feed?.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     function restoreScrollAfterRender(prevScrollTop, firstPaint) {
-      els.feed.scrollTop = firstPaint ? 0 : prevScrollTop;
+      if (els.feed) {
+        els.feed.scrollTop = firstPaint ? 0 : prevScrollTop;
+      }
     }
 
     function renderChat() {
-      const sorted = getDisplayItems();
+      let sorted = getDisplayItems();
+
+      if (!sorted.length && state.items.length) {
+        syncDisplayWindow();
+        sorted = getDisplayItems();
+      }
+
       const latestId = sorted[0]?.id || 0;
       const hadItemsBefore = state.lastRenderedLatestId > 0;
       const firstPaint = !hadItemsBefore;
-      const prevScrollTop = els.feed.scrollTop;
-
-      els.empty.hidden = sorted.length > 0;
+      const prevScrollTop = els.feed?.scrollTop || 0;
 
       if (!sorted.length) {
-        if (state.items.length) {
-          syncDisplayWindow();
-          const retry = getDisplayItems();
-          if (retry.length) {
-            renderChat();
-            return;
-          }
+        if (els.feed) {
+          els.feed.innerHTML = '<div class="chat-empty" id="emptyState">Chưa có tin nhắn</div>';
         }
-        els.feed.innerHTML = '';
-        els.feed.appendChild(els.empty);
         state.lastRenderedLatestId = 0;
         updateJumpNewestButton();
         return;
       }
+
+      if (!els.feed) return;
 
       els.feed.innerHTML = sorted.map((item) => {
         const selected = item.id === state.selectedId ? 'selected' : '';
@@ -1178,13 +1663,10 @@
         params.set('_', String(Date.now()));
         if (els.status.value) params.set('statuses', els.status.value);
 
-        const [_, res] = await Promise.all([
-          checkDesktopTool(),
-          fetch('/api/queue?' + params.toString(), {
-            cache: 'no-store',
-            signal: state.controller.signal
-          })
-        ]);
+        const res = await fetch('/api/queue?' + params.toString(), {
+          cache: 'no-store',
+          signal: state.controller.signal
+        });
 
         if (res.status === 401) {
           location.href = '/login?next=' + encodeURIComponent(location.pathname);
@@ -1192,9 +1674,14 @@
         }
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
+        state.lastData = data;
         state.items = data.items || [];
+        state.watchGroups = data.watch_groups || [];
+        state.readers = data.readers || [];
+        state.watchSummary = data.watch_summary || null;
+        updateGroupCheckboxes(state.watchGroups, state.items);
         state.refreshSeconds = data.refresh_seconds || MIN_REFRESH_SECONDS;
-        els.dbPath.textContent = data.db_path || '';
+        els.dbPath.textContent = formatWatchSummary(state.watchSummary, state.readers);
         state.queueTtlSeconds = data.queue_ttl_seconds || 1800;
         syncDisplayWindow();
         renderStats(data.stats || {}, data);
@@ -1203,7 +1690,11 @@
         checkDesktopTool().then(() => {
           renderStats(data.stats || {}, data);
           renderLiveStatus(data);
-        });
+        }).catch(() => {});
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          els.liveStatus.textContent = `Lỗi tải: ${err.message}`;
+        }
       } finally {
         state.inFlight = false;
         if (state.pendingReload) {
@@ -1227,32 +1718,65 @@
       }
     }
 
-    els.reload.addEventListener('click', () => loadQueue().catch((err) => {
-      if (err.name !== 'AbortError') els.liveStatus.textContent = `Lỗi: ${err.message}`;
+    els.reload?.addEventListener('click', () => loadQueue().catch((err) => {
+      if (err.name !== 'AbortError' && els.liveStatus) els.liveStatus.textContent = `Lỗi: ${err.message}`;
     }));
-    document.getElementById('filtersBtn').addEventListener('click', () => { location.href = '/filters'; });
-    document.getElementById('watchBtn').addEventListener('click', () => { location.href = '/watch'; });
-    document.getElementById('phoneBtn').addEventListener('click', () => { location.href = '/phone-monitor'; });
-    document.getElementById('nextPhoneBtn').addEventListener('click', () => {
-      sendNewestToPhone().catch((err) => { els.liveStatus.textContent = `Lỗi: ${err.message}`; });
+    els.systemFiltersBtn?.addEventListener('click', () => { location.href = '/filters'; });
+    els.clientFiltersBtn?.addEventListener('click', () => { location.href = '/client-filters'; });
+    els.clientFilterToggle?.addEventListener('change', () => {
+      renderChat();
+      renderLiveStatus(state.lastData || {});
     });
-    els.auto.addEventListener('change', schedule);
-    els.status.addEventListener('change', () => {
+    document.getElementById('watchBtn')?.addEventListener('click', () => { location.href = '/watch'; });
+    document.getElementById('phoneBtn')?.addEventListener('click', () => { location.href = '/phone-monitor'; });
+    document.getElementById('nextPhoneBtn')?.addEventListener('click', () => {
+      sendNewestToPhone().catch((err) => { if (els.liveStatus) els.liveStatus.textContent = `Lỗi: ${err.message}`; });
+    });
+    els.auto?.addEventListener('change', schedule);
+    els.selectAllGroupsBtn?.addEventListener('click', () => {
+      if (!state.disabledGroupKeys) state.disabledGroupKeys = new Set();
+      state.disabledGroupKeys.clear();
+      saveDisabledGroupKeys();
+      if (els.groupCheckboxList) {
+        const inputs = els.groupCheckboxList.querySelectorAll('input[type="checkbox"]');
+        inputs.forEach((chk) => {
+          chk.checked = true;
+          chk.closest('.group-chip')?.classList.add('active');
+        });
+      }
+      renderChat();
+      renderLiveStatus(state.lastData || {});
+    });
+    els.deselectAllGroupsBtn?.addEventListener('click', () => {
+      if (!state.disabledGroupKeys) state.disabledGroupKeys = new Set();
+      if (els.groupCheckboxList) {
+        const inputs = els.groupCheckboxList.querySelectorAll('input[type="checkbox"]');
+        inputs.forEach((chk) => {
+          chk.checked = false;
+          state.disabledGroupKeys.add(chk.dataset.groupKey);
+          chk.closest('.group-chip')?.classList.remove('active');
+        });
+      }
+      saveDisabledGroupKeys();
+      renderChat();
+      renderLiveStatus(state.lastData || {});
+    });
+    els.status?.addEventListener('change', () => {
       state.displayTopId = 0;
       state.lastRenderedLatestId = 0;
       state.newArrivalCount = 0;
       if (state.controller) state.controller.abort();
       loadQueue({ force: true });
     });
-    els.limit.addEventListener('change', () => {
+    els.limit?.addEventListener('change', () => {
       state.displayTopId = 0;
       state.lastRenderedLatestId = 0;
       state.newArrivalCount = 0;
       if (state.controller) state.controller.abort();
       loadQueue({ force: true });
     });
-    els.jumpNewestBtn.addEventListener('click', jumpToNewest);
-    els.feed.addEventListener('scroll', () => {
+    els.jumpNewestBtn?.addEventListener('click', jumpToNewest);
+    els.feed?.addEventListener('scroll', () => {
       const pinned = isPinnedToTop();
       if (state.wasPinnedToTop && !pinned && state.lastRenderedLatestId > 0) {
         state.displayTopId = state.lastRenderedLatestId;
@@ -1282,11 +1806,12 @@
     })();
 
     loadAuthUser()
+      .then(() => loadClientFilterConfig())
       .then(() => loadQueue())
       .then(schedule)
       .catch((err) => {
-      els.liveStatus.textContent = err.message;
-    });
+        if (els.liveStatus) els.liveStatus.textContent = err.message;
+      });
 
     if (!state.countdownTimer) {
       state.countdownTimer = setInterval(updateTargetCountdowns, 1000);
