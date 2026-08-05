@@ -1,5 +1,7 @@
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
 using AutomationDotNet.Models;
 
 namespace AutomationDotNet.Services;
@@ -35,9 +37,12 @@ public class QueuePollerService
             if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password)) throw new Exception("Vui lòng nhập Username và Password");
 
             var loginUrl = $"{baseUri}/api/desktop/auth/login";
-            var payload = new { username, password };
-            var response = await _client.PostAsJsonAsync(loginUrl, payload);
-            var result = await response.Content.ReadFromJsonAsync<DesktopLoginResponse>();
+            var jsonPayload = JsonSerializer.Serialize(new { username, password });
+            var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
+
+            var response = await _client.PostAsync(loginUrl, content);
+            var responseJson = await response.Content.ReadAsStringAsync();
+            var result = JsonSerializer.Deserialize<DesktopLoginResponse>(responseJson);
 
             if (result == null || !result.Ok || string.IsNullOrEmpty(result.PullToken))
             {

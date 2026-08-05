@@ -14,10 +14,10 @@ public partial class MainWindow : Window
     private readonly LoggerService _logger;
     private readonly QueuePollerService _poller;
     private readonly ClickSchedulerService _scheduler;
+    private readonly List<string> _logLines = new();
 
     public MainWindow()
     {
-        // Initialize services BEFORE InitializeComponent so controls firing events during XAML parsing don't hit null services!
         _settingsService = new SettingsService();
         _logger = new LoggerService();
         _poller = new QueuePollerService(_logger);
@@ -25,9 +25,9 @@ public partial class MainWindow : Window
 
         InitializeComponent();
 
-        LstLogs.ItemsSource = _logger.UIEntries;
         TxtLogPath.Text = _logger.LogDirectory;
 
+        _logger.OnLogEntryAdded += Logger_OnLogEntryAdded;
         _poller.OnAuthStatusChanged += Poller_OnAuthStatusChanged;
         _poller.OnNewJobArrived += Poller_OnNewJobArrived;
         _scheduler.OnClickCompleted += Scheduler_OnClickCompleted;
@@ -43,6 +43,17 @@ public partial class MainWindow : Window
                 _settingsService.Settings.QueueUsername
             );
         }
+    }
+
+    private void Logger_OnLogEntryAdded(LogEntry entry)
+    {
+        Dispatcher.InvokeAsync(() =>
+        {
+            _logLines.Add(entry.FullLogLine);
+            while (_logLines.Count > 200) _logLines.RemoveAt(0);
+            TxtLogArea.Text = string.Join(Environment.NewLine, _logLines);
+            TxtLogArea.ScrollToEnd();
+        });
     }
 
     private void LoadSettingsToUI()
@@ -259,5 +270,7 @@ public partial class MainWindow : Window
     private void BtnClearLog_Click(object sender, RoutedEventArgs e)
     {
         _logger.ClearUI();
+        _logLines.Clear();
+        TxtLogArea.Text = "";
     }
 }

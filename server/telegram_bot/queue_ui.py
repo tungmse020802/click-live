@@ -3106,10 +3106,21 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=400)
 
     def _read_json_body(self, max_size: int = 1024 * 1024) -> Dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length <= 0 or length > max_size:
-            raise ValueError("Invalid request body size")
-        raw_body = self.rfile.read(length).decode("utf-8")
+        content_length = self.headers.get("Content-Length")
+        if content_length is not None and content_length.strip() != "":
+            try:
+                length = int(content_length)
+                if length > max_size:
+                    raise ValueError("Invalid request body size")
+                if length > 0:
+                    raw_body = self.rfile.read(length).decode("utf-8")
+                else:
+                    raw_body = self.rfile.read().decode("utf-8")
+            except ValueError:
+                raw_body = self.rfile.read().decode("utf-8")
+        else:
+            raw_body = self.rfile.read().decode("utf-8")
+
         payload = json.loads(raw_body)
         if not isinstance(payload, dict):
             raise ValueError("request body must be an object")

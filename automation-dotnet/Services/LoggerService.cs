@@ -12,6 +12,7 @@ public class LoggerService
 
     public ObservableCollection<LogEntry> UIEntries { get; } = new();
     public string LogDirectory => _logDir;
+    public event Action<LogEntry>? OnLogEntryAdded;
 
     public LoggerService()
     {
@@ -37,6 +38,7 @@ public class LoggerService
             {
                 UIEntries.RemoveAt(UIEntries.Count - 1);
             }
+            OnLogEntryAdded?.Invoke(entry);
         });
 
         try
