@@ -15,7 +15,7 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b %ERRORLEVEL%
 )
 
-set INSTALL_DIR=%LOCALAPPDATA%\ClickLiveDesktopTool
+set "INSTALL_DIR=%LOCALAPPDATA%\ClickLiveDesktopTool"
 echo.
 echo Installing to: %INSTALL_DIR%
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
@@ -23,9 +23,8 @@ if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 copy /Y ".\dist-standalone\AutomationDotNet.exe" "%INSTALL_DIR%\ClickLiveDesktopTool.exe"
 
 echo.
-echo Creating Desktop & Start Menu shortcuts...
-powershell -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.IO.Path]::Combine([Environment]::GetFolderPath('Desktop'), 'Click Live Desktop Tool.lnk')); $s.TargetPath = '%INSTALL_DIR%\ClickLiveDesktopTool.exe'; $s.Save()"
-powershell -Command "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut([System.IO.Path]::Combine([Environment]::GetFolderPath('StartMenu'), 'Click Live Desktop Tool.lnk')); $s.TargetPath = '%INSTALL_DIR%\ClickLiveDesktopTool.exe'; $s.Save()"
+echo Creating Desktop shortcut...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $desktop = [System.Environment]::GetFolderPath([System.Environment+SpecialFolder]::Desktop); $s = $ws.CreateShortcut((Join-Path $desktop 'Click Live Desktop Tool.lnk')); $s.TargetPath = '%INSTALL_DIR%\ClickLiveDesktopTool.exe'; $s.Save()"
 
 echo.
 echo ========================================================
