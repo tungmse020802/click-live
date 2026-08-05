@@ -149,6 +149,61 @@ class ChatDatabase:
             )
             self._migrate_broadcast_groups(conn)
             self._migrate_bot_tables(conn)
+            self._migrate_watch_groups_reader_id(conn)
+            self._migrate_reader_group_filters(conn)
+
+    def _migrate_watch_groups_reader_id(self, conn: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(watch_groups)").fetchall()
+        }
+        if "reader_id" in columns:
+            return
+
+        conn.executescript(
+            """
+            CREATE TABLE watch_groups_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                reader_id TEXT NOT NULL DEFAULT 'app1',
+                name TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                UNIQUE(reader_id, chat_id)
+            );
+
+            INSERT INTO watch_groups_new(
+                id, reader_id, name, chat_id, enabled, created_at, updated_at
+            )
+            SELECT id, 'app1', name, chat_id, enabled, created_at, updated_at
+            FROM watch_groups;
+
+            DROP TABLE watch_groups;
+            ALTER TABLE watch_groups_new RENAME TO watch_groups;
+
+            CREATE INDEX IF NOT EXISTS idx_watch_groups_enabled
+                ON watch_groups(enabled, reader_id, name);
+            """
+        )
+
+    def _migrate_reader_group_filters(self, conn: sqlite3.Connection) -> None:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS reader_group_filters (
+                reader_id TEXT NOT NULL,
+                chat_id TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'inherit',
+                filters_json TEXT NOT NULL DEFAULT '[]',
+                reject_json TEXT NOT NULL DEFAULT '[]',
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (reader_id, chat_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_reader_group_filters_reader
+                ON reader_group_filters(reader_id);
+            """
+        )
 
     def _migrate_bot_tables(self, conn: sqlite3.Connection) -> None:
         conn.executescript(
@@ -652,30 +707,39 @@ class ChatDatabase:
             )
             return cursor.rowcount > 0
 
-    def list_watch_groups(self) -> List[Dict[str, Any]]:
+    def list_watch_groups(self, *, reader_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        query = """
+            SELECT id, reader_id, name, chat_id, enabled, created_at, updated_at
+            FROM watch_groups
+        """
+        params: tuple = ()
+        if reader_id is not None:
+            query += " WHERE reader_id = ?"
+            params = (reader_id,)
+        query += " ORDER BY reader_id ASC, name ASC, id ASC"
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT id, name, chat_id, enabled, created_at, updated_at
-                FROM watch_groups
-                ORDER BY name ASC, id ASC
-                """
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         bot_map = self.list_watch_group_bot_map()
+        filter_map = self.list_reader_group_filter_map()
         groups = [_row_to_watch_group(row) for row in rows]
         for group in groups:
             group["bot_ids"] = bot_map.get(group["chat_id"], [])
+            group["filter"] = filter_map.get(
+                (group["reader_id"], group["chat_id"]),
+                _default_reader_group_filter(),
+            )
         return groups
 
-    def list_enabled_watch_groups(self) -> List[Dict[str, Any]]:
+    def list_enabled_watch_groups(self, *, reader_id: str) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, name, chat_id, enabled, created_at, updated_at
+                SELECT id, reader_id, name, chat_id, enabled, created_at, updated_at
                 FROM watch_groups
-                WHERE enabled = 1
+                WHERE enabled = 1 AND reader_id = ?
                 ORDER BY name ASC, id ASC
-                """
+                """,
+                (reader_id,),
             ).fetchall()
         return [_row_to_watch_group(row) for row in rows]
 
@@ -683,7 +747,7 @@ class ChatDatabase:
         now = _now()
         normalized = [_normalize_watch_group(raw, now) for raw in groups]
         bot_assignments = {
-            group["chat_id"]: [
+            (group["reader_id"], group["chat_id"]): [
                 int(bot_id)
                 for bot_id in (raw.get("bot_ids") or [])
                 if str(bot_id).strip().isdigit()
@@ -695,10 +759,53 @@ class ChatDatabase:
             for group in normalized:
                 conn.execute(
                     """
-                    INSERT INTO watch_groups(name, chat_id, enabled, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO watch_groups(
+                        reader_id, name, chat_id, enabled, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        group["reader_id"],
+                        group["name"],
+                        group["chat_id"],
+                        1 if group.get("enabled", True) else 0,
+                        group.get("created_at", now),
+                        now,
+                    ),
+                )
+        for (_, chat_id), bot_ids in bot_assignments.items():
+            self.set_watch_group_bots(chat_id, bot_ids)
+        return self.list_watch_groups()
+
+    def replace_watch_groups_for_reader(
+        self,
+        reader_id: str,
+        groups: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        now = _now()
+        normalized = [
+            _normalize_watch_group({**raw, "reader_id": reader_id}, now) for raw in groups
+        ]
+        bot_assignments = {
+            group["chat_id"]: [
+                int(bot_id)
+                for bot_id in (raw.get("bot_ids") or [])
+                if str(bot_id).strip().isdigit()
+            ]
+            for raw, group in zip(groups, normalized)
+        }
+        with self._connect() as conn:
+            conn.execute("DELETE FROM watch_groups WHERE reader_id = ?", (reader_id,))
+            for group in normalized:
+                conn.execute(
+                    """
+                    INSERT INTO watch_groups(
+                        reader_id, name, chat_id, enabled, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        reader_id,
                         group["name"],
                         group["chat_id"],
                         1 if group.get("enabled", True) else 0,
@@ -708,7 +815,91 @@ class ChatDatabase:
                 )
         for chat_id, bot_ids in bot_assignments.items():
             self.set_watch_group_bots(chat_id, bot_ids)
-        return self.list_watch_groups()
+        return self.list_watch_groups(reader_id=reader_id)
+
+    def list_reader_group_filter_map(self) -> Dict[tuple, Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT reader_id, chat_id, mode, filters_json, reject_json, updated_at
+                FROM reader_group_filters
+                """
+            ).fetchall()
+        result: Dict[tuple, Dict[str, Any]] = {}
+        for row in rows:
+            key = (str(row["reader_id"]), str(row["chat_id"]))
+            result[key] = _row_to_reader_group_filter(row)
+        return result
+
+    def get_reader_group_filter(
+        self,
+        reader_id: str,
+        chat_id: str,
+    ) -> Dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT reader_id, chat_id, mode, filters_json, reject_json, updated_at
+                FROM reader_group_filters
+                WHERE reader_id = ? AND chat_id = ?
+                """,
+                (reader_id, chat_id),
+            ).fetchone()
+        if row is None:
+            return _default_reader_group_filter()
+        return _row_to_reader_group_filter(row)
+
+    def upsert_reader_group_filter(
+        self,
+        reader_id: str,
+        chat_id: str,
+        *,
+        mode: str,
+        filters: Optional[List[Dict[str, Any]]] = None,
+        reject: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        mode = str(mode or "inherit").strip() or "inherit"
+        if mode not in {"inherit", "custom", "pass_all", "block_all"}:
+            raise ValueError(f"invalid reader group filter mode: {mode}")
+
+        existing = self.get_reader_group_filter(reader_id, chat_id)
+        filters_payload = filters if filters is not None else existing.get("filters", [])
+        reject_payload = reject if reject is not None else existing.get("reject", [])
+        now = _now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO reader_group_filters(
+                    reader_id, chat_id, mode, filters_json, reject_json, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(reader_id, chat_id) DO UPDATE SET
+                    mode = excluded.mode,
+                    filters_json = excluded.filters_json,
+                    reject_json = excluded.reject_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    reader_id,
+                    chat_id,
+                    mode,
+                    json.dumps(filters_payload, ensure_ascii=False),
+                    json.dumps(reject_payload, ensure_ascii=False),
+                    now,
+                ),
+            )
+        return self.get_reader_group_filter(reader_id, chat_id)
+
+    def delete_reader_group_filter(self, reader_id: str, chat_id: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM reader_group_filters
+                WHERE reader_id = ? AND chat_id = ?
+                """,
+                (reader_id, chat_id),
+            )
+            return cursor.rowcount > 0
 
     def delete_watch_group(self, group_id: int) -> bool:
         with self._connect() as conn:
@@ -1554,9 +1745,42 @@ def _normalize_broadcast_bot(raw: Dict[str, Any], now: float) -> Dict[str, Any]:
     }
 
 
+def _default_reader_group_filter() -> Dict[str, Any]:
+    return {
+        "mode": "inherit",
+        "filters": [],
+        "reject": [],
+    }
+
+
+def _row_to_reader_group_filter(row: sqlite3.Row) -> Dict[str, Any]:
+    try:
+        filters = json.loads(str(row["filters_json"] or "[]"))
+    except json.JSONDecodeError:
+        filters = []
+    try:
+        reject = json.loads(str(row["reject_json"] or "[]"))
+    except json.JSONDecodeError:
+        reject = []
+    if not isinstance(filters, list):
+        filters = []
+    if not isinstance(reject, list):
+        reject = []
+    return {
+        "mode": str(row["mode"] or "inherit"),
+        "filters": filters,
+        "reject": reject,
+        "updated_at": float(row["updated_at"]),
+    }
+
+
 def _row_to_watch_group(row: sqlite3.Row) -> Dict[str, Any]:
+    reader_id = "app1"
+    if "reader_id" in row.keys():
+        reader_id = str(row["reader_id"] or "app1").strip() or "app1"
     return {
         "id": int(row["id"]),
+        "reader_id": reader_id,
         "name": row["name"],
         "chat_id": row["chat_id"],
         "enabled": bool(row["enabled"]),
@@ -1570,11 +1794,13 @@ def _normalize_watch_group(raw: Dict[str, Any], now: float) -> Dict[str, Any]:
 
     name = str(raw.get("name") or "").strip()
     chat_id = normalize_client_chat_ref(str(raw.get("chat_id") or "").strip())
+    reader_id = str(raw.get("reader_id") or "app1").strip() or "app1"
     if not chat_id:
         raise ValueError("watch group chat_id is required")
     if not name:
         name = chat_id
     return {
+        "reader_id": reader_id,
         "name": name,
         "chat_id": chat_id,
         "enabled": bool(raw.get("enabled", True)),

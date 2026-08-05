@@ -15,7 +15,7 @@ from config import (
     load_telegram_client_config,
 )
 from db import ChatDatabase
-from message_filter import MessageFilterEngine, parse_box_signal
+from message_filter import GroupFilterScope, MessageFilterEngine, parse_box_signal
 from deeplink_resolve import enrich_payload_with_deeplink
 from logging_setup import setup_logging
 from message_format import telethon_message_to_html
@@ -181,7 +181,7 @@ class TelethonReader:
                 )
             return list(self.config.targets)
 
-        groups = self.db.list_enabled_watch_groups()
+        groups = self.db.list_enabled_watch_groups(reader_id=self.config.reader_id)
         if groups:
             return client_targets_from_watch_groups(groups)
         return list(self.config.targets)
@@ -284,11 +284,18 @@ class TelethonReader:
                 return
 
             signal = parse_box_signal(text)
+            group_filter_payload = self.db.get_reader_group_filter(
+                self.config.reader_id,
+                target.room_key,
+            )
+            group_scope = GroupFilterScope.from_db_payload(group_filter_payload)
             filter_result = self.filter_engine.evaluate(
                 text,
                 signal,
                 chat_id=target.room_key,
                 chat_label=target.label,
+                reader_id=self.config.reader_id,
+                group_scope=group_scope,
             )
             if not filter_result.matched:
                 logger.debug(

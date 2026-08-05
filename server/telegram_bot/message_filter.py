@@ -103,6 +103,34 @@ class FilterResult:
     priority: Optional[int]
 
 
+@dataclass(frozen=True)
+class GroupFilterScope:
+    mode: str
+    rules: Tuple[MessageFilterRule, ...]
+    reject_rules: Tuple[RejectFilterRule, ...]
+
+    @classmethod
+    def from_db_payload(cls, payload: Dict[str, Any]) -> "GroupFilterScope":
+        mode = str(payload.get("mode") or "inherit").strip() or "inherit"
+        raw_filters = payload.get("filters") or []
+        raw_reject = payload.get("reject") or []
+        if not isinstance(raw_filters, list):
+            raw_filters = []
+        if not isinstance(raw_reject, list):
+            raw_reject = []
+        rules = tuple(
+            _parse_rule(raw_rule, index)
+            for index, raw_rule in enumerate(raw_filters)
+            if isinstance(raw_rule, dict)
+        )
+        reject = tuple(
+            _parse_reject_rule(raw_rule, index)
+            for index, raw_rule in enumerate(raw_reject)
+            if isinstance(raw_rule, dict)
+        )
+        return cls(mode=mode, rules=rules, reject_rules=reject)
+
+
 class MessageFilterEngine:
     def __init__(
         self,
@@ -120,6 +148,8 @@ class MessageFilterEngine:
         self._rules: Tuple[MessageFilterRule, ...] = ()
         self._reject_rules: Tuple[RejectFilterRule, ...] = ()
         self._exclude_groups: Tuple[str, ...] = ()
+        self._reader_rules: Dict[str, Tuple[MessageFilterRule, ...]] = {}
+        self._reader_reject_rules: Dict[str, Tuple[RejectFilterRule, ...]] = {}
 
     def evaluate(
         self,
@@ -128,6 +158,8 @@ class MessageFilterEngine:
         *,
         chat_id: Optional[str] = None,
         chat_label: Optional[str] = None,
+        reader_id: Optional[str] = None,
+        group_scope: Optional[GroupFilterScope] = None,
     ) -> FilterResult:
         signal = signal or parse_box_signal(text)
         if not self.enabled:
@@ -135,23 +167,73 @@ class MessageFilterEngine:
 
         self._reload_if_needed()
 
-        if self._exclude_groups and _chat_matches_groups(
+        if group_scope is not None:
+            if group_scope.mode == "block_all":
+                return FilterResult(False, "group_block_all", signal, None, None)
+            if group_scope.mode == "pass_all":
+                return FilterResult(True, "group_pass_all", signal, None, self.default_priority)
+            if group_scope.mode == "custom":
+                return self._evaluate_with_rules(
+                    text,
+                    signal,
+                    group_scope.rules,
+                    group_scope.reject_rules,
+                    (),
+                    chat_id=chat_id,
+                    chat_label=chat_label,
+                )
+
+        rules, reject_rules, exclude_groups = self._rules_for_reader(reader_id)
+        return self._evaluate_with_rules(
+            text,
+            signal,
+            rules,
+            reject_rules,
+            exclude_groups,
+            chat_id=chat_id,
+            chat_label=chat_label,
+        )
+
+    def _rules_for_reader(
+        self,
+        reader_id: Optional[str],
+    ) -> Tuple[Tuple[MessageFilterRule, ...], Tuple[RejectFilterRule, ...], Tuple[str, ...]]:
+        if reader_id and reader_id in self._reader_rules:
+            return (
+                self._reader_rules[reader_id],
+                self._reader_reject_rules.get(reader_id, ()),
+                self._exclude_groups,
+            )
+        return self._rules, self._reject_rules, self._exclude_groups
+
+    def _evaluate_with_rules(
+        self,
+        text: str,
+        signal: Optional[BoxSignal],
+        rules: Tuple[MessageFilterRule, ...],
+        reject_rules: Tuple[RejectFilterRule, ...],
+        exclude_groups: Tuple[str, ...],
+        *,
+        chat_id: Optional[str] = None,
+        chat_label: Optional[str] = None,
+    ) -> FilterResult:
+        if exclude_groups and _chat_matches_groups(
             chat_id,
             chat_label,
-            self._exclude_groups,
+            exclude_groups,
         ):
             return FilterResult(False, "excluded_telegram_group", signal, None, None)
 
-        for reject in self._reject_rules:
+        for reject in reject_rules:
             if not reject.enabled:
                 continue
             rejected, reason = _evaluate_reject_rule(text, reject)
             if rejected:
                 return FilterResult(False, reason, signal, None, None)
 
-        enabled_rules = [rule for rule in self._rules if rule.enabled]
+        enabled_rules = [rule for rule in rules if rule.enabled]
         if not enabled_rules:
-            if any(reject.enabled for reject in self._reject_rules):
+            if any(reject.enabled for reject in reject_rules):
                 return FilterResult(
                     True,
                     "reject_only",
@@ -205,6 +287,8 @@ class MessageFilterEngine:
             self._rules = ()
             self._reject_rules = ()
             self._exclude_groups = ()
+            self._reader_rules = {}
+            self._reader_reject_rules = {}
             self._last_mtime = None
             return
 
@@ -212,15 +296,22 @@ class MessageFilterEngine:
             return
 
         self._last_mtime = mtime
-        self._rules, self._reject_rules, self._exclude_groups = _load_rules(self.config_path)
+        (
+            self._rules,
+            self._reject_rules,
+            self._exclude_groups,
+            self._reader_rules,
+            self._reader_reject_rules,
+        ) = _load_rules(self.config_path)
         enabled_count = sum(1 for rule in self._rules if rule.enabled)
         reject_count = sum(1 for rule in self._reject_rules if rule.enabled)
         logger.info(
-            "Loaded message filters path=%s allow=%s reject=%s exclude_groups=%s",
+            "Loaded message filters path=%s allow=%s reject=%s exclude_groups=%s readers=%s",
             self.config_path,
             enabled_count,
             reject_count,
             len(self._exclude_groups),
+            len(self._reader_rules),
         )
 
 
@@ -259,7 +350,13 @@ def parse_box_signal(text: str) -> Optional[BoxSignal]:
 
 def _load_rules(
     path: Path,
-) -> Tuple[Tuple[MessageFilterRule, ...], Tuple[RejectFilterRule, ...], Tuple[str, ...]]:
+) -> Tuple[
+    Tuple[MessageFilterRule, ...],
+    Tuple[RejectFilterRule, ...],
+    Tuple[str, ...],
+    Dict[str, Tuple[MessageFilterRule, ...]],
+    Dict[str, Tuple[RejectFilterRule, ...]],
+]:
     with path.open(encoding="utf-8") as file:
         raw_config = json.load(file)
 
@@ -271,22 +368,52 @@ def _load_rules(
             or raw_config.get("exclude_groups")
             or []
         )
+        raw_readers = raw_config.get("readers") or {}
     else:
         raw_rules = raw_config
         raw_reject = []
         raw_exclude = []
+        raw_readers = {}
 
     if not isinstance(raw_rules, list):
         raise RuntimeError("message filter config must be a list or object with filters=[]")
     if not isinstance(raw_reject, list):
         raise RuntimeError("message filter reject must be a list")
+    if not isinstance(raw_readers, dict):
+        raw_readers = {}
 
     allow = tuple(_parse_rule(raw_rule, index) for index, raw_rule in enumerate(raw_rules))
     reject = tuple(
         _parse_reject_rule(raw_rule, index) for index, raw_rule in enumerate(raw_reject)
     )
     exclude = _as_tuple(raw_exclude)
-    return allow, reject, exclude
+
+    reader_allow: Dict[str, Tuple[MessageFilterRule, ...]] = {}
+    reader_reject: Dict[str, Tuple[RejectFilterRule, ...]] = {}
+    for reader_id, reader_payload in raw_readers.items():
+        if not isinstance(reader_payload, dict):
+            continue
+        reader_key = str(reader_id).strip()
+        if not reader_key:
+            continue
+        reader_filters = reader_payload.get("filters") or []
+        reader_reject_raw = reader_payload.get("reject") or []
+        if not isinstance(reader_filters, list):
+            reader_filters = []
+        if not isinstance(reader_reject_raw, list):
+            reader_reject_raw = []
+        reader_allow[reader_key] = tuple(
+            _parse_rule(raw_rule, index)
+            for index, raw_rule in enumerate(reader_filters)
+            if isinstance(raw_rule, dict)
+        )
+        reader_reject[reader_key] = tuple(
+            _parse_reject_rule(raw_rule, index)
+            for index, raw_rule in enumerate(reader_reject_raw)
+            if isinstance(raw_rule, dict)
+        )
+
+    return allow, reject, exclude, reader_allow, reader_reject
 
 
 def _parse_rule(raw_rule: Dict[str, Any], index: int) -> MessageFilterRule:

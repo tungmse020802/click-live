@@ -48,6 +48,11 @@ from phone_jobs import extract_time_from_item
 from countdown_timing import resolve_countdown_end_time_ms
 from dotenv import load_dotenv
 from telegram import Bot
+
+TELEGRAM_READERS: List[Dict[str, str]] = [
+    {"id": "app1", "label": "Acc 1 (+84972074620)"},
+    {"id": "app2", "label": "Acc 2 (+84567660222)"},
+]
 from ui_auth import (
     LOGIN_HTML,
     LOGOUT_SCRIPT,
@@ -232,6 +237,7 @@ FILTERS_HTML = r"""<!doctype html>
         <div class="brand"><h1>Setup Filter</h1><span id="filterPath"></span></div>
       </div>
       <div class="toolbar header-collapsible">
+        <div id="filterReaderTabs" style="display:flex;gap:8px;flex-wrap:wrap;margin-right:8px;"></div>
         <button id="queueBtn" class="button">Hàng đợi</button>
         <button id="reloadBtn" class="button">Tải lại</button>
         <button id="saveBtn" class="button primary">Lưu</button>
@@ -345,7 +351,7 @@ FILTERS_HTML = r"""<!doctype html>
     </main>
   </div>
   <script>
-    const state = { filters: [], reject: [], excludeGroups: [], selected: 0, path: '', watchGroups: [] };
+    const state = { filters: [], reject: [], excludeGroups: [], selected: 0, path: '', watchGroups: [], readerId: 'app1', readers: [] };
     const $ = (id) => document.getElementById(id);
     const els = {
       path:$('filterPath'), list:$('filterList'), status:$('status'),
@@ -354,8 +360,12 @@ FILTERS_HTML = r"""<!doctype html>
       box1:$('box1'), box2:$('box2'),
       minRate:$('minRate'), maxRate:$('maxRate'), minLevel:$('minLevel'), maxLevel:$('maxLevel'),
       rejectComment:$('rejectCommentInput'), textContains:$('textContainsInput'), textContainsPreview:$('textContainsPreview'),
-      listenGroupGrid:$('listenGroupGrid'), listenCount:$('listenCount'),
+      listenGroupGrid:$('listenGroupGrid'), listenCount:$('listenCount'), readerTabs:$('filterReaderTabs'),
     };
+    function readerLabel(id){
+      const found = (state.readers || []).find((r) => r.id === id);
+      return found?.label || id;
+    }
     function allWatchGroupIds() {
       return state.watchGroups.map((g) => String(g.chat_id || '')).filter(Boolean);
     }
@@ -479,11 +489,12 @@ FILTERS_HTML = r"""<!doctype html>
       els.listenGroupGrid.innerHTML = state.watchGroups.map((group) => {
         const chatId = String(group.chat_id || '');
         const name = esc(group.name || chatId);
+        const reader = esc(readerLabel(group.reader_id || 'app1'));
         const listening = !excluded.has(chatId);
         const checked = listening ? 'checked' : '';
         const cls = listening ? 'group-card on' : 'group-card off';
         const badge = listening ? '<span class="group-badge on">Đang bật</span>' : '<span class="group-badge off">Tắt</span>';
-        return `<label class="${cls}"><input type="checkbox" value="${esc(chatId)}" ${checked}><div class="group-card-body"><div class="group-card-top"><div class="group-card-name">${name}</div>${badge}</div><div class="group-card-id">${esc(chatId)}</div></div></label>`;
+        return `<label class="${cls}"><input type="checkbox" value="${esc(chatId)}" ${checked}><div class="group-card-body"><div class="group-card-top"><div class="group-card-name">${name}</div>${badge}</div><div class="group-card-id">${reader} · ${esc(chatId)}</div></div></label>`;
       }).join('');
       els.listenGroupGrid.querySelectorAll('input[type=checkbox]').forEach((input) => {
         input.addEventListener('change', () => {
@@ -578,30 +589,43 @@ FILTERS_HTML = r"""<!doctype html>
       try {
         const res = await fetch('/api/watch-groups?_=' + Date.now(), { cache:'no-store' });
         const data = await res.json();
-        state.watchGroups = (data.groups || []).filter((g) => g.enabled !== false);
+        state.readers = data.readers || state.readers;
+        state.watchGroups = (data.groups || []).filter((g) => g.enabled !== false && (g.reader_id || 'app1') === state.readerId);
       } catch (_) {
         state.watchGroups = [];
       }
     }
+    function renderReaderTabs(){
+      const readers = state.readers.length ? state.readers : [{ id:'app1', label:'Acc 1' }, { id:'app2', label:'Acc 2' }];
+      if (!els.readerTabs) return;
+      els.readerTabs.innerHTML = readers.map((r) => `<button type="button" class="button ${r.id===state.readerId?'primary':''}" data-reader="${esc(r.id)}">${esc(r.label || r.id)}</button>`).join('');
+      els.readerTabs.querySelectorAll('[data-reader]').forEach((btn) => btn.addEventListener('click', () => {
+        syncFormToFilter();
+        state.readerId = btn.dataset.reader;
+        loadFilters().catch((err) => els.status.textContent = err.message);
+      }));
+    }
     async function loadFilters() {
       await loadWatchGroups();
-      const res = await fetch('/api/filters?_=' + Date.now(), { cache:'no-store' });
+      const res = await fetch('/api/filters?reader_id=' + encodeURIComponent(state.readerId) + '&_=' + Date.now(), { cache:'no-store' });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       state.path = data.path || '';
+      state.readers = data.readers || state.readers;
       state.filters = Array.isArray(data.filters) ? data.filters : [];
       state.reject = Array.isArray(data.reject) ? data.reject : [];
       state.excludeGroups = Array.isArray(data.exclude_telegram_groups) ? data.exclude_telegram_groups : [];
       state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1));
-      els.path.textContent = state.path;
+      els.path.textContent = `${state.path} · ${readerLabel(state.readerId)}`;
       const listening = listeningGroupIds().length;
       const excludeNote = state.excludeGroups.length ? ` | tắt ${state.excludeGroups.length} nhóm` : '';
-      els.status.textContent = `Đã tải ${state.filters.length} bộ lọc` + (state.reject.length ? ` | chặn ${state.reject.length}` : '') + (listening ? ` | lắng nghe ${listening} nhóm` : '') + excludeNote;
+      els.status.textContent = `Đã tải ${state.filters.length} bộ lọc (${state.readerId})` + (state.reject.length ? ` | chặn ${state.reject.length}` : '') + (listening ? ` | lắng nghe ${listening} nhóm` : '') + excludeNote;
+      renderReaderTabs();
       render();
     }
     async function saveFilters() {
       syncFormToFilter();
       syncExcludeFromForm();
-      const res = await fetch('/api/filters', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ filters:state.filters, reject:state.reject, exclude_telegram_groups:state.excludeGroups }) });
+      const res = await fetch('/api/filters', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ reader_id: state.readerId, filters:state.filters, reject:state.reject, exclude_telegram_groups:state.excludeGroups }) });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Lưu thất bại');
       state.filters = data.filters || [];
       state.reject = data.reject || [];
@@ -609,7 +633,7 @@ FILTERS_HTML = r"""<!doctype html>
       state.selected = Math.min(state.selected, Math.max(0, state.filters.length - 1));
       const listening = listeningGroupIds().length;
       const excludeNote = state.excludeGroups.length ? ` | tắt ${state.excludeGroups.length} nhóm` : '';
-      els.status.textContent = `Đã lưu ${state.filters.length} bộ lọc` + (state.reject.length ? ` | chặn ${state.reject.length}` : '') + (listening ? ` | lắng nghe ${listening} nhóm` : '') + excludeNote;
+      els.status.textContent = `Đã lưu ${state.filters.length} bộ lọc (${state.readerId})` + (state.reject.length ? ` | chặn ${state.reject.length}` : '') + (listening ? ` | lắng nghe ${listening} nhóm` : '') + excludeNote;
       render();
     }
     $('listenAllBtn').addEventListener('click', () => {
@@ -622,7 +646,7 @@ FILTERS_HTML = r"""<!doctype html>
       renderListenGroupGrid();
       els.status.textContent = 'Đã tắt lắng nghe tất cả nhóm';
     });
-    $('watchGroupsBtn').addEventListener('click', () => { location.href = '/watch-groups'; });
+    $('watchGroupsBtn').addEventListener('click', () => { location.href = '/watch'; });
     els.textContains.addEventListener('input', () => {
       renderTextContainsPreview(parseTextContains(els.textContains.value));
     });
@@ -1138,6 +1162,13 @@ WATCH_HTML = r"""<!doctype html>
     .env-bot-list { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
     .env-bot-pick { display:inline-flex; align-items:center; border:1px dashed #b8c4d6; border-radius:6px; padding:6px 10px; background:#fff; font-size:12px; cursor:pointer; color:var(--blue); }
     .env-bot-pick:hover { background:#edf4ff; border-color:#8eb8ea; }
+    .reader-tabs { display:flex; gap:8px; flex-wrap:wrap; }
+    .reader-tab { height:32px; border:1px solid #394252; background:#263040; color:#f9fafb; border-radius:6px; padding:0 12px; cursor:pointer; font-size:13px; font-weight:600; }
+    .reader-tab.active { background:#1d5fd0; border-color:#3170df; }
+    .filter-panel { border:1px solid var(--border); border-radius:8px; padding:14px; background:#fbfcfd; margin-top:4px; }
+    .filter-panel select { width:100%; border:1px solid var(--border); border-radius:6px; padding:9px 10px; }
+    .filter-custom { display:none; margin-top:12px; }
+    .filter-custom.open { display:block; }
   </style>
 </head>
 <body>
@@ -1154,6 +1185,7 @@ WATCH_HTML = r"""<!doctype html>
       </div>
     </header>
     <div class="subbar">
+      <div id="readerTabs" class="reader-tabs"></div>
       <div id="summary" class="hint" style="margin:0;border:0;background:transparent;color:#aeb6c3;padding:0;">Sẵn sàng</div>
     </div>
     <main class="main">
@@ -1180,6 +1212,23 @@ WATCH_HTML = r"""<!doctype html>
             <div id="botTags" class="bot-tags"></div>
             <div class="group-meta" style="margin-top:8px;">Chỉ dùng bot có token trong <b>.env</b> (<code>TELEGRAM_BOT_TOKEN</code> / <code>TELEGRAM_BOT_TOKENS</code>). Nhập <b>@username</b> hoặc bấm tên bên trên.</div>
           </div>
+          <div class="field full filter-panel">
+            <label for="filterModeInput">Filter cho nhóm này (acc đang chọn)</label>
+            <select id="filterModeInput">
+              <option value="inherit">Kế thừa filter global của acc</option>
+              <option value="pass_all">Nhận mọi tin (bỏ qua filter global)</option>
+              <option value="block_all">Chặn mọi tin</option>
+              <option value="custom">Filter riêng (tùy chỉnh)</option>
+            </select>
+            <div id="filterCustomBox" class="filter-custom">
+              <div class="field" style="margin-top:10px;"><label for="filterTextInput">Tin phải chứa (cách nhau bởi dấu phẩy)</label><input id="filterTextInput" placeholder='"có thể treo", Rương treo'></div>
+              <div class="form-grid" style="margin-top:10px;">
+                <div class="field"><label for="filterBox1Input">Box trái (vd. 50)</label><input id="filterBox1Input" placeholder="50"></div>
+                <div class="field"><label for="filterBox2Input">Box phải (vd. 1)</label><input id="filterBox2Input" placeholder="1"></div>
+              </div>
+            </div>
+            <div class="group-meta" style="margin-top:8px;">Filter global theo acc chỉnh tại trang <a href="/filters" style="color:#1d5fd0;">Setup Filter</a>.</div>
+          </div>
           <div class="field full">
             <button id="addBtn" class="button primary">Thêm nhóm</button>
             <button id="saveBtn" class="button">Lưu thay đổi</button>
@@ -1191,10 +1240,55 @@ WATCH_HTML = r"""<!doctype html>
     </main>
   </div>
   <script>
-    const state = { groups:[], selected:0, bots:[] };
+    const state = { groups:[], selected:0, bots:[], readers:[], readerId:'app1' };
     const $ = (id) => document.getElementById(id);
-    const els = { list:$('groupList'), status:$('status'), summary:$('summary'), name:$('nameInput'), chatId:$('chatIdInput'), enabled:$('enabledInput'), botIdInput:$('botIdInput'), botTags:$('botTags'), envBotList:$('envBotList') };
+    const els = { list:$('groupList'), status:$('status'), summary:$('summary'), readerTabs:$('readerTabs'), name:$('nameInput'), chatId:$('chatIdInput'), enabled:$('enabledInput'), botIdInput:$('botIdInput'), botTags:$('botTags'), envBotList:$('envBotList'), filterMode:$('filterModeInput'), filterCustomBox:$('filterCustomBox'), filterText:$('filterTextInput'), filterBox1:$('filterBox1Input'), filterBox2:$('filterBox2Input') };
     function esc(v){ return String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+    function ensureFilter(g){
+      if (!g.filter || typeof g.filter !== 'object') g.filter = { mode:'inherit', filters:[], reject:[] };
+      return g.filter;
+    }
+    function filterModeLabel(mode){
+      return ({ inherit:'global', pass_all:'mọi tin', block_all:'chặn', custom:'riêng' })[mode] || mode;
+    }
+    function syncFilterForm(){
+      const g = current(); if (!g) return;
+      const filter = ensureFilter(g);
+      els.filterMode.value = filter.mode || 'inherit';
+      els.filterCustomBox.classList.toggle('open', filter.mode === 'custom');
+      const rule = (filter.filters && filter.filters[0]) || {};
+      els.filterText.value = (rule.text_contains || []).join(', ');
+      const boxLeft = rule.min_box1 ?? rule.max_box1 ?? '';
+      const boxRight = rule.min_box2 ?? rule.max_box2 ?? '';
+      els.filterBox1.value = boxLeft === '' ? '' : String(boxLeft);
+      els.filterBox2.value = boxRight === '' ? '' : String(boxRight);
+    }
+    function syncFilterToGroup(){
+      const g = current(); if (!g) return;
+      const filter = ensureFilter(g);
+      filter.mode = els.filterMode.value || 'inherit';
+      if (filter.mode === 'custom') {
+        const textParts = String(els.filterText.value || '').split(',').map((v) => v.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+        const box1 = els.filterBox1.value.trim();
+        const box2 = els.filterBox2.value.trim();
+        const rule = { name:'group_custom', enabled:true, priority:100, text_contains:textParts };
+        if (box1) { rule.min_box1 = Number(box1); rule.max_box1 = Number(box1); }
+        if (box2) { rule.min_box2 = Number(box2); rule.max_box2 = Number(box2); }
+        filter.filters = [rule];
+      } else {
+        filter.filters = [];
+      }
+    }
+    function renderReaderTabs(){
+      const readers = state.readers.length ? state.readers : [{ id:'app1', label:'Acc 1' }, { id:'app2', label:'Acc 2' }];
+      els.readerTabs.innerHTML = readers.map((r) => `<button type="button" class="reader-tab ${r.id===state.readerId?'active':''}" data-reader="${esc(r.id)}">${esc(r.label || r.id)}</button>`).join('');
+      els.readerTabs.querySelectorAll('[data-reader]').forEach((btn) => btn.addEventListener('click', () => {
+        syncForm(); syncFilterToGroup();
+        state.readerId = btn.dataset.reader;
+        state.selected = 0;
+        loadGroups().catch((e) => els.status.textContent = e.message);
+      }));
+    }
     function current(){ return state.groups[state.selected] || null; }
     function botById(){ return Object.fromEntries(state.bots.map((b) => [Number(b.id), b])); }
     function botUsername(bot){ return String(bot?.username || '').trim().toLowerCase().replace(/^@+/, ''); }
@@ -1315,48 +1409,55 @@ WATCH_HTML = r"""<!doctype html>
       els.list.innerHTML = state.groups.length ? state.groups.map((g,i) => {
         const pill = g.enabled !== false ? 'on' : 'off';
         const pillText = g.enabled !== false ? 'bật' : 'tắt';
-        const botCount = (g.bot_ids || []).length;
         const botMeta = groupBotSummary(g);
-        return `<li class="group-row ${i===state.selected?'selected':''}" data-index="${i}"><div><div class="group-name">${esc(g.name)}</div><div class="group-meta">${esc(g.chat_id)} · ${esc(botMeta)}</div></div><span class="pill ${pill}">${pillText}</span></li>`;
+        const filterMeta = filterModeLabel(ensureFilter(g).mode || 'inherit');
+        return `<li class="group-row ${i===state.selected?'selected':''}" data-index="${i}"><div><div class="group-name">${esc(g.name)}</div><div class="group-meta">${esc(g.chat_id)} · filter:${esc(filterMeta)} · ${esc(botMeta)}</div></div><span class="pill ${pill}">${pillText}</span></li>`;
       }).join('') : `<li class="group-row"><div><div class="group-name">Chưa có nhóm</div><div class="group-meta">Thêm Chat ID bên phải</div></div></li>`;
-      els.list.querySelectorAll('.group-row[data-index]').forEach((row) => row.addEventListener('click', () => { syncForm(); state.selected = Number(row.dataset.index); renderForm(); renderList(); }));
-      els.summary.textContent = `${state.groups.length} nhóm | ${state.groups.filter((g) => g.enabled !== false).length} đang bật`;
+      els.list.querySelectorAll('.group-row[data-index]').forEach((row) => row.addEventListener('click', () => { syncForm(); syncFilterToGroup(); state.selected = Number(row.dataset.index); renderForm(); renderList(); }));
+      const readerLabel = (state.readers.find((r) => r.id === state.readerId) || {}).label || state.readerId;
+      els.summary.textContent = `${readerLabel} · ${state.groups.length} nhóm | ${state.groups.filter((g) => g.enabled !== false).length} đang bật`;
     }
     function renderForm(){
       const g = current();
       els.name.disabled = !g;
       els.enabled.disabled = !g;
+      els.filterMode.disabled = !g;
+      els.filterText.disabled = !g;
+      els.filterBox1.disabled = !g;
+      els.filterBox2.disabled = !g;
       els.name.value = g?.name || '';
       els.chatId.value = g?.chat_id || '';
       els.enabled.checked = g ? g.enabled !== false : true;
       $('deleteBtn').disabled = !g;
       $('saveBtn').disabled = !g;
+      syncFilterForm();
       renderBotTags();
       renderEnvBotList();
     }
     async function loadGroups(){
-      const res = await fetch('/api/watch-groups?_=' + Date.now(), { cache:'no-store' });
+      const res = await fetch('/api/watch-groups?reader_id=' + encodeURIComponent(state.readerId) + '&_=' + Date.now(), { cache:'no-store' });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-      state.groups = (data.groups || []).map((g) => ({ ...g, bot_ids: g.bot_ids || [] }));
+      state.groups = (data.groups || []).map((g) => ({ ...g, bot_ids: g.bot_ids || [], filter: g.filter || { mode:'inherit', filters:[], reject:[] } }));
       state.bots = data.bots || [];
+      state.readers = data.readers || state.readers;
       state.selected = Math.min(state.selected, Math.max(0, state.groups.length - 1));
-      renderList(); renderForm();
+      renderReaderTabs(); renderList(); renderForm();
     }
     async function saveGroups(){
-      syncForm();
-      const res = await fetch('/api/watch-groups', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ groups: state.groups }) });
+      syncForm(); syncFilterToGroup();
+      const res = await fetch('/api/watch-groups', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ reader_id: state.readerId, groups: state.groups }) });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Save failed');
-      state.groups = data.groups || [];
+      state.groups = (data.groups || []).map((g) => ({ ...g, bot_ids: g.bot_ids || [], filter: g.filter || { mode:'inherit', filters:[], reject:[] } }));
       state.bots = data.bots || state.bots;
-      els.status.textContent = `Đã lưu ${state.groups.length} nhóm. Telethon reader sẽ tự reload trong ~30s.`;
+      els.status.textContent = `Đã lưu ${state.groups.length} nhóm cho ${state.readerId}. Telethon reader sẽ tự reload trong ~30s.`;
       renderList(); renderForm();
     }
     function addGroup(){
       const name = els.name.value.trim();
       const chatId = els.chatId.value.trim();
       if (!chatId) throw new Error('Nhập Chat ID hoặc @username');
-      if (state.groups.some((g) => g.chat_id === chatId)) throw new Error('Chat ID đã tồn tại');
-      state.groups.push({ name: name || chatId, chat_id: chatId, enabled: els.enabled.checked, bot_ids: [] });
+      if (state.groups.some((g) => g.chat_id === chatId)) throw new Error('Chat ID đã tồn tại cho acc này');
+      state.groups.push({ reader_id: state.readerId, name: name || chatId, chat_id: chatId, enabled: els.enabled.checked, bot_ids: [], filter: { mode:'inherit', filters:[], reject:[] } });
       state.selected = state.groups.length - 1;
       renderList(); renderForm();
       els.status.textContent = 'Đã thêm vào danh sách — bấm Lưu để áp dụng';
@@ -1364,9 +1465,9 @@ WATCH_HTML = r"""<!doctype html>
     async function deleteCurrent(){
       const g = current(); if (!g) return;
       if (g.id) {
-        const res = await fetch('/api/watch-groups/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id:g.id }) });
+        const res = await fetch('/api/watch-groups/delete', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ id:g.id, reader_id: state.readerId }) });
         const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Delete failed');
-        state.groups = data.groups || [];
+        state.groups = (data.groups || []).map((item) => ({ ...item, bot_ids: item.bot_ids || [], filter: item.filter || { mode:'inherit', filters:[], reject:[] } }));
       } else {
         state.groups.splice(state.selected, 1);
       }
@@ -1375,12 +1476,12 @@ WATCH_HTML = r"""<!doctype html>
       els.status.textContent = 'Đã xóa nhóm';
     }
     async function importEnv(){
-      const res = await fetch('/api/watch-groups/import-env', { method:'POST' });
+      const res = await fetch('/api/watch-groups/import-env', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ reader_id: state.readerId }) });
       const data = await res.json(); if (!res.ok) throw new Error(data.error || 'Import failed');
-      state.groups = data.groups || [];
+      state.groups = (data.groups || []).map((g) => ({ ...g, bot_ids: g.bot_ids || [], filter: g.filter || { mode:'inherit', filters:[], reject:[] } }));
       state.selected = 0;
       renderList(); renderForm();
-      els.status.textContent = data.imported ? `Import ${data.imported} nhóm từ .env` : 'Không có nhóm mới từ .env';
+      els.status.textContent = data.imported ? `Import ${data.imported} nhóm cho ${state.readerId}` : 'Không có nhóm mới từ .env';
     }
     $('queueBtn').onclick = () => location.href = '/';
     $('botsBtn').onclick = () => location.href = '/bots';
@@ -1392,6 +1493,8 @@ WATCH_HTML = r"""<!doctype html>
     $('saveBtn').onclick = () => saveGroups().catch((e) => els.status.textContent = e.message);
     $('deleteBtn').onclick = () => deleteCurrent().catch((e) => els.status.textContent = e.message);
     els.botIdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); try { addBotsFromInput(); } catch (err) { els.status.textContent = err.message; } } });
+    els.filterMode.addEventListener('change', () => { syncFilterToGroup(); syncFilterForm(); renderList(); });
+    ['filterTextInput','filterBox1Input','filterBox2Input'].forEach((id) => { $(id).addEventListener('input', () => { syncFilterToGroup(); renderList(); }); });
     ['nameInput','enabledInput'].forEach((id) => { $(id).addEventListener('input', () => { syncForm(); renderList(); }); $(id).addEventListener('change', () => { syncForm(); renderList(); }); });
     loadGroups().catch((e) => els.status.textContent = e.message);
   </script>
@@ -1753,6 +1856,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_html(WATCH_HTML)
             return
 
+        if parsed.path == "/watch-groups":
+            self._send_html(WATCH_HTML)
+            return
+
         if parsed.path == "/bots":
             self._send_html(BOTS_HTML)
             return
@@ -1774,7 +1881,9 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/filters":
-            self._send_json(self._filters_snapshot())
+            query = parse_qs(parsed.query)
+            reader_id = str((query.get("reader_id") or ["app1"])[0]).strip() or "app1"
+            self._send_json(self._filters_snapshot(reader_id=reader_id))
             return
 
         if parsed.path == "/api/broadcast-groups":
@@ -1786,7 +1895,25 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/watch-groups":
-            self._send_json(self._watch_groups_snapshot())
+            query = parse_qs(parsed.query)
+            reader_id = str((query.get("reader_id") or [""])[0]).strip() or None
+            self._send_json(self._watch_groups_snapshot(reader_id=reader_id))
+            return
+
+        if parsed.path == "/api/reader-group-filters":
+            query = parse_qs(parsed.query)
+            reader_id = str((query.get("reader_id") or [""])[0]).strip()
+            chat_id = str((query.get("chat_id") or [""])[0]).strip()
+            if not reader_id or not chat_id:
+                self._send_json({"error": "reader_id and chat_id are required"}, status=400)
+                return
+            self._send_json(
+                {
+                    "reader_id": reader_id,
+                    "chat_id": chat_id,
+                    "filter": self.db.get_reader_group_filter(reader_id, chat_id),
+                }
+            )
             return
 
         if parsed.path == "/api/bot-slots":
@@ -1880,6 +2007,10 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/watch-groups/delete":
             self._delete_watch_group()
+            return
+
+        if parsed.path == "/api/reader-group-filters":
+            self._save_reader_group_filter()
             return
 
         if parsed.path == "/api/watch-groups/import-env":
@@ -2288,12 +2419,18 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                 self.config.queue_ttl_seconds,
             )
 
-    def _filters_snapshot(self) -> Dict[str, object]:
+    def _filters_snapshot(self, *, reader_id: str = "app1") -> Dict[str, object]:
         path = Path(self.config.filter_config_path)
-        filters, reject, exclude_groups = _load_filter_config(path)
+        filters, reject, exclude_groups, readers = _load_filter_config(path)
+        if reader_id != "app1" and reader_id in readers:
+            reader_payload = readers[reader_id]
+            filters = reader_payload.get("filters") or []
+            reject = reader_payload.get("reject") or []
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "path": str(path),
+            "reader_id": reader_id,
+            "readers": TELEGRAM_READERS,
             "filters": filters,
             "reject": reject,
             "exclude_telegram_groups": exclude_groups,
@@ -2480,11 +2617,13 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                     bot_ids.append(bot_id)
         return bot_ids
 
-    def _watch_groups_snapshot(self) -> Dict[str, object]:
-        groups = self.db.list_watch_groups()
+    def _watch_groups_snapshot(self, *, reader_id: Optional[str] = None) -> Dict[str, object]:
+        groups = self.db.list_watch_groups(reader_id=reader_id)
         picker_bots = _env_broadcast_bots(self.db)
         return {
             "generated_at": datetime.now(timezone.utc).isoformat(),
+            "reader_id": reader_id,
+            "readers": TELEGRAM_READERS,
             "groups": groups,
             "bots": picker_bots,
         }
@@ -2495,6 +2634,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             raw_groups = payload.get("groups")
             if not isinstance(raw_groups, list):
                 raise ValueError("groups must be a list")
+            reader_id = str(payload.get("reader_id") or "app1").strip() or "app1"
 
             normalized = []
             for raw in raw_groups:
@@ -2503,6 +2643,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                 normalized.append(
                     {
                         "id": raw.get("id"),
+                        "reader_id": reader_id,
                         "name": str(raw.get("name") or "").strip(),
                         "chat_id": str(raw.get("chat_id") or "").strip(),
                         "enabled": bool(raw.get("enabled", True)),
@@ -2510,19 +2651,62 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                         "bot_ids": self._normalize_watch_group_bot_ids(raw),
                     }
                 )
+                filter_payload = raw.get("filter")
+                if isinstance(filter_payload, dict):
+                    chat_id = str(raw.get("chat_id") or "").strip()
+                    if chat_id:
+                        self.db.upsert_reader_group_filter(
+                            reader_id,
+                            chat_id,
+                            mode=str(filter_payload.get("mode") or "inherit"),
+                            filters=filter_payload.get("filters"),
+                            reject=filter_payload.get("reject"),
+                        )
 
-            groups = self.db.replace_watch_groups(normalized)
+            groups = self.db.replace_watch_groups_for_reader(reader_id, normalized)
         except Exception as exc:
             logger.exception("Failed to save watch groups")
             self._send_json({"error": str(exc)}, status=400)
             return
 
-        self._send_json(self._watch_groups_snapshot())
+        self._send_json(self._watch_groups_snapshot(reader_id=reader_id))
+
+    def _save_reader_group_filter(self) -> None:
+        try:
+            payload = self._read_json_body()
+            reader_id = str(payload.get("reader_id") or "").strip()
+            chat_id = str(payload.get("chat_id") or "").strip()
+            if not reader_id or not chat_id:
+                raise ValueError("reader_id and chat_id are required")
+            filter_payload = payload.get("filter")
+            if not isinstance(filter_payload, dict):
+                raise ValueError("filter must be an object")
+            saved = self.db.upsert_reader_group_filter(
+                reader_id,
+                chat_id,
+                mode=str(filter_payload.get("mode") or "inherit"),
+                filters=filter_payload.get("filters"),
+                reject=filter_payload.get("reject"),
+            )
+        except Exception as exc:
+            logger.exception("Failed to save reader group filter")
+            self._send_json({"error": str(exc)}, status=400)
+            return
+
+        self._send_json(
+            {
+                "reader_id": reader_id,
+                "chat_id": chat_id,
+                "filter": saved,
+            }
+        )
 
     def _delete_watch_group(self) -> None:
+        reader_id = "app1"
         try:
             payload = self._read_json_body()
             group_id = int(payload.get("id"))
+            reader_id = str(payload.get("reader_id") or "app1").strip() or "app1"
             if not self.db.delete_watch_group(group_id):
                 raise ValueError(f"watch group not found: {group_id}")
         except Exception as exc:
@@ -2530,28 +2714,34 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             self._send_json({"error": str(exc)}, status=400)
             return
 
-        self._send_json(self._watch_groups_snapshot())
+        self._send_json(self._watch_groups_snapshot(reader_id=reader_id))
 
     def _import_watch_groups_from_env(self) -> None:
+        imported = 0
+        reader_id = "app1"
         try:
-            load_dotenv(Path(__file__).resolve().parent / ".env")
+            payload = self._read_json_body()
+            reader_id = str(payload.get("reader_id") or "app1").strip() or "app1"
+            env_file = ".env.app2" if reader_id == "app2" else ".env"
+            load_dotenv(Path(__file__).resolve().parent / env_file)
             raw_value = os.environ.get("TELEGRAM_CLIENT_TARGETS", "").strip()
             if not raw_value:
-                raise ValueError("TELEGRAM_CLIENT_TARGETS is empty in .env")
+                raise ValueError(f"TELEGRAM_CLIENT_TARGETS is empty in {env_file}")
 
             targets = _parse_client_targets(raw_value, "")
             if not targets:
                 raise ValueError("No targets parsed from TELEGRAM_CLIENT_TARGETS")
 
-            existing = {group["chat_id"] for group in self.db.list_watch_groups()}
-            merged = list(self.db.list_watch_groups())
-            imported = 0
+            existing_groups = self.db.list_watch_groups(reader_id=reader_id)
+            existing = {group["chat_id"] for group in existing_groups}
+            merged = list(existing_groups)
             for target in targets:
                 chat_id = target.chat_ref or target.entity_ref
                 if chat_id in existing:
                     continue
                 merged.append(
                     {
+                        "reader_id": reader_id,
                         "name": target.label,
                         "chat_id": chat_id,
                         "enabled": True,
@@ -2561,13 +2751,13 @@ class QueueUiHandler(BaseHTTPRequestHandler):
                 imported += 1
 
             if imported:
-                self.db.replace_watch_groups(merged)
+                self.db.replace_watch_groups_for_reader(reader_id, merged)
         except Exception as exc:
             logger.exception("Failed to import watch groups from env")
             self._send_json({"error": str(exc)}, status=400)
             return
 
-        snapshot = self._watch_groups_snapshot()
+        snapshot = self._watch_groups_snapshot(reader_id=reader_id)
         snapshot["imported"] = imported
         self._send_json(snapshot)
 
@@ -2739,18 +2929,34 @@ class QueueUiHandler(BaseHTTPRequestHandler):
         try:
             raw_body = self.rfile.read(length).decode("utf-8")
             payload = json.loads(raw_body)
+            reader_id = str(payload.get("reader_id") or "app1").strip() or "app1"
             filters = _normalize_filter_rules(payload.get("filters", []))
             path = Path(self.config.filter_config_path)
-            existing_filters, existing_reject, existing_exclude = _load_filter_config(path)
+            existing_filters, existing_reject, existing_exclude, existing_readers = _load_filter_config(
+                path
+            )
             if "reject" in payload:
                 reject = _normalize_reject_rules(payload.get("reject"))
             else:
-                reject = existing_reject
+                reject = existing_reject if reader_id == "app1" else (
+                    existing_readers.get(reader_id, {}).get("reject") or []
+                )
             if "exclude_telegram_groups" in payload:
                 exclude_groups = _normalize_exclude_groups(payload.get("exclude_telegram_groups"))
             else:
                 exclude_groups = existing_exclude
-            _write_filter_config(path, filters, reject, exclude_groups)
+            if reader_id == "app1":
+                _write_filter_config(path, filters, reject, exclude_groups, readers=existing_readers)
+            else:
+                readers = dict(existing_readers)
+                readers[reader_id] = {"filters": filters, "reject": reject}
+                _write_filter_config(
+                    path,
+                    existing_filters,
+                    existing_reject,
+                    exclude_groups,
+                    readers=readers,
+                )
         except Exception as exc:
             logger.exception("Failed to save message filters")
             self._send_json({"error": str(exc)}, status=400)
@@ -2760,6 +2966,8 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             {
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "path": str(path),
+                "reader_id": reader_id,
+                "readers": TELEGRAM_READERS,
                 "filters": filters,
                 "reject": reject,
                 "exclude_telegram_groups": exclude_groups,
@@ -2958,15 +3166,15 @@ def _statuses_query(query: Dict[str, List[str]]) -> List[str]:
 
 
 def _load_filter_rules(path: Path) -> List[Dict[str, Any]]:
-    filters, _reject, _exclude = _load_filter_config(path)
+    filters, _reject, _exclude, _readers = _load_filter_config(path)
     return filters
 
 
 def _load_filter_config(
     path: Path,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str], Dict[str, Dict[str, Any]]]:
     if not path.exists():
-        return [], [], []
+        return [], [], [], {}
 
     with path.open(encoding="utf-8") as file:
         payload = json.load(file)
@@ -2975,15 +3183,31 @@ def _load_filter_config(
         raw_filters = payload.get("filters", [])
         raw_reject = payload.get("reject", [])
         raw_exclude = payload.get("exclude_telegram_groups") or payload.get("exclude_groups") or []
+        raw_readers = payload.get("readers") or {}
     else:
         raw_filters = payload
         raw_reject = []
         raw_exclude = []
+        raw_readers = {}
+
+    readers: Dict[str, Dict[str, Any]] = {}
+    if isinstance(raw_readers, dict):
+        for reader_id, reader_payload in raw_readers.items():
+            if not isinstance(reader_payload, dict):
+                continue
+            key = str(reader_id).strip()
+            if not key:
+                continue
+            readers[key] = {
+                "filters": _normalize_filter_rules(reader_payload.get("filters") or []),
+                "reject": _normalize_reject_rules(reader_payload.get("reject") or []),
+            }
 
     return (
         _normalize_filter_rules(raw_filters),
         _normalize_reject_rules(raw_reject),
         _normalize_exclude_groups(raw_exclude),
+        readers,
     )
 
 
@@ -3075,8 +3299,8 @@ def _bot_token() -> str:
 
 
 def _write_filter_rules(path: Path, filters: List[Dict[str, Any]]) -> None:
-    _, reject, exclude_groups = _load_filter_config(path)
-    _write_filter_config(path, filters, reject, exclude_groups)
+    _, reject, exclude_groups, readers = _load_filter_config(path)
+    _write_filter_config(path, filters, reject, exclude_groups, readers=readers)
 
 
 def _write_filter_config(
@@ -3084,13 +3308,21 @@ def _write_filter_config(
     filters: List[Dict[str, Any]],
     reject: List[Dict[str, Any]],
     exclude_groups: Optional[List[str]] = None,
+    *,
+    readers: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: Dict[str, Any] = {"filters": filters, "reject": reject}
     if exclude_groups is None:
-        _, _, exclude_groups = _load_filter_config(path)
+        _, _, exclude_groups, existing_readers = _load_filter_config(path)
+        if readers is None:
+            readers = existing_readers
     if exclude_groups:
         payload["exclude_telegram_groups"] = exclude_groups
+    if readers is None:
+        _, _, _, readers = _load_filter_config(path)
+    if readers:
+        payload["readers"] = readers
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

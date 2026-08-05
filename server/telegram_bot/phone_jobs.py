@@ -14,6 +14,7 @@ from deeplink_resolve import (
     resolve_link_for_open,
     resolve_live_url,
 )
+from time_parse import extract_time_from_item
 
 
 def phone_config() -> Dict[str, object]:
@@ -72,7 +73,7 @@ def extract_link_from_item(item: Dict[str, Any]) -> str:
     return ""
 
 
-from time_parse import extract_time_from_item
+def phone_job_from_queue_item(item: Dict[str, Any]) -> Optional[Dict[str, object]]:
     url = extract_link_from_item(item)
     if not url:
         return None
