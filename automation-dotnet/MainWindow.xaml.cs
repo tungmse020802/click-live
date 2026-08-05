@@ -107,7 +107,7 @@ public partial class MainWindow : Window
                 _settingsService.Settings.QueueUrl = url;
                 _settingsService.Settings.QueueUsername = user;
                 _settingsService.Settings.QueuePassword = pass;
-                _settingsService.Settings.PullToken = _poller.ActivePullToken; // Real token!
+                _settingsService.Settings.PullToken = _poller.ActivePullToken;
                 _settingsService.SaveSettings();
 
                 _poller.StartPolling(url, _poller.ActivePullToken, user);
@@ -217,17 +217,27 @@ public partial class MainWindow : Window
 
     private void BtnPickPoint_Click(object sender, RoutedEventArgs e)
     {
-        var picker = new PickPointWindow();
-        if (picker.ShowDialog() == true && picker.SelectedPoint.HasValue)
+        // Ẩn MainWindow tạm thời để chọn điểm trên toàn màn hình
+        Hide();
+        try
         {
-            int x = (int)picker.SelectedPoint.Value.X;
-            int y = (int)picker.SelectedPoint.Value.Y;
-            TxtClickX.Text = x.ToString();
-            TxtClickY.Text = y.ToString();
-            _settingsService.Settings.ClickX = x;
-            _settingsService.Settings.ClickY = y;
-            _settingsService.SaveSettings();
-            _logger.Log("click", $"Đã chọn vị trí click ({x}, {y})");
+            var picker = new PickPointWindow();
+            if (picker.ShowDialog() == true && picker.SelectedPoint.HasValue)
+            {
+                int x = (int)picker.SelectedPoint.Value.X;
+                int y = (int)picker.SelectedPoint.Value.Y;
+                TxtClickX.Text = x.ToString();
+                TxtClickY.Text = y.ToString();
+                _settingsService.Settings.ClickX = x;
+                _settingsService.Settings.ClickY = y;
+                _settingsService.SaveSettings();
+                _logger.Log("click", $"Đã chọn vị trí click ({x}, {y})");
+            }
+        }
+        finally
+        {
+            Show();
+            Activate();
         }
     }
 

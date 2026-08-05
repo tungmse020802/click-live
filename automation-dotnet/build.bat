@@ -1,4 +1,8 @@
 @echo off
+echo Automatically pulling latest code from Git...
+git pull origin main
+
+echo.
 echo Publishing Click Live Automation Tool (.NET Core Native WPF)...
 
 dotnet publish -c Release -r win-x64 --self-contained false -o ./dist
