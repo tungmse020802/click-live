@@ -52,6 +52,11 @@ public class DesktopLoginResponse
     [JsonPropertyName("user")]
     public string? User { get; set; }
 
+    [JsonPropertyName("username")]
+    public string? Username { get; set; }
+
     [JsonPropertyName("pull_token")]
     public string? PullToken { get; set; }
+
+    public string? ResolvedUser => !string.IsNullOrWhiteSpace(User) ? User : Username;
 }

@@ -51,7 +51,7 @@ public class QueuePollerService
             }
 
             IsAuthenticated = true;
-            ActiveUser = result.User ?? username;
+            ActiveUser = result.ResolvedUser ?? username;
             ActivePullToken = result.PullToken;
             OnAuthStatusChanged?.Invoke(ActiveUser);
             _logger.Log("auth", $"Đăng nhập thành công user={ActiveUser}");
@@ -105,7 +105,14 @@ public class QueuePollerService
                     }
                     else if (data != null && !data.Ok)
                     {
-                        _logger.Log("poll", "Poll bị từ chối", data.Error ?? "Unauthorized");
+                        var err = data.Error ?? "Unauthorized";
+                        if (err.Contains("Unauthorized", StringComparison.OrdinalIgnoreCase))
+                        {
+                            IsAuthenticated = false;
+                            ActivePullToken = "";
+                            OnAuthStatusChanged?.Invoke("");
+                        }
+                        _logger.Log("poll", "Poll bị từ chối", err);
                     }
                 }
                 catch (OperationCanceledException) { break; }

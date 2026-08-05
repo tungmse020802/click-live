@@ -34,14 +34,36 @@ public partial class MainWindow : Window
 
         LoadSettingsToUI();
 
-        if (!string.IsNullOrEmpty(_settingsService.Settings.PullToken))
+        Loaded += async (_, _) => await TryAutoConnectAsync();
+    }
+
+    private async Task TryAutoConnectAsync()
+    {
+        var url = _settingsService.Settings.QueueUrl?.Trim();
+        var user = _settingsService.Settings.QueueUsername?.Trim();
+        var pass = _settingsService.Settings.QueuePassword;
+        if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(user) || string.IsNullOrEmpty(pass))
         {
-            Poller_OnAuthStatusChanged(_settingsService.Settings.QueueUsername);
-            _poller.StartPolling(
-                _settingsService.Settings.QueueUrl,
-                _settingsService.Settings.PullToken,
-                _settingsService.Settings.QueueUsername
-            );
+            return;
+        }
+
+        try
+        {
+            TxtStatus.Text = "Đang kết nối queue server...";
+            if (await _poller.LoginAsync(url, user, pass))
+            {
+                _settingsService.Settings.PullToken = _poller.ActivePullToken;
+                _settingsService.SaveSettings();
+                _poller.StartPolling(url, _poller.ActivePullToken, user);
+                TxtStatus.Text = "Sẵn sàng — đã kết nối queue server.";
+            }
+        }
+        catch (Exception ex)
+        {
+            _settingsService.Settings.PullToken = "";
+            _settingsService.SaveSettings();
+            Poller_OnAuthStatusChanged("");
+            TxtStatus.Text = $"Không kết nối được queue: {ex.Message}. Kiểm tra URL/user/pass rồi bấm Đăng nhập.";
         }
     }
 

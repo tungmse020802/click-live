@@ -1910,6 +1910,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
             {
                 "ok": True,
                 "username": username,
+                "user": username,
                 "pull_token": pull_token,
                 "queue_url": queue_url,
             }
