@@ -9,6 +9,6 @@ cd "$ROOT_DIR"
 echo "Creating clean automation-dotnet.zip..."
 rm -f automation-dotnet.zip
 
-zip -r automation-dotnet.zip automation-dotnet -x "automation-dotnet/bin/*" "automation-dotnet/obj/*" "automation-dotnet/dist/*" "automation-dotnet/.vs/*" "automation-dotnet/*.user"
+zip -r automation-dotnet.zip automation-dotnet -x "automation-dotnet/bin/*" "automation-dotnet/obj/*" "automation-dotnet/dist/*" "automation-dotnet/dist-standalone/*" "automation-dotnet/.vs/*" "automation-dotnet/*.user"
 
 echo "Created automation-dotnet.zip successfully!"

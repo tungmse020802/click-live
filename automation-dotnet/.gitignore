@@ -2,6 +2,7 @@
 [Bb]in/
 [Oo]bj/
 [Dd]ist/
+dist-standalone/
 .vs/
 *.user
 *.suo
