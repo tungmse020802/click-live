@@ -168,6 +168,14 @@ bash login_telethon_app2.sh
 python3 telethon_reader.py   # test local (set -a && source .env.app2 && set +a)
 ```
 
+**Acc app-2 riêng API** (vd `+84567660222`, api_id riêng trên my.telegram.org):
+
+```bash
+bash setup_app2_tele_reader.sh
+SERVER_PASS='...' bash login_app2_tele_reader_remote.sh
+# hoặc chỉnh nhóm: TELEGRAM_CLIENT_TARGETS_APP2='#-100...' bash login_app2_tele_reader_remote.sh
+```
+
 Trên server sau deploy:
 
 ```bash

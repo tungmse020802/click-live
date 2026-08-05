@@ -3,6 +3,8 @@
 *.env
 !desktop-tool/.env
 !server/telegram_bot/.env
+!server/telegram_bot/.env.app2.example
+server/telegram_bot/.env.app2
 !ios_wda_controller/config.env
 
 # Python
