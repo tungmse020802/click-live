@@ -31,16 +31,17 @@ public class ClickSchedulerService
             try
             {
                 var settings = _settingsService.Settings;
-
-                double targetWaitMs = item.ClickAfterMs > 0 ? item.ClickAfterMs : settings.DefaultWaitSec * 1000;
                 double offsetMs = settings.DelayOffsetMs;
-
                 double leadAdvanceMs = OperatingSystem.IsWindows() ? 30.0 : 10.0;
-                double totalDelayMs = Math.Max(0, targetWaitMs + offsetMs - leadAdvanceMs);
 
-                DateTime targetDisplayTime = DateTime.Now.AddMilliseconds(targetWaitMs + offsetMs);
+                var schedule = TimingHelper.ResolveSchedule(item, settings, leadAdvanceMs);
+                double totalDelayMs = schedule.TotalDelayMs;
+                DateTime targetDisplayTime = schedule.TargetDisplayTime;
 
-                _logger.Log("wait", $"Hẹn click sau {totalDelayMs:F0}ms", $"Target={targetDisplayTime:HH:mm:ss.fff}, Offset={offsetMs:+0.00;-0.00;0.00}ms");
+                _logger.Log(
+                    "wait",
+                    $"Hẹn click sau {totalDelayMs:F0}ms ({schedule.Source})",
+                    $"Display={schedule.DisplayRemainingMs:F0}ms, Target={targetDisplayTime:HH:mm:ss.fff}, Offset={offsetMs:+0.00;-0.00;0.00}ms");
                 OnCountdownStarted?.Invoke(targetDisplayTime);
 
                 var sw = Stopwatch.StartNew();

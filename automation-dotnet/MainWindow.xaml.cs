@@ -195,7 +195,8 @@ public partial class MainWindow : Window
     {
         Dispatcher.Invoke(() =>
         {
-            TxtStatus.Text = $"Nhận job mới: {item.TimeLabel} — ClickAfter={item.ClickAfterMs}ms";
+            var schedule = TimingHelper.ResolveSchedule(item, _settingsService.Settings, 30);
+            TxtStatus.Text = $"Nhận job mới: {item.TimeLabel} — {TimingHelper.FormatRemainingSeconds(schedule.DisplayRemainingMs / 1000.0)} ({schedule.Source})";
             _scheduler.ScheduleJob(item);
         });
     }

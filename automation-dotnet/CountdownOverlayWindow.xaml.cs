@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Threading;
+using AutomationDotNet.Services;
 
 namespace AutomationDotNet;
 
@@ -65,9 +66,11 @@ public partial class CountdownOverlayWindow : Window
 
         double remainingMs = (_targetTime.Value - DateTime.Now).TotalMilliseconds;
         double remainingSec = Math.Max(0, remainingMs / 1000.0);
+        bool longFormat = remainingSec >= 60;
 
-        TxtClock.Text = remainingSec.ToString("F2");
-        TxtClock.FontSize = 64;
+        TxtClock.Text = TimingHelper.FormatRemainingSeconds(remainingSec);
+        TxtClock.FontSize = longFormat ? 52 : 64;
+        Width = longFormat ? 380 : 300;
 
         if (remainingMs <= 0)
         {
