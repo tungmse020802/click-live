@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#17212b">
-  <meta name="click-live-queue-version" content="mobile-responsive-v8">
+  <meta name="click-live-queue-version" content="mobile-responsive-v9">
   <title>Hàng đợi — Telegram</title>
   <style>
     :root {
@@ -54,23 +54,28 @@
     }
 
     .queue-subheader {
+      flex: 0 0 auto;
       min-width: 0;
+      max-height: 36dvh;
       display: flex;
       flex-direction: column;
       gap: 0;
       border-bottom: 1px solid var(--tg-border);
       background: var(--tg-panel);
+      overflow: hidden;
     }
 
     .topbar {
+      flex: 0 0 auto;
       display: flex;
-      align-items: center;
-      justify-content: space-between;
+      align-items: flex-start;
+      justify-content: flex-start;
       gap: 10px;
       padding: 10px 12px;
       background: var(--tg-header);
       border-bottom: 1px solid var(--tg-border);
       flex-wrap: wrap;
+      min-width: 0;
     }
 
     .topbar-row {
@@ -99,13 +104,17 @@
 
     .shell.header-collapsed .queue-subheader {
       display: none;
+      max-height: 0;
       border-bottom: 0;
     }
 
-    .topbar,
-    .queue-subheader {
-      flex: 0 0 auto;
-      min-width: 0;
+    .shell.header-collapsed .topbar {
+      padding: 8px 12px;
+      border-bottom-color: var(--tg-border);
+    }
+
+    .shell.header-collapsed .brand h1 {
+      font-size: 15px;
     }
 
     .group-filter-bar {
@@ -200,15 +209,6 @@
     .chip-btn:hover {
       background: #2a3746;
       color: var(--tg-text);
-    }
-
-    .shell.header-collapsed .topbar {
-      padding: 8px 12px;
-      border-bottom-color: transparent;
-    }
-
-    .shell.header-collapsed .brand h1 {
-      font-size: 15px;
     }
 
     .brand { min-width: 0; flex: 1 1 auto; }
@@ -332,6 +332,7 @@
       width: 100%;
       min-width: 0;
       box-sizing: border-box;
+      flex: 0 0 auto;
     }
 
     .stat-pill {
@@ -358,7 +359,7 @@
     .desktop-dot.online { background: var(--tg-green); }
 
     .chat-shell {
-      flex: 1 1 0;
+      flex: 1 1 0%;
       min-height: 0;
       overflow: hidden;
       display: flex;
@@ -367,11 +368,10 @@
     }
 
     .chat-feed {
-      flex: 1 1 0;
+      flex: 1 1 0%;
       min-height: 0;
-      height: 100%;
       overflow-x: hidden;
-      overflow-y: scroll;
+      overflow-y: auto;
       -webkit-overflow-scrolling: touch;
       overscroll-behavior-y: contain;
       touch-action: pan-y;
@@ -586,35 +586,14 @@
         height: 100%;
         height: 100dvh;
         overflow: hidden;
-        position: fixed;
-        inset: 0;
         width: 100%;
       }
 
       .shell {
         height: 100%;
-        max-height: 100%;
+        max-height: 100dvh;
         min-width: 0;
         overflow: hidden;
-      }
-
-      .chat-shell {
-        flex: 1 1 0;
-        min-height: 0;
-        overflow: hidden;
-      }
-
-      .chat-feed {
-        flex: 1 1 0;
-        min-height: 0;
-        overflow-y: scroll;
-        -webkit-overflow-scrolling: touch;
-        overscroll-behavior-y: contain;
-        touch-action: pan-y;
-      }
-
-      .jump-newest {
-        position: absolute;
       }
 
       .lbl-full { display: none; }
@@ -624,9 +603,15 @@
       .topbar {
         flex-direction: column;
         align-items: stretch;
+        justify-content: flex-start;
         padding: max(8px, var(--safe-top)) 10px 8px;
         gap: 8px;
-        max-height: min(52dvh, 420px);
+        max-height: none;
+        overflow: visible;
+      }
+
+      .shell:not(.header-collapsed) .topbar {
+        max-height: min(42dvh, 360px);
         overflow-x: hidden;
         overflow-y: auto;
         -webkit-overflow-scrolling: touch;
@@ -644,13 +629,14 @@
         font-size: 11px;
         white-space: normal;
         display: -webkit-box;
-        -webkit-line-clamp: 2;
+        -webkit-line-clamp: 1;
         -webkit-box-orient: vertical;
         overflow: hidden;
       }
 
       .toolbar {
         gap: 6px;
+        width: 100%;
       }
 
       .toolbar-filters {
@@ -691,7 +677,7 @@
       .toolbar-actions .button {
         width: 100%;
         min-width: 0;
-        height: 42px;
+        height: 40px;
         padding: 0 8px;
         font-size: 12px;
       }
@@ -716,48 +702,51 @@
         height: 40px;
       }
 
-      .stats-bar {
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        overflow-y: hidden;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
-        padding: 8px 10px;
-        gap: 5px;
-        mask-image: linear-gradient(to right, #000 92%, transparent);
-        -webkit-mask-image: linear-gradient(to right, #000 92%, transparent);
+      .live-status {
+        font-size: 11px;
+        padding: 0;
+        min-height: 0;
       }
 
-      .stats-bar::-webkit-scrollbar {
-        display: none;
+      .queue-subheader {
+        flex: 0 0 auto;
+        max-height: min(28dvh, 220px);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .stats-bar {
+        flex: 0 0 auto;
+        flex-wrap: wrap;
+        overflow: visible;
+        mask-image: none;
+        -webkit-mask-image: none;
+        padding: 6px 10px;
+        gap: 5px;
       }
 
       .stat-pill {
-        flex-shrink: 0;
-        height: 28px;
+        flex: 0 0 auto;
+        height: 26px;
         padding: 0 8px;
         font-size: 11px;
-        max-width: none;
       }
 
       .stat-pill strong {
         font-size: 12px;
       }
 
-      .live-status {
-        font-size: 11px;
-        padding-bottom: 2px;
-      }
-
-      .queue-subheader {
-        min-width: 0;
-      }
-
       .group-filter-bar {
+        flex: 1 1 auto;
+        min-height: 0;
         flex-direction: column;
         align-items: stretch;
-        padding: 8px 10px;
+        padding: 6px 10px;
         gap: 6px;
+        overflow-x: hidden;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
       }
 
       .group-filter-title {
@@ -779,8 +768,9 @@
         max-width: 100%;
         white-space: normal;
         line-height: 1.25;
-        min-height: 36px;
-        padding: 6px 8px;
+        min-height: 34px;
+        padding: 5px 8px;
+        font-size: 11px;
       }
 
       .group-chip-text {
@@ -798,11 +788,23 @@
 
       .group-filter-actions .chip-btn {
         flex: 1 1 0;
-        height: 36px;
+        height: 34px;
         font-size: 12px;
       }
 
+      .chat-shell {
+        flex: 1 1 0%;
+        min-height: 35dvh;
+        overflow: hidden;
+      }
+
       .chat-feed {
+        flex: 1 1 0%;
+        min-height: 0;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-y: contain;
+        touch-action: pan-y;
         padding: 8px 10px calc(10px + var(--safe-bottom));
         gap: 8px;
       }
@@ -864,6 +866,7 @@
       }
 
       .jump-newest {
+        position: absolute;
         left: 10px;
         right: 10px;
         transform: none;
@@ -2209,7 +2212,7 @@
       const shell = document.querySelector('.shell');
       const btn = document.getElementById('headerCollapseBtn');
       if (!shell || !btn) return;
-      const storageKey = 'click-live-queue-header-collapsed';
+      const storageKey = 'click-live-queue-header-collapsed-v9';
       function apply(collapsed) {
         shell.classList.toggle('header-collapsed', collapsed);
         btn.textContent = collapsed ? '▼' : '▲';
@@ -2217,8 +2220,13 @@
         btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       }
       const saved = localStorage.getItem(storageKey);
-      const defaultCollapsed = window.matchMedia('(max-width: 640px)').matches;
-      apply(saved === '1' || (saved === null && defaultCollapsed));
+      const mobile = window.matchMedia('(max-width: 640px)').matches;
+      if (saved === null) {
+        apply(mobile);
+        localStorage.setItem(storageKey, mobile ? '1' : '0');
+      } else {
+        apply(saved === '1');
+      }
       btn.addEventListener('click', () => {
         const next = !shell.classList.contains('header-collapsed');
         apply(next);
