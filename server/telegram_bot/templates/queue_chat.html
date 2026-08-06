@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#17212b">
-  <meta name="click-live-queue-version" content="mobile-responsive-v5">
+  <meta name="click-live-queue-version" content="mobile-responsive-v6">
   <title>Hàng đợi — Telegram</title>
   <style>
     :root {
@@ -310,6 +310,8 @@
       height: 36px;
     }
 
+    .lbl-short { display: none; }
+
     .stats-bar {
       display: flex;
       flex-wrap: wrap;
@@ -450,6 +452,8 @@
       margin-top: 6px;
       font-size: 12px;
       color: var(--tg-muted);
+      line-height: 1.45;
+      overflow-wrap: anywhere;
     }
     .chat-time-row.time-warn { color: #fbbf24; }
     .chat-time-row strong { color: var(--tg-text); font-weight: 600; }
@@ -529,6 +533,28 @@
       color: var(--tg-link);
     }
 
+    @media (min-width: 641px) and (max-width: 899px) {
+      .topbar {
+        padding: 10px 14px;
+      }
+
+      .toolbar {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      .toolbar-filters,
+      .toolbar-actions {
+        flex: 1 1 280px;
+      }
+
+      .chat-feed {
+        padding-left: 14px;
+        padding-right: 14px;
+      }
+    }
+
     @media (min-width: 900px) {
       .toolbar { width: auto; flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; align-items: center; }
       .toolbar-filters,
@@ -545,6 +571,10 @@
         height: 100dvh;
         min-width: 0;
       }
+
+      .lbl-full { display: none; }
+      .lbl-short { display: inline; }
+      .mobile-hide { display: none !important; }
 
       .topbar {
         flex-direction: column;
@@ -568,6 +598,10 @@
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
+      }
+
+      .toolbar {
+        gap: 6px;
       }
 
       .toolbar-filters {
@@ -601,21 +635,21 @@
 
       .toolbar-actions {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 6px;
       }
 
       .toolbar-actions .button {
         width: 100%;
         min-width: 0;
-        height: 40px;
-        padding: 0 6px;
-        font-size: 11px;
+        height: 42px;
+        padding: 0 8px;
+        font-size: 12px;
       }
 
       .toolbar-actions .button.primary {
         grid-column: 1 / -1;
-        font-size: 13px;
+        font-size: 14px;
         height: 44px;
       }
 
@@ -630,18 +664,31 @@
 
       .toolbar-actions #logoutBtn {
         grid-column: 1 / -1;
+        height: 40px;
       }
 
       .stats-bar {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overflow-y: hidden;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
         padding: 8px 10px;
         gap: 5px;
+        mask-image: linear-gradient(to right, #000 92%, transparent);
+        -webkit-mask-image: linear-gradient(to right, #000 92%, transparent);
+      }
+
+      .stats-bar::-webkit-scrollbar {
+        display: none;
       }
 
       .stat-pill {
+        flex-shrink: 0;
         height: 28px;
         padding: 0 8px;
         font-size: 11px;
-        max-width: 100%;
+        max-width: none;
       }
 
       .stat-pill strong {
@@ -670,13 +717,15 @@
       }
 
       .group-checkbox-list {
-        flex: 1 1 100%;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         width: 100%;
         gap: 5px;
       }
 
       .group-chip {
-        flex: 1 1 calc(50% - 4px);
+        flex: none;
+        width: 100%;
         min-width: 0;
         max-width: 100%;
         white-space: normal;
@@ -687,8 +736,10 @@
 
       .group-chip-text {
         white-space: normal;
-        overflow: visible;
-        text-overflow: unset;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
       }
 
       .group-filter-actions {
@@ -712,21 +763,49 @@
       }
 
       .chat-head {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        grid-template-areas:
+          "room room"
+          "badge meta";
         gap: 4px 8px;
+        align-items: center;
       }
 
       .chat-room {
+        grid-area: room;
         white-space: normal;
         word-break: break-word;
-        flex: 1 1 100%;
+      }
+
+      .chat-head .badge {
+        grid-area: badge;
+        justify-self: start;
+      }
+
+      .chat-meta {
+        grid-area: meta;
+        justify-self: end;
       }
 
       .chat-body {
         font-size: 14px;
       }
 
+      .chat-time-row {
+        font-size: 11px;
+      }
+
+      .chat-time-row .target-cd {
+        display: block;
+        margin-top: 2px;
+        color: var(--tg-link);
+      }
+
       .chat-actions {
-        flex-direction: column;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
       }
 
       .chat-actions .button,
@@ -742,6 +821,20 @@
         width: auto;
         max-width: calc(100% - 20px);
         justify-content: center;
+      }
+    }
+
+    @media (max-width: 380px) {
+      .toolbar-actions {
+        grid-template-columns: 1fr;
+      }
+
+      .toolbar-actions .button.primary {
+        grid-column: auto;
+      }
+
+      .group-checkbox-list {
+        grid-template-columns: 1fr;
       }
     }
   </style>
@@ -774,12 +867,12 @@
           <button id="reloadBtn" class="button" title="Tải lại">↻ Tải lại</button>
         </div>
         <div class="toolbar-actions">
-          <button id="systemFiltersBtn" class="button" title="Lọc Ingestion Backend">Lọc System</button>
-          <button id="clientFiltersBtn" class="button" title="Lọc UI Trình Duyệt">Lọc Client</button>
+          <button id="systemFiltersBtn" class="button" title="Lọc Ingestion Backend"><span class="lbl-full">Lọc System</span><span class="lbl-short">System</span></button>
+          <button id="clientFiltersBtn" class="button mobile-hide" title="Lọc UI Trình Duyệt">Lọc Client</button>
           <label class="group-chip active" title="Bật/Tắt Lọc Client trên UI"><input type="checkbox" id="clientFilterToggle" checked> Lọc Client</label>
-          <button id="watchBtn" class="button">Theo dõi</button>
-          <button id="phoneBtn" class="button">Điện thoại</button>
-          <button id="nextPhoneBtn" class="button primary">Tin mới nhất</button>
+          <button id="watchBtn" class="button"><span class="lbl-full">Theo dõi</span><span class="lbl-short">Nhóm</span></button>
+          <button id="phoneBtn" class="button"><span class="lbl-full">Điện thoại</span><span class="lbl-short">Phone</span></button>
+          <button id="nextPhoneBtn" class="button primary"><span class="lbl-full">Tin mới nhất</span><span class="lbl-short">Mới nhất</span></button>
           <button id="logoutBtn" class="button">Thoát</button>
         </div>
       </div>
@@ -2068,7 +2161,10 @@
         btn.title = collapsed ? 'Mở rộng header' : 'Thu gọn header';
         btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       }
-      apply(localStorage.getItem(storageKey) === '1');
+      apply(localStorage.getItem(storageKey) === '1' || (
+        localStorage.getItem(storageKey) === null
+        && window.matchMedia('(max-width: 640px)').matches
+      ));
       btn.addEventListener('click', () => {
         const next = !shell.classList.contains('header-collapsed');
         apply(next);

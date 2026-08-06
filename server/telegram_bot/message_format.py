@@ -19,8 +19,14 @@ def telethon_message_to_html(message) -> Optional[str]:
 
 def broadcast_text_from_payload(message_text: str, payload: dict) -> Tuple[str, Optional[str]]:
     html_text = str(payload.get("telegram_html") or "").strip()
+    pre_deeplink = str(payload.get("deeplink") or "").strip()
+    source_url = str(payload.get("source_url") or "").strip() or None
     if html_text:
-        converted, _ = replace_urls_in_html(html_text)
+        converted, _ = replace_urls_in_html(
+            html_text,
+            resolved_deeplink=pre_deeplink if pre_deeplink.startswith("snssdk1180://") else None,
+            source_url=source_url,
+        )
         return converted, "HTML"
 
     plain = (message_text or "").strip()

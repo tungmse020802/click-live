@@ -45,7 +45,7 @@ def sync_broadcast_enabled() -> bool:
 
 def sync_lead_seconds() -> float:
     try:
-        return max(0.5, float(os.environ.get("PHONE_SYNC_LEAD_SECONDS", "2.5")))
+        return max(0.5, float(os.environ.get("PHONE_SYNC_LEAD_SECONDS", "1.0")))
     except ValueError:
         return 2.5
 

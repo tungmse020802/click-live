@@ -154,7 +154,9 @@ def open_link_for_queue(
     if not source_url:
         return {"ok": False, "error": "Missing url"}
 
-    broadcast_deeplink = resolve_deeplink_for_broadcast(message_text, queue_payload) or ""
+    broadcast_deeplink = str(queue_payload.get("deeplink") or "").strip()
+    if not broadcast_deeplink.startswith("snssdk1180://"):
+        broadcast_deeplink = resolve_deeplink_for_broadcast(message_text, queue_payload) or ""
 
     resolved = resolve_link_for_open(source_url, context)
     if not resolved.get("ok") and not broadcast_deeplink:

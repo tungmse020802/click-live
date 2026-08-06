@@ -106,7 +106,7 @@ def _resolve_on_worker(
             if done.is_set():
                 return
             try:
-                page.wait_for_load_state("networkidle", timeout=5000)
+                page.wait_for_load_state("networkidle", timeout=2000)
             except Exception:
                 pass
 

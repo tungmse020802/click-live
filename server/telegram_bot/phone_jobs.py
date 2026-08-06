@@ -33,12 +33,12 @@ def extract_link_from_item(item: Dict[str, Any]) -> str:
     message = item.get("message") or {}
     message_text = str(message.get("text") or "")
 
-    deeplink = resolve_deeplink_for_broadcast(message_text, payload)
-    if deeplink and deeplink.startswith(DEEPLINK_PREFIX):
-        return deeplink
-
     deeplink = str(payload.get("deeplink") or payload.get("deep_link") or "").strip()
     if deeplink.startswith(DEEPLINK_PREFIX):
+        return deeplink
+
+    deeplink = resolve_deeplink_for_broadcast(message_text, payload)
+    if deeplink and deeplink.startswith(DEEPLINK_PREFIX):
         return deeplink
 
     context = item_context_from_parts(message_text, payload)

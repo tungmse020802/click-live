@@ -7,10 +7,15 @@ import html as html_module
 import json
 import os
 import re
+import threading
+import time
 import urllib.parse
 import urllib.request
 from typing import Any, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
+
+_cache_lock = threading.Lock()
+_deeplink_api_cache: dict[str, tuple[float, str]] = {}
 
 DEEPLINK_PREFIX = "snssdk1180://live?room_id="
 BASE62_CHARS = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -32,11 +37,35 @@ def deeplink_api_base_url() -> str:
     return os.environ.get("DEEPLINK_API_BASE_URL", "http://127.0.0.1:8792").rstrip("/")
 
 
+def deeplink_api_timeout() -> float:
+    try:
+        return max(3.0, float(os.environ.get("DEEPLINK_API_TIMEOUT_SECONDS", "20")))
+    except ValueError:
+        return 20.0
+
+
+def deeplink_cache_ttl_seconds() -> float:
+    try:
+        return max(60.0, float(os.environ.get("DEEPLINK_CACHE_TTL_SECONDS", "600")))
+    except ValueError:
+        return 600.0
+
+
 def resolve_via_deeplink_api(url: str, context: str = "") -> Optional[str]:
-    params = urllib.parse.urlencode({"url": url, "context": context or url})
+    key = (url or "").strip()
+    if not key:
+        return None
+
+    now = time.time()
+    with _cache_lock:
+        cached = _deeplink_api_cache.get(key)
+        if cached and now - cached[0] < deeplink_cache_ttl_seconds():
+            return cached[1]
+
+    params = urllib.parse.urlencode({"url": key, "context": context or key})
     endpoint = f"{deeplink_api_base_url()}/api/deeplink?{params}"
     try:
-        with urllib.request.urlopen(endpoint, timeout=90) as response:
+        with urllib.request.urlopen(endpoint, timeout=deeplink_api_timeout()) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception:
         return None
@@ -44,6 +73,8 @@ def resolve_via_deeplink_api(url: str, context: str = "") -> Optional[str]:
         return None
     deeplink = str(payload.get("deeplink") or "").strip()
     if deeplink.startswith(DEEPLINK_PREFIX):
+        with _cache_lock:
+            _deeplink_api_cache[key] = (now, deeplink)
         return deeplink
     return None
 
@@ -561,6 +592,19 @@ def enrich_payload_with_deeplink(message_text: str, payload: dict) -> dict:
     if enriched.get("telegram_html"):
         combined = f"{combined}\n{enriched['telegram_html']}"
 
+    room_id = extract_thanhtai_countdown_room_id(combined)
+    if room_id:
+        enriched["deeplink"] = f"{DEEPLINK_PREFIX}{room_id}"
+        enriched["room_id"] = room_id
+        hex_url = find_thanhtai_hex_url(combined)
+        if hex_url:
+            enriched.setdefault("source_url", hex_url)
+        else:
+            source_url = find_first_convertible_url(combined)
+            if source_url:
+                enriched.setdefault("source_url", source_url)
+        return enriched
+
     hex_url = find_thanhtai_hex_url(combined)
     if hex_url:
         api_deeplink = resolve_via_deeplink_api(hex_url, hex_url)
@@ -618,6 +662,10 @@ def resolve_deeplink_for_broadcast(message_text: str = "", payload: Optional[dic
     """Same deeplink resolution as broadcast worker (replace_urls_in_html / enrich)."""
     payload = dict(payload or {})
     message_text = message_text or ""
+
+    existing = str(payload.get("deeplink") or "").strip()
+    if existing.startswith(DEEPLINK_PREFIX):
+        return existing
 
     enriched = enrich_payload_with_deeplink(message_text, payload)
     pre_resolved = str(enriched.get("deeplink") or "").strip()

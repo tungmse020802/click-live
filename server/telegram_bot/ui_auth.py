@@ -119,13 +119,13 @@ LOGIN_HTML = r"""<!doctype html>
 <html lang="vi">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Đăng nhập — Telegram Bot Panel</title>
   <style>
     :root { --bg:#f5f6f8; --surface:#fff; --border:#d7dce2; --text:#20242a; --muted:#66707b; --blue:#1d5fd0; --red:#b42318; }
     * { box-sizing:border-box; }
-    body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
-    .card { width:min(420px, calc(100vw - 32px)); background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:28px; box-shadow:0 8px 24px rgba(20,28,38,.08); }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--text); font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; padding:max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom)); }
+    .card { width:min(420px, 100%); background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:28px 22px; box-shadow:0 8px 24px rgba(20,28,38,.08); }
     h1 { margin:0 0 8px; font-size:22px; }
     p { margin:0 0 20px; color:var(--muted); font-size:14px; line-height:1.5; }
     label { display:block; margin:14px 0 6px; color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }

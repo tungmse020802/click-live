@@ -319,10 +319,24 @@ FILTERS_HTML = r"""<!doctype html>
     .groups-empty a { color:var(--blue); text-decoration:none; }
     .empty { color:var(--muted); padding:40px 12px; text-align:center; }
     @media (max-width:920px) {
+      body { overflow-x:hidden; }
+      .topbar { flex-direction:column; align-items:stretch; padding:12px 14px; min-height:0; gap:10px; }
+      .toolbar { width:100%; gap:6px; }
+      .toolbar .button { flex:1 1 calc(50% - 3px); min-height:40px; }
       .main { grid-template-columns:1fr; }
-      .list-pane { max-height:34vh; border-right:0; border-bottom:1px solid var(--line); }
+      .list-pane { max-height:min(38vh,300px); border-right:0; border-bottom:1px solid var(--line); }
+      .list-head { flex-wrap:wrap; }
+      .list-head .button { flex:1 1 calc(33% - 4px); min-height:40px; }
+      .editor { padding:14px; }
       .meta-bar { grid-template-columns:1fr; }
-      .range input { width:68px; }
+      .msg-line { align-items:flex-start; }
+      .range { flex-wrap:wrap; }
+      .range input { width:min(78px, 28vw); }
+      .group-grid { grid-template-columns:1fr; max-height:240px; }
+      .groups-panel-head { flex-direction:column; }
+    }
+    @media (max-width:520px) {
+      .toolbar .button, .list-head .button { flex:1 1 100%; }
     }
   </style>
 </head>
@@ -892,6 +906,20 @@ BROADCAST_HTML = r"""<!doctype html>
     .bot-meta { color:var(--muted); font-size:12px; margin-top:4px; line-height:1.45; word-break:break-all; }
     .pill.ok { color:var(--green); background:#eaf7ee; border:1px solid #a8dfba; }
     .pill.err { color:var(--red); background:#fff0ee; border:1px solid #f5b6ad; }
+    @media (max-width:920px) {
+      body { overflow-x:hidden; }
+      .main { grid-template-columns:1fr; }
+      .list-pane { max-height:min(42vh,320px); border-right:0; border-bottom:1px solid var(--border); }
+      .topbar,.subbar { flex-direction:column; align-items:stretch; padding:12px 14px; min-height:0; gap:10px; }
+      .toolbar { width:100%; gap:6px; }
+      .toolbar .button { flex:1 1 calc(50% - 3px); min-height:40px; }
+      .form-grid { grid-template-columns:1fr; }
+      .editor { padding:12px 14px; }
+      .bot-grid { grid-template-columns:1fr; }
+    }
+    @media (max-width:520px) {
+      .toolbar .button { flex:1 1 100%; }
+    }
   </style>
 </head>
 <body>
@@ -1156,6 +1184,18 @@ BOTS_HTML = r"""<!doctype html>
     .hint,.status { margin-top:12px; padding:10px; border:1px solid var(--border); border-radius:6px; background:#fbfcfd; color:var(--muted); font-size:13px; line-height:1.45; }
     .hint { margin-top:0; margin-bottom:12px; background:#fffdf5; border-color:#f0d199; }
     .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+    @media (max-width:920px) {
+      body { overflow-x:hidden; }
+      .topbar,.subbar { flex-direction:column; align-items:stretch; padding:12px 14px; min-height:0; gap:10px; }
+      .toolbar { width:100%; gap:6px; }
+      .toolbar .button { flex:1 1 calc(50% - 3px); min-height:40px; }
+      .main { padding:12px 14px; }
+      .card { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+      table { min-width:640px; }
+    }
+    @media (max-width:520px) {
+      .toolbar .button { flex:1 1 100%; }
+    }
   </style>
 </head>
 <body>
@@ -1308,6 +1348,20 @@ WATCH_HTML = r"""<!doctype html>
     .filter-panel select { width:100%; border:1px solid var(--border); border-radius:6px; padding:9px 10px; }
     .filter-custom { display:none; margin-top:12px; }
     .filter-custom.open { display:block; }
+    @media (max-width:920px) {
+      body { overflow-x:hidden; }
+      .main { grid-template-columns:1fr; }
+      .list-pane { max-height:min(42vh,320px); border-right:0; border-bottom:1px solid var(--border); }
+      .topbar,.subbar { flex-direction:column; align-items:stretch; padding:12px 14px; min-height:0; gap:10px; }
+      .toolbar { width:100%; gap:6px; }
+      .toolbar .button { flex:1 1 calc(50% - 3px); min-height:40px; }
+      .form-grid { grid-template-columns:1fr; }
+      .editor { padding:12px 14px; }
+      .bot-add-row { flex-direction:column; align-items:stretch; }
+    }
+    @media (max-width:520px) {
+      .toolbar .button { flex:1 1 100%; }
+    }
   </style>
 </head>
 <body>
@@ -1664,7 +1718,18 @@ PHONE_MONITOR_HTML = r"""<!doctype html>
     .light { background:#fff; color:#20242a; border-color:#d7dce2; }
     .primary { background:#1d5fd0; border-color:#3170df; }
     pre { min-height:220px; max-height:55vh; overflow:auto; background:#111827; color:#d1d5db; border-radius:8px; padding:12px; white-space:pre-wrap; }
-    @media (max-width:720px){ .topbar{align-items:flex-start; flex-direction:column; padding:12px;} .row{grid-template-columns:1fr 1fr;} }
+    @media (max-width:720px){
+      .topbar{align-items:flex-start; flex-direction:column; padding:12px 14px; min-height:0; gap:10px;}
+      .toolbar{width:100%; gap:6px;}
+      .toolbar .button{flex:1 1 calc(50% - 3px); min-height:40px;}
+      .main{padding:12px 14px;}
+      .row{grid-template-columns:1fr;}
+      .actions .button{flex:1 1 calc(50% - 4px);}
+      pre{max-height:45vh; font-size:12px;}
+    }
+    @media (max-width:520px){
+      .toolbar .button,.actions .button{flex:1 1 100%;}
+    }
   </style>
 </head>
 <body>
@@ -2376,7 +2441,7 @@ class QueueUiHandler(BaseHTTPRequestHandler):
 
         deadline = time.time() + wait_seconds
         while wait_seconds > 0 and time.time() < deadline:
-            time.sleep(1)
+            time.sleep(0.25)
             pushed = pop_phone_open(device_id)
             if pushed:
                 return {"generated_at": datetime.now(timezone.utc).isoformat(), "config": _phone_config(), "job": pushed}

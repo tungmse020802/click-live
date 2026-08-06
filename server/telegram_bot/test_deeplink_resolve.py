@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from deeplink_resolve import (
@@ -14,6 +15,7 @@ from deeplink_resolve import (
     resolve_deeplink_for_broadcast,
     resolve_link_for_open,
     resolve_live_url,
+    resolve_via_deeplink_api,
 )
 from desktop_relay import normalize_open_url
 
@@ -103,10 +105,31 @@ class DeeplinkResolveTest(unittest.TestCase):
         text = "live https://thanhtai.io/r/b946e6e0f7a2"
         html = '<a href="https://thanhtai.io/countdow?data=NzY2MDU0NjMxMjc0ODEwODU2Ng">box</a>'
         with patch("deeplink_resolve.resolve_via_deeplink_api") as api_mock:
-            api_mock.return_value = "snssdk1180://live?room_id=7660546312748108566"
             payload = enrich_payload_with_deeplink(text, {"telegram_html": html})
+        api_mock.assert_not_called()
         self.assertEqual(payload["deeplink"], "snssdk1180://live?room_id=7660546312748108566")
         self.assertEqual(payload.get("source_url"), "https://thanhtai.io/r/b946e6e0f7a2")
+
+    def test_resolve_via_deeplink_api_uses_cache(self) -> None:
+        from unittest.mock import MagicMock, patch
+
+        import deeplink_resolve
+
+        deeplink_resolve._deeplink_api_cache.clear()
+        with patch("deeplink_resolve.urllib.request.urlopen") as urlopen_mock:
+            response = MagicMock()
+            response.read.return_value = json.dumps(
+                {"ok": True, "deeplink": DEEPLINK}
+            ).encode("utf-8")
+            response.__enter__.return_value = response
+            urlopen_mock.return_value = response
+
+            first = resolve_via_deeplink_api(THANHTAI)
+            second = resolve_via_deeplink_api(THANHTAI)
+
+        self.assertEqual(first, DEEPLINK)
+        self.assertEqual(second, DEEPLINK)
+        self.assertEqual(urlopen_mock.call_count, 1)
 
     def test_build_thanhtai_countdown_url(self) -> None:
         self.assertEqual(
