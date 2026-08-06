@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#17212b">
-  <meta name="click-live-queue-version" content="mobile-responsive-v7">
+  <meta name="click-live-queue-version" content="mobile-responsive-v8">
   <title>Hàng đợi — Telegram</title>
   <style>
     :root {
@@ -23,28 +23,34 @@
       --tg-border: #242f3d;
       --tg-input: #242f3d;
       --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --safe-top: env(safe-area-inset-top, 0px);
     }
 
     * { box-sizing: border-box; }
 
     html, body {
       margin: 0;
+      width: 100%;
       height: 100%;
       max-width: 100%;
-      overflow-x: hidden;
+      overflow: hidden;
       background: var(--tg-bg);
       color: var(--tg-text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
       -webkit-font-smoothing: antialiased;
+      overscroll-behavior: none;
     }
 
     button, input, select { font: inherit; }
 
     .shell {
+      height: 100%;
       height: 100dvh;
-      display: grid;
-      grid-template-rows: auto auto 1fr;
+      max-height: 100dvh;
+      display: flex;
+      flex-direction: column;
       overflow: hidden;
+      min-width: 0;
     }
 
     .queue-subheader {
@@ -83,10 +89,6 @@
       line-height: 1;
     }
 
-    .shell.header-collapsed {
-      grid-template-rows: auto 1fr;
-    }
-
     .shell.header-collapsed .stats-bar,
     .shell.header-collapsed .toolbar,
     .shell.header-collapsed .live-status,
@@ -96,7 +98,14 @@
     }
 
     .shell.header-collapsed .queue-subheader {
+      display: none;
       border-bottom: 0;
+    }
+
+    .topbar,
+    .queue-subheader {
+      flex: 0 0 auto;
+      min-width: 0;
     }
 
     .group-filter-bar {
@@ -349,6 +358,7 @@
     .desktop-dot.online { background: var(--tg-green); }
 
     .chat-shell {
+      flex: 1 1 0;
       min-height: 0;
       overflow: hidden;
       display: flex;
@@ -357,9 +367,14 @@
     }
 
     .chat-feed {
-      flex: 1 1 auto;
+      flex: 1 1 0;
       min-height: 0;
-      overflow-y: auto;
+      height: 100%;
+      overflow-x: hidden;
+      overflow-y: scroll;
+      -webkit-overflow-scrolling: touch;
+      overscroll-behavior-y: contain;
+      touch-action: pan-y;
       padding: 12px 12px calc(12px + var(--safe-bottom));
       display: flex;
       flex-direction: column;
@@ -568,41 +583,38 @@
 
     @media (max-width: 640px) {
       html, body {
-        height: auto;
-        min-height: 100%;
-        overflow-x: hidden;
-        overflow-y: auto;
-        -webkit-overflow-scrolling: touch;
+        height: 100%;
+        height: 100dvh;
+        overflow: hidden;
+        position: fixed;
+        inset: 0;
+        width: 100%;
       }
 
       .shell {
-        height: auto;
-        min-height: 100dvh;
+        height: 100%;
+        max-height: 100%;
         min-width: 0;
-        overflow: visible;
-        display: flex;
-        flex-direction: column;
-      }
-
-      .shell.header-collapsed {
-        min-height: 100dvh;
+        overflow: hidden;
       }
 
       .chat-shell {
-        overflow: visible;
-        min-height: auto;
-        flex: 1 1 auto;
+        flex: 1 1 0;
+        min-height: 0;
+        overflow: hidden;
       }
 
       .chat-feed {
-        overflow: visible;
-        flex: none;
-        min-height: auto;
-        overscroll-behavior: auto;
+        flex: 1 1 0;
+        min-height: 0;
+        overflow-y: scroll;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-y: contain;
+        touch-action: pan-y;
       }
 
       .jump-newest {
-        position: fixed;
+        position: absolute;
       }
 
       .lbl-full { display: none; }
@@ -612,8 +624,12 @@
       .topbar {
         flex-direction: column;
         align-items: stretch;
-        padding: max(8px, env(safe-area-inset-top)) 10px 8px;
+        padding: max(8px, var(--safe-top)) 10px 8px;
         gap: 8px;
+        max-height: min(52dvh, 420px);
+        overflow-x: hidden;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
       }
 
       .topbar-row {
@@ -1920,22 +1936,11 @@
       renderChat();
     }
 
-    function usesPageScroll() {
-      return window.matchMedia('(max-width: 640px)').matches;
-    }
-
     function currentScrollTop() {
-      if (usesPageScroll()) {
-        return window.scrollY || document.documentElement.scrollTop || 0;
-      }
       return els.feed?.scrollTop || 0;
     }
 
     function isPinnedToTop() {
-      if (usesPageScroll()) {
-        const feedTop = els.feed?.getBoundingClientRect().top ?? 999;
-        return feedTop >= -state.scrollPinThreshold;
-      }
       return (els.feed?.scrollTop || 0) <= state.scrollPinThreshold;
     }
 
@@ -1951,18 +1956,10 @@
 
     function jumpToNewest() {
       releaseBufferedItems();
-      if (usesPageScroll()) {
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-        return;
-      }
       els.feed?.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     function restoreScrollAfterRender(prevScrollTop, firstPaint) {
-      if (usesPageScroll()) {
-        window.scrollTo(0, firstPaint ? 0 : prevScrollTop);
-        return;
-      }
       if (els.feed) {
         els.feed.scrollTop = firstPaint ? 0 : prevScrollTop;
       }
@@ -2207,10 +2204,6 @@
     }
 
     els.feed?.addEventListener('scroll', handleFeedScroll, { passive: true });
-    window.addEventListener('scroll', () => {
-      if (!usesPageScroll()) return;
-      handleFeedScroll();
-    }, { passive: true });
 
     (function initHeaderCollapse() {
       const shell = document.querySelector('.shell');
@@ -2223,7 +2216,9 @@
         btn.title = collapsed ? 'Mở rộng header' : 'Thu gọn header';
         btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       }
-      apply(localStorage.getItem(storageKey) === '1');
+      const saved = localStorage.getItem(storageKey);
+      const defaultCollapsed = window.matchMedia('(max-width: 640px)').matches;
+      apply(saved === '1' || (saved === null && defaultCollapsed));
       btn.addEventListener('click', () => {
         const next = !shell.classList.contains('header-collapsed');
         apply(next);
