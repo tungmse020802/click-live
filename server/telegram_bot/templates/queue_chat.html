@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#17212b">
-  <meta name="click-live-queue-version" content="group-name-display-v4">
+  <meta name="click-live-queue-version" content="mobile-responsive-v5">
   <title>Hàng đợi — Telegram</title>
   <style>
     :root {
@@ -30,6 +30,8 @@
     html, body {
       margin: 0;
       height: 100%;
+      max-width: 100%;
+      overflow-x: hidden;
       background: var(--tg-bg);
       color: var(--tg-text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
@@ -218,10 +220,45 @@
 
     .toolbar {
       display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
+      flex-direction: column;
+      gap: 8px;
       width: 100%;
+      min-width: 0;
+    }
+
+    .toolbar-filters,
+    .toolbar-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      width: 100%;
+      min-width: 0;
+    }
+
+    .toolbar-filters {
+      flex: 1 1 auto;
+    }
+
+    .toolbar-actions {
+      flex: 1 1 auto;
+    }
+
+    @media (min-width: 641px) {
+      .topbar {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: flex-start;
+      }
+
+      .toolbar {
+        flex: 1 1 360px;
+        flex-direction: column;
+      }
+
+      .live-status {
+        flex-basis: 100%;
+      }
     }
 
     .control {
@@ -275,14 +312,16 @@
 
     .stats-bar {
       display: flex;
-      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
       padding: 8px 12px;
-      overflow-x: auto;
       background: var(--tg-panel);
       border-bottom: 1px solid var(--tg-border);
-      scrollbar-width: none;
+      width: 100%;
+      min-width: 0;
+      box-sizing: border-box;
     }
-    .stats-bar::-webkit-scrollbar { display: none; }
 
     .stat-pill {
       flex: 0 0 auto;
@@ -436,6 +475,16 @@
       color: var(--tg-muted);
       padding: 4px 0 0;
       min-height: 18px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    .live-status .live-line {
+      display: block;
+    }
+
+    .live-status .live-line + .live-line {
+      margin-top: 2px;
     }
 
     .jump-newest {
@@ -481,11 +530,218 @@
     }
 
     @media (min-width: 900px) {
-      .toolbar { width: auto; flex: 0 0 auto; }
+      .toolbar { width: auto; flex: 0 0 auto; flex-direction: row; flex-wrap: wrap; align-items: center; }
+      .toolbar-filters,
+      .toolbar-actions { width: auto; flex: 0 0 auto; }
       .chat-feed {
         max-width: 720px;
         margin: 0 auto;
         width: 100%;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .shell {
+        height: 100dvh;
+        min-width: 0;
+      }
+
+      .topbar {
+        flex-direction: column;
+        align-items: stretch;
+        padding: max(8px, env(safe-area-inset-top)) 10px 8px;
+        gap: 8px;
+      }
+
+      .topbar-row {
+        gap: 6px;
+      }
+
+      .brand h1 {
+        font-size: 15px;
+      }
+
+      .brand .sub {
+        font-size: 11px;
+        white-space: normal;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+
+      .toolbar-filters {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+
+      .toolbar-filters .control {
+        width: 100%;
+        flex: none;
+        min-width: 0;
+        height: 40px;
+        font-size: 13px;
+      }
+
+      .toolbar-filters .checkbox {
+        grid-column: 1 / -1;
+        justify-content: center;
+        height: 36px;
+        background: var(--tg-input);
+        border-radius: 8px;
+        padding: 0 10px;
+      }
+
+      .toolbar-filters #reloadBtn {
+        grid-column: 1 / -1;
+        width: 100%;
+        height: 40px;
+      }
+
+      .toolbar-actions {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+
+      .toolbar-actions .button {
+        width: 100%;
+        min-width: 0;
+        height: 40px;
+        padding: 0 6px;
+        font-size: 11px;
+      }
+
+      .toolbar-actions .button.primary {
+        grid-column: 1 / -1;
+        font-size: 13px;
+        height: 44px;
+      }
+
+      .toolbar-actions .group-chip {
+        grid-column: 1 / -1;
+        justify-content: center;
+        max-width: none;
+        margin: 0 !important;
+        height: 40px;
+        border-radius: 8px;
+      }
+
+      .toolbar-actions #logoutBtn {
+        grid-column: 1 / -1;
+      }
+
+      .stats-bar {
+        padding: 8px 10px;
+        gap: 5px;
+      }
+
+      .stat-pill {
+        height: 28px;
+        padding: 0 8px;
+        font-size: 11px;
+        max-width: 100%;
+      }
+
+      .stat-pill strong {
+        font-size: 12px;
+      }
+
+      .live-status {
+        font-size: 11px;
+        padding-bottom: 2px;
+      }
+
+      .queue-subheader {
+        min-width: 0;
+      }
+
+      .group-filter-bar {
+        flex-direction: column;
+        align-items: stretch;
+        padding: 8px 10px;
+        gap: 6px;
+      }
+
+      .group-filter-title {
+        line-height: 1.3;
+        white-space: normal;
+      }
+
+      .group-checkbox-list {
+        flex: 1 1 100%;
+        width: 100%;
+        gap: 5px;
+      }
+
+      .group-chip {
+        flex: 1 1 calc(50% - 4px);
+        min-width: 0;
+        max-width: 100%;
+        white-space: normal;
+        line-height: 1.25;
+        min-height: 36px;
+        padding: 6px 8px;
+      }
+
+      .group-chip-text {
+        white-space: normal;
+        overflow: visible;
+        text-overflow: unset;
+      }
+
+      .group-filter-actions {
+        width: 100%;
+        justify-content: stretch;
+      }
+
+      .group-filter-actions .chip-btn {
+        flex: 1 1 0;
+        height: 36px;
+        font-size: 12px;
+      }
+
+      .chat-feed {
+        padding: 8px 10px calc(10px + var(--safe-bottom));
+        gap: 8px;
+      }
+
+      .chat-message {
+        padding: 10px;
+      }
+
+      .chat-head {
+        gap: 4px 8px;
+      }
+
+      .chat-room {
+        white-space: normal;
+        word-break: break-word;
+        flex: 1 1 100%;
+      }
+
+      .chat-body {
+        font-size: 14px;
+      }
+
+      .chat-actions {
+        flex-direction: column;
+      }
+
+      .chat-actions .button,
+      .chat-actions .button.open-link {
+        width: 100%;
+        min-height: 44px;
+      }
+
+      .jump-newest {
+        left: 10px;
+        right: 10px;
+        transform: none;
+        width: auto;
+        max-width: calc(100% - 20px);
+        justify-content: center;
       }
     }
   </style>
@@ -501,27 +757,31 @@
         </div>
       </div>
       <div class="toolbar">
-        <select id="statusFilter" class="control" aria-label="Trạng thái">
-          <option value="" selected>Tất cả (30 phút)</option>
-          <option value="pending">Chờ xử lý</option>
-          <option value="processing">Đang xử lý</option>
-          <option value="done">Hoàn thành</option>
-          <option value="dead,failed">Lỗi</option>
-        </select>
-        <select id="limitFilter" class="control" aria-label="Số tin">
-          <option value="25">25 tin</option>
-          <option value="50" selected>50 tin</option>
-          <option value="100">100 tin</option>
-        </select>
-        <label class="checkbox"><input id="autoRefresh" type="checkbox" checked> Live</label>
-        <button id="reloadBtn" class="button" title="Tải lại">↻</button>
-        <button id="systemFiltersBtn" class="button" title="Lọc Ingestion Backend">Lọc System</button>
-        <button id="clientFiltersBtn" class="button" title="Lọc UI Trình Duyệt">Lọc Client</button>
-        <label class="group-chip active" style="margin:0 4px; padding:3px 8px; font-weight:600;" title="Bật/Tắt Lọc Client trên UI"><input type="checkbox" id="clientFilterToggle" checked> Lọc Client</label>
-        <button id="watchBtn" class="button">Theo dõi</button>
-        <button id="phoneBtn" class="button">Điện thoại</button>
-        <button id="nextPhoneBtn" class="button primary">Tin mới nhất</button>
-        <button id="logoutBtn" class="button">Thoát</button>
+        <div class="toolbar-filters">
+          <select id="statusFilter" class="control" aria-label="Trạng thái">
+            <option value="" selected>Tất cả (30 phút)</option>
+            <option value="pending">Chờ xử lý</option>
+            <option value="processing">Đang xử lý</option>
+            <option value="done">Hoàn thành</option>
+            <option value="dead,failed">Lỗi</option>
+          </select>
+          <select id="limitFilter" class="control" aria-label="Số tin">
+            <option value="25">25 tin</option>
+            <option value="50" selected>50 tin</option>
+            <option value="100">100 tin</option>
+          </select>
+          <label class="checkbox"><input id="autoRefresh" type="checkbox" checked> Live</label>
+          <button id="reloadBtn" class="button" title="Tải lại">↻ Tải lại</button>
+        </div>
+        <div class="toolbar-actions">
+          <button id="systemFiltersBtn" class="button" title="Lọc Ingestion Backend">Lọc System</button>
+          <button id="clientFiltersBtn" class="button" title="Lọc UI Trình Duyệt">Lọc Client</button>
+          <label class="group-chip active" title="Bật/Tắt Lọc Client trên UI"><input type="checkbox" id="clientFilterToggle" checked> Lọc Client</label>
+          <button id="watchBtn" class="button">Theo dõi</button>
+          <button id="phoneBtn" class="button">Điện thoại</button>
+          <button id="nextPhoneBtn" class="button primary">Tin mới nhất</button>
+          <button id="logoutBtn" class="button">Thoát</button>
+        </div>
       </div>
       <div class="live-status" id="liveStatus">Đang khởi động...</div>
     </header>
@@ -1183,6 +1443,10 @@
       `;
     }
 
+    function isMobileLayout() {
+      return window.matchMedia('(max-width: 640px)').matches;
+    }
+
     function renderLiveStatus(data) {
       const t = data.generated_at
         ? new Date(data.generated_at).toLocaleTimeString('vi-VN', { timeZone: VN_TZ, hour12: false })
@@ -1196,6 +1460,13 @@
         ? ` · theo dõi ${state.watchSummary.enabled} nhóm`
         : '';
       const buffered = state.newArrivalCount > 0 ? ` · +${state.newArrivalCount} tin mới (bấm ↑)` : '';
+      if (isMobileLayout()) {
+        els.liveStatus.innerHTML = `
+          <span class="live-line">${esc(dot)} · ${esc(t)} · ${shown} tin${esc(watchNote)}</span>
+          <span class="live-line">Giữ ${ttlMin} phút${esc(buffered)} · Mở → desktop + phone</span>
+        `;
+        return;
+      }
       els.liveStatus.textContent = `${dot} · ${t} · ${shown} tin${watchNote}${buffered} · giữ ${ttlMin} phút · Mở link → desktop + deeplink điện thoại`;
     }
 
@@ -1804,6 +2075,10 @@
         localStorage.setItem(storageKey, next ? '1' : '0');
       });
     })();
+
+    window.addEventListener('resize', () => {
+      if (state.lastData) renderLiveStatus(state.lastData);
+    }, { passive: true });
 
     loadAuthUser()
       .then(() => loadClientFilterConfig())
