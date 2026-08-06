@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#17212b">
-  <meta name="click-live-queue-version" content="mobile-responsive-v6">
+  <meta name="click-live-queue-version" content="mobile-responsive-v7">
   <title>Hàng đợi — Telegram</title>
   <style>
     :root {
@@ -567,9 +567,42 @@
     }
 
     @media (max-width: 640px) {
+      html, body {
+        height: auto;
+        min-height: 100%;
+        overflow-x: hidden;
+        overflow-y: auto;
+        -webkit-overflow-scrolling: touch;
+      }
+
       .shell {
-        height: 100dvh;
+        height: auto;
+        min-height: 100dvh;
         min-width: 0;
+        overflow: visible;
+        display: flex;
+        flex-direction: column;
+      }
+
+      .shell.header-collapsed {
+        min-height: 100dvh;
+      }
+
+      .chat-shell {
+        overflow: visible;
+        min-height: auto;
+        flex: 1 1 auto;
+      }
+
+      .chat-feed {
+        overflow: visible;
+        flex: none;
+        min-height: auto;
+        overscroll-behavior: auto;
+      }
+
+      .jump-newest {
+        position: fixed;
       }
 
       .lbl-full { display: none; }
@@ -1887,7 +1920,22 @@
       renderChat();
     }
 
+    function usesPageScroll() {
+      return window.matchMedia('(max-width: 640px)').matches;
+    }
+
+    function currentScrollTop() {
+      if (usesPageScroll()) {
+        return window.scrollY || document.documentElement.scrollTop || 0;
+      }
+      return els.feed?.scrollTop || 0;
+    }
+
     function isPinnedToTop() {
+      if (usesPageScroll()) {
+        const feedTop = els.feed?.getBoundingClientRect().top ?? 999;
+        return feedTop >= -state.scrollPinThreshold;
+      }
       return (els.feed?.scrollTop || 0) <= state.scrollPinThreshold;
     }
 
@@ -1903,10 +1951,18 @@
 
     function jumpToNewest() {
       releaseBufferedItems();
+      if (usesPageScroll()) {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
       els.feed?.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     function restoreScrollAfterRender(prevScrollTop, firstPaint) {
+      if (usesPageScroll()) {
+        window.scrollTo(0, firstPaint ? 0 : prevScrollTop);
+        return;
+      }
       if (els.feed) {
         els.feed.scrollTop = firstPaint ? 0 : prevScrollTop;
       }
@@ -1923,7 +1979,7 @@
       const latestId = sorted[0]?.id || 0;
       const hadItemsBefore = state.lastRenderedLatestId > 0;
       const firstPaint = !hadItemsBefore;
-      const prevScrollTop = els.feed?.scrollTop || 0;
+      const prevScrollTop = currentScrollTop();
 
       if (!sorted.length) {
         if (els.feed) {
@@ -2140,7 +2196,7 @@
       loadQueue({ force: true });
     });
     els.jumpNewestBtn?.addEventListener('click', jumpToNewest);
-    els.feed?.addEventListener('scroll', () => {
+    function handleFeedScroll() {
       const pinned = isPinnedToTop();
       if (state.wasPinnedToTop && !pinned && state.lastRenderedLatestId > 0) {
         state.displayTopId = state.lastRenderedLatestId;
@@ -2148,6 +2204,12 @@
       }
       updateJumpNewestButton();
       state.wasPinnedToTop = pinned;
+    }
+
+    els.feed?.addEventListener('scroll', handleFeedScroll, { passive: true });
+    window.addEventListener('scroll', () => {
+      if (!usesPageScroll()) return;
+      handleFeedScroll();
     }, { passive: true });
 
     (function initHeaderCollapse() {
@@ -2161,10 +2223,7 @@
         btn.title = collapsed ? 'Mở rộng header' : 'Thu gọn header';
         btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
       }
-      apply(localStorage.getItem(storageKey) === '1' || (
-        localStorage.getItem(storageKey) === null
-        && window.matchMedia('(max-width: 640px)').matches
-      ));
+      apply(localStorage.getItem(storageKey) === '1');
       btn.addEventListener('click', () => {
         const next = !shell.classList.contains('header-collapsed');
         apply(next);
