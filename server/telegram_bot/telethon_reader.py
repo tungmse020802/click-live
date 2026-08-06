@@ -36,12 +36,41 @@ class TelethonReader:
         self._unknown_chat_ids_logged: Set[int] = set()
         self._last_prune_at = 0.0
         self._last_message_ids: Dict[str, int] = {}
+        self._room_locks: Dict[str, asyncio.Lock] = {}
+        self._handle_sem = asyncio.Semaphore(max(1, int(config.handle_concurrency)))
+        self._inflight_tasks: Set[asyncio.Task] = set()
         self.filter_engine = MessageFilterEngine(
             enabled=config.filter_enabled,
             config_path=config.filter_config_path,
             reload_seconds=config.filter_reload_seconds,
             default_priority=config.queue_default_priority,
         )
+
+    def _room_lock(self, room_key: str) -> asyncio.Lock:
+        lock = self._room_locks.get(room_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._room_locks[room_key] = lock
+        return lock
+
+    def _spawn_handle(self, message: Message, event_chat_id: Optional[int]) -> None:
+        task = asyncio.create_task(self._handle_message_guarded(message, event_chat_id))
+        self._inflight_tasks.add(task)
+        task.add_done_callback(self._inflight_tasks.discard)
+
+    async def _handle_message_guarded(
+        self,
+        message: Message,
+        event_chat_id: Optional[int],
+    ) -> None:
+        async with self._handle_sem:
+            try:
+                await self._handle_message(message, event_chat_id)
+            except Exception:
+                logger.exception(
+                    "Failed to handle Telegram client message chat_id=%s",
+                    event_chat_id,
+                )
 
     async def run(self) -> None:
         self.db.init_schema()
@@ -167,12 +196,14 @@ class TelethonReader:
 
             @client.on(events.NewMessage(chats=entities))
             async def on_new_message(event) -> None:
-                try:
-                    await self._handle_message(event.message, event.chat_id)
-                except Exception:
-                    logger.exception("Failed to handle Telegram client message chat_id=%s", event.chat_id)
+                self._spawn_handle(event.message, event.chat_id)
 
-            logger.warning("Telegram client reader ready targets=%s", len(entities))
+            logger.warning(
+                "Telegram client reader ready targets=%s handle_concurrency=%s history_parallel=%s",
+                len(entities),
+                self.config.handle_concurrency,
+                True,
+            )
             heartbeat_task = asyncio.create_task(
                 self._heartbeat(client, len(entities), target_signature)
             )
@@ -190,6 +221,8 @@ class TelethonReader:
                     await history_poll_task
                 except asyncio.CancelledError:
                     pass
+                if self._inflight_tasks:
+                    await asyncio.gather(*list(self._inflight_tasks), return_exceptions=True)
         finally:
             await client.disconnect()
 
@@ -237,34 +270,48 @@ class TelethonReader:
         watch_targets: List[Tuple[TelegramClientTarget, Any, int]],
     ) -> None:
         while True:
-            for target, entity, peer_id in watch_targets:
-                try:
-                    min_id = self._last_message_ids.get(target.room_key, 0)
-                    limit = 1 if self.config.queue_only_newest else self.config.history_poll_limit
-                    if self.config.queue_only_newest:
-                        newest = None
-                        async for message in client.iter_messages(
-                            entity,
-                            limit=limit,
-                            min_id=min_id,
-                        ):
-                            newest = message
-                            break
-                        if newest is not None:
-                            await self._handle_message(newest, peer_id)
-                    else:
-                        messages = []
-                        async for message in client.iter_messages(
-                            entity,
-                            limit=limit,
-                            min_id=min_id,
-                        ):
-                            messages.append(message)
-                        for message in reversed(messages):
-                            await self._handle_message(message, peer_id)
-                except Exception:
-                    logger.exception("Failed to poll Telegram history target=%s", target.label)
+            await asyncio.gather(
+                *[
+                    self._poll_history_target(client, target, entity, peer_id)
+                    for target, entity, peer_id in watch_targets
+                ]
+            )
             await asyncio.sleep(self.config.history_poll_seconds)
+
+    async def _poll_history_target(
+        self,
+        client: TelegramClient,
+        target: TelegramClientTarget,
+        entity: Any,
+        peer_id: int,
+    ) -> None:
+        try:
+            min_id = self._last_message_ids.get(target.room_key, 0)
+            limit = 1 if self.config.queue_only_newest else self.config.history_poll_limit
+            if self.config.queue_only_newest:
+                newest = None
+                async for message in client.iter_messages(
+                    entity,
+                    limit=limit,
+                    min_id=min_id,
+                ):
+                    newest = message
+                    break
+                if newest is not None:
+                    await self._handle_message(newest, peer_id)
+                return
+
+            messages = []
+            async for message in client.iter_messages(
+                entity,
+                limit=limit,
+                min_id=min_id,
+            ):
+                messages.append(message)
+            for message in reversed(messages):
+                await self._handle_message(message, peer_id)
+        except Exception:
+            logger.exception("Failed to poll Telegram history target=%s", target.label)
 
     async def _handle_message(self, message: Message, event_chat_id: Optional[int]) -> None:
         text = (message.message or message.raw_text or "").strip()
@@ -280,6 +327,17 @@ class TelethonReader:
                     logger.debug("Skipping Telegram message for unknown chat_id=%s", raw_id)
             return
 
+        async with self._room_lock(target.room_key):
+            await self._handle_message_locked(message, event_chat_id, target, text, telegram_html)
+
+    async def _handle_message_locked(
+        self,
+        message: Message,
+        event_chat_id: Optional[int],
+        target: TelegramClientTarget,
+        text: str,
+        telegram_html: Optional[str],
+    ) -> None:
         last_seen = self._last_message_ids.get(target.room_key, 0)
         if message.id <= last_seen:
             return
@@ -391,7 +449,13 @@ class TelethonReader:
                     ),
                     **({"telegram_html": telegram_html} if telegram_html else {}),
                 }
-                queue_payload = enrich_payload_with_deeplink(text, queue_payload)
+                if self.config.enrich_deeplink_on_enqueue:
+                    # Sync HTTP resolve blocks Telethon; keep off by default (UI/phone resolve lazy).
+                    queue_payload = await asyncio.to_thread(
+                        enrich_payload_with_deeplink,
+                        text,
+                        queue_payload,
+                    )
                 chat_message_id, queue_id = self.db.insert_message_and_enqueue(
                     room_id=room_id,
                     user_id=user_id,

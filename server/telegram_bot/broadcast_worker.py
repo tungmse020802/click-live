@@ -48,6 +48,8 @@ def main() -> None:
             consumer_id=f"broadcast-worker-{index + 1}",
             prefer_fair=True,
             prefer_newest=False,
+            skip_older_pending=config.broadcast_skip_older_pending,
+            skip_older_after_seconds=config.broadcast_skip_older_after_seconds,
         )
         workers.append(worker)
 

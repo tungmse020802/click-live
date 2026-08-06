@@ -26,6 +26,8 @@ class BotConfig:
     queue_max_attempts: int
     queue_retry_delay_seconds: int
     broadcast_workers: int
+    broadcast_skip_older_pending: bool
+    broadcast_skip_older_after_seconds: int
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,8 @@ class TelegramClientConfig:
     broadcast_enabled: bool
     reader_id: str
     use_env_targets_only: bool
+    handle_concurrency: int
+    enrich_deeplink_on_enqueue: bool
 
 
 @dataclass(frozen=True)
@@ -366,7 +370,17 @@ def load_config() -> BotConfig:
         queue_poll_interval_seconds=_parse_float("BOT_QUEUE_POLL_INTERVAL_SECONDS", 0.1, 0.05),
         queue_max_attempts=_parse_int("BOT_QUEUE_MAX_ATTEMPTS", 5, 1),
         queue_retry_delay_seconds=_parse_int("BOT_QUEUE_RETRY_DELAY_SECONDS", 2, 0),
-        broadcast_workers=_parse_int("BOT_BROADCAST_WORKERS", 4, 1),
+        broadcast_workers=_parse_int("BOT_BROADCAST_WORKERS", 8, 1),
+        broadcast_skip_older_pending=_parse_bool(
+            os.environ.get("BOT_BROADCAST_SKIP_OLDER_PENDING", ""),
+            True,
+        ),
+        # Giữ tin pending trên UI trước khi thu hồi (supersede). Mặc định 5 phút.
+        broadcast_skip_older_after_seconds=_parse_int(
+            "BOT_BROADCAST_SKIP_OLDER_AFTER_SECONDS",
+            300,
+            0,
+        ),
     )
 
 
@@ -482,7 +496,7 @@ def load_telegram_client_config() -> TelegramClientConfig:
             True,
         ),
         queue_max_age_seconds=_parse_int("TELEGRAM_CLIENT_QUEUE_MAX_AGE_SECONDS", 300, 1),
-        history_poll_seconds=_parse_float("TELEGRAM_CLIENT_HISTORY_POLL_SECONDS", 2.0, 0.5),
+        history_poll_seconds=_parse_float("TELEGRAM_CLIENT_HISTORY_POLL_SECONDS", 2.0, 0.2),
         history_poll_limit=_parse_int("TELEGRAM_CLIENT_HISTORY_POLL_LIMIT", 1, 1),
         queue_only_newest=_parse_bool(
             os.environ.get("TELEGRAM_CLIENT_QUEUE_ONLY_NEWEST", ""),
@@ -505,6 +519,11 @@ def load_telegram_client_config() -> TelegramClientConfig:
         reader_id=os.environ.get("TELEGRAM_CLIENT_READER_ID", "app1").strip() or "app1",
         use_env_targets_only=_parse_bool(
             os.environ.get("TELEGRAM_CLIENT_USE_ENV_TARGETS", ""),
+            False,
+        ),
+        handle_concurrency=_parse_int("TELEGRAM_CLIENT_HANDLE_CONCURRENCY", 8, 1),
+        enrich_deeplink_on_enqueue=_parse_bool(
+            os.environ.get("TELEGRAM_CLIENT_ENRICH_DEEPLINK_ON_ENQUEUE", ""),
             False,
         ),
     )

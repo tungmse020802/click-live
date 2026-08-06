@@ -1250,9 +1250,45 @@ class ChatDatabase:
             ).fetchall()
         return [int(row["room_id"]) for row in rows]
 
-    def skip_older_pending_for_room(self, room_id: int, before_job_id: int) -> int:
+    def skip_older_pending_for_room(
+        self,
+        room_id: int,
+        before_job_id: int,
+        *,
+        keep_seconds: float = 0,
+    ) -> int:
+        """Mark/defer older pending jobs in the same room after a newer job finishes.
+
+        keep_seconds > 0: giữ status=pending trên UI, hoãn claim; sau keep_seconds
+        sẽ được finalize thành done (thu hồi).
+        keep_seconds <= 0: thu hồi (done) ngay như trước.
+        """
         now = _now()
         with self._connect() as conn:
+            if keep_seconds and keep_seconds > 0:
+                hold_until = now + float(keep_seconds)
+                cursor = conn.execute(
+                    """
+                    UPDATE message_queue
+                    SET available_at = CASE
+                            WHEN available_at < ? THEN ?
+                            ELSE available_at
+                        END,
+                        last_error = 'deferred supersede',
+                        updated_at = ?
+                    WHERE status = 'pending'
+                        AND room_id = ?
+                        AND id < ?
+                        AND (
+                            last_error IS NULL
+                            OR last_error != 'deferred supersede'
+                            OR available_at < ?
+                        )
+                    """,
+                    (hold_until, hold_until, now, room_id, before_job_id, hold_until),
+                )
+                return int(cursor.rowcount)
+
             cursor = conn.execute(
                 """
                 UPDATE message_queue
@@ -1265,6 +1301,25 @@ class ChatDatabase:
                     AND id < ?
                 """,
                 (now, now, room_id, before_job_id),
+            )
+            return int(cursor.rowcount)
+
+    def finalize_deferred_supersedes(self) -> int:
+        """Thu hồi (done) các pending đã hết thời gian giữ sau deferred supersede."""
+        now = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE message_queue
+                SET status = 'done',
+                    last_error = 'superseded by newer room message',
+                    completed_at = ?,
+                    updated_at = ?
+                WHERE status = 'pending'
+                    AND last_error = 'deferred supersede'
+                    AND available_at <= ?
+                """,
+                (now, now, now),
             )
             return int(cursor.rowcount)
 

@@ -33,6 +33,8 @@ class QueueWorker:
         prefer_fair: bool = False,
         stale_skip_seconds: Optional[float] = None,
         bots: Optional[List[Bot]] = None,
+        skip_older_pending: bool = True,
+        skip_older_after_seconds: float = 300,
     ):
         self.db = db
         self.chatbot = chatbot
@@ -48,8 +50,11 @@ class QueueWorker:
         self.prefer_newest = prefer_newest
         self.prefer_fair = prefer_fair
         self.stale_skip_seconds = stale_skip_seconds
+        self.skip_older_pending = skip_older_pending
+        self.skip_older_after_seconds = max(0.0, float(skip_older_after_seconds or 0))
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._last_finalize_supersede_at = 0.0
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -75,6 +80,13 @@ class QueueWorker:
                 released = self.db.release_expired_jobs()
                 if released:
                     logger.debug("Released expired queue jobs count=%s", released)
+
+                now = time.time()
+                if now - self._last_finalize_supersede_at >= 5:
+                    finalized = self.db.finalize_deferred_supersedes()
+                    self._last_finalize_supersede_at = now
+                    if finalized:
+                        logger.debug("Finalized deferred supersedes count=%s", finalized)
 
                 if self.stale_skip_seconds:
                     skipped = self.db.skip_stale_pending_jobs(self.stale_skip_seconds)
@@ -208,13 +220,20 @@ class QueueWorker:
         if sent_count == 0:
             raise RuntimeError("; ".join(errors) or "Broadcast failed for all groups")
 
-        superseded = self.db.skip_older_pending_for_room(job.room_id, job.id)
+        superseded = 0
+        if self.skip_older_pending:
+            superseded = self.db.skip_older_pending_for_room(
+                job.room_id,
+                job.id,
+                keep_seconds=self.skip_older_after_seconds,
+            )
         if superseded:
             logger.debug(
-                "Superseded older pending jobs room_id=%s count=%s after job_id=%s",
+                "Deferred/superseded older pending jobs room_id=%s count=%s after job_id=%s keep=%ss",
                 job.room_id,
                 superseded,
                 job.id,
+                self.skip_older_after_seconds,
             )
 
         note = f"broadcast sent={sent_count}/{len(groups)}"

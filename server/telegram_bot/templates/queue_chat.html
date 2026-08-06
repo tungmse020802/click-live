@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#17212b">
-  <meta name="click-live-queue-version" content="mobile-responsive-v10">
+  <meta name="click-live-queue-version" content="mobile-responsive-v12">
   <title>Hàng đợi — Telegram</title>
   <style>
     :root {
@@ -904,7 +904,7 @@
       <div class="toolbar">
         <div class="toolbar-filters">
           <select id="statusFilter" class="control" aria-label="Trạng thái">
-            <option value="" selected>Tất cả (30 phút)</option>
+            <option value="" selected>Tất cả (TTL)</option>
             <option value="pending">Chờ xử lý</option>
             <option value="processing">Đang xử lý</option>
             <option value="done">Hoàn thành</option>
@@ -921,7 +921,7 @@
         <div class="toolbar-actions">
           <button id="systemFiltersBtn" class="button" title="Lọc Ingestion Backend"><span class="lbl-full">Lọc System</span><span class="lbl-short">System</span></button>
           <button id="clientFiltersBtn" class="button mobile-hide" title="Lọc UI Trình Duyệt">Lọc Client</button>
-          <label class="group-chip active" title="Bật/Tắt Lọc Client trên UI"><input type="checkbox" id="clientFilterToggle" checked> Lọc Client</label>
+          <label class="group-chip active" title="Bật/Tắt Lọc Client trên UI (ẩn tin không khớp rule)"><input type="checkbox" id="clientFilterToggle"> Lọc Client</label>
           <button id="watchBtn" class="button"><span class="lbl-full">Theo dõi</span><span class="lbl-short">Nhóm</span></button>
           <button id="phoneBtn" class="button"><span class="lbl-full">Điện thoại</span><span class="lbl-short">Phone</span></button>
           <button id="nextPhoneBtn" class="button primary"><span class="lbl-full">Tin mới nhất</span><span class="lbl-short">Mới nhất</span></button>
@@ -1592,6 +1592,13 @@
       return window.matchMedia('(max-width: 640px)').matches;
     }
 
+    function clientFilterHiddenCount() {
+      if (!els.clientFilterToggle?.checked || !state.clientFilterConfig) return 0;
+      const afterGroup = sortedItems().filter(itemMatchesGroup);
+      const afterClient = afterGroup.filter((item) => matchesClientFilter(item, state.clientFilterConfig));
+      return Math.max(0, afterGroup.length - afterClient.length);
+    }
+
     function renderLiveStatus(data) {
       const t = data.generated_at
         ? new Date(data.generated_at).toLocaleTimeString('vi-VN', { timeZone: VN_TZ, hour12: false })
@@ -1605,14 +1612,18 @@
         ? ` · theo dõi ${state.watchSummary.enabled} nhóm`
         : '';
       const buffered = state.newArrivalCount > 0 ? ` · +${state.newArrivalCount} tin mới (bấm ↑)` : '';
+      const hiddenByClient = clientFilterHiddenCount();
+      const clientNote = hiddenByClient > 0
+        ? ` · Lọc Client đang ẩn ${hiddenByClient} tin`
+        : '';
       if (isMobileLayout()) {
         els.liveStatus.innerHTML = `
-          <span class="live-line">${esc(dot)} · ${esc(t)} · ${shown} tin${esc(watchNote)}</span>
+          <span class="live-line">${esc(dot)} · ${esc(t)} · ${shown} tin${esc(watchNote)}${esc(clientNote)}</span>
           <span class="live-line">Giữ ${ttlMin} phút${esc(buffered)} · Mở → desktop + phone</span>
         `;
         return;
       }
-      els.liveStatus.textContent = `${dot} · ${t} · ${shown} tin${watchNote}${buffered} · giữ ${ttlMin} phút · Mở link → desktop + deeplink điện thoại`;
+      els.liveStatus.textContent = `${dot} · ${t} · ${shown} tin${watchNote}${clientNote}${buffered} · giữ ${ttlMin} phút · Mở link → desktop + deeplink điện thoại`;
     }
 
     function sortedItems(items = state.items) {
@@ -1978,6 +1989,13 @@
       if (els.clientFilterToggle?.checked && state.clientFilterConfig) {
         sorted = sorted.filter((item) => matchesClientFilter(item, state.clientFilterConfig));
       }
+      // Đang xem đỉnh feed → tự nhả buffer tin mới (tránh vừa lên đã “biến” vì chưa bấm ↑)
+      if (isPinnedToTop() && sorted.length) {
+        state.displayTopId = latestItemId(sorted);
+        state.newArrivalCount = 0;
+        updateJumpNewestButton();
+        return;
+      }
       if (state.displayTopId === 0) {
         state.displayTopId = latestItemId(sorted);
         state.newArrivalCount = 0;
@@ -2210,7 +2228,21 @@
     }));
     els.systemFiltersBtn?.addEventListener('click', () => { location.href = '/filters'; });
     els.clientFiltersBtn?.addEventListener('click', () => { location.href = '/client-filters'; });
+    try {
+      const savedClientToggle = localStorage.getItem('click-live-client-filter-toggle');
+      if (els.clientFilterToggle && savedClientToggle != null) {
+        els.clientFilterToggle.checked = savedClientToggle === '1';
+        els.clientFilterToggle.closest('.group-chip')?.classList.toggle('active', els.clientFilterToggle.checked);
+      }
+    } catch {}
     els.clientFilterToggle?.addEventListener('change', () => {
+      try {
+        localStorage.setItem(
+          'click-live-client-filter-toggle',
+          els.clientFilterToggle.checked ? '1' : '0'
+        );
+      } catch {}
+      els.clientFilterToggle.closest('.group-chip')?.classList.toggle('active', els.clientFilterToggle.checked);
       renderChat();
       renderLiveStatus(state.lastData || {});
     });
