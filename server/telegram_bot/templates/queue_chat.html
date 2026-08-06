@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#17212b">
-  <meta name="click-live-queue-version" content="mobile-responsive-v9">
+  <meta name="click-live-queue-version" content="mobile-responsive-v10">
   <title>Hàng đợi — Telegram</title>
   <style>
     :root {
@@ -1642,23 +1642,92 @@
       localStorage.setItem('click-live-disabled-group-keys', JSON.stringify([...state.disabledGroupKeys]));
     }
 
+    /** Khi chat_id đổi (-100… ↔ -…), bỏ alias số cũ; chỉ giữ key/tên nhóm hiện tại. */
+    function migrateDisabledGroupKeys(groups = []) {
+      if (!state.disabledGroupKeys) {
+        state.disabledGroupKeys = loadDisabledGroupKeys();
+      }
+      const next = new Set();
+      const knownKeys = new Set();
+      const aliasToKey = new Map();
+
+      groups.forEach((g) => {
+        const key = String(g.key || g.chat_id || '').trim();
+        if (!key) return;
+        knownKeys.add(key);
+        const aliases = g.aliases || [...chatIdAliases(g.chat_id || key)];
+        aliases.forEach((alias) => aliasToKey.set(String(alias), key));
+        aliasToKey.set(key, key);
+        const name = String(g.name || g.label || '').trim();
+        if (name) aliasToKey.set(name, key);
+      });
+
+      let changed = false;
+      for (const raw of state.disabledGroupKeys) {
+        const value = String(raw || '').trim();
+        if (!value) continue;
+
+        // Key đúng với nhóm hiện tại → giữ
+        if (knownKeys.has(value)) {
+          next.add(value);
+          continue;
+        }
+
+        const mapped = aliasToKey.get(value);
+        const numeric = isNumericId(value.replace(/^#+/, ''));
+
+        // Tên nhóm (moon_2) → map sang key hiện tại
+        if (!numeric && mapped) {
+          next.add(mapped);
+          if (mapped !== value) changed = true;
+          continue;
+        }
+
+        // Alias số cũ (-1003431776950 sau khi đổi thành -3431776950) → bỏ, không ẩn nhóm
+        changed = true;
+      }
+
+      if (changed || next.size !== state.disabledGroupKeys.size) {
+        state.disabledGroupKeys = next;
+        saveDisabledGroupKeys();
+      }
+    }
+
+    function isGroupDisabled(group) {
+      if (!state.disabledGroupKeys || state.disabledGroupKeys.size === 0) return false;
+      const key = String(group?.key || group?.chat_id || '').trim();
+      if (key && state.disabledGroupKeys.has(key)) return true;
+      const name = String(group?.name || group?.label || '').trim();
+      if (name && state.disabledGroupKeys.has(name)) return true;
+      return false;
+    }
+
     function itemMatchesGroup(item) {
       if (!state.disabledGroupKeys || state.disabledGroupKeys.size === 0) return true;
       const room = item.room || {};
       const chatId = String(room.chat_id || '').trim();
       const title = String(room.title || room.display_name || '').trim();
-      const aliases = new Set([...chatIdAliases(chatId), ...chatIdAliases(title)]);
-      for (const alias of aliases) {
-        if (state.disabledGroupKeys.has(alias)) return false;
+      const itemAliases = new Set([...chatIdAliases(chatId), ...chatIdAliases(title)]);
+      const payloadLabel = String((item.payload || {}).target_label || '').trim();
+      if (payloadLabel && state.disabledGroupKeys.has(payloadLabel)) return false;
+
+      const watchGroups = state.watchGroups || [];
+      let matchedWatch = false;
+      for (const g of watchGroups) {
+        const groupKey = String(g.chat_id || '').trim();
+        const groupAliases = [...chatIdAliases(groupKey)];
+        const overlaps = groupAliases.some((ga) => itemAliases.has(ga));
+        if (!overlaps) continue;
+        matchedWatch = true;
+        if (isGroupDisabled({ key: groupKey, chat_id: groupKey, name: g.name })) {
+          return false;
+        }
       }
-      const itemAliases = aliases;
-      for (const g of state.watchGroups || []) {
-        const groupAliases = [...chatIdAliases(g.chat_id)];
-        const disabled = groupAliases.some((key) => state.disabledGroupKeys.has(key))
-          || state.disabledGroupKeys.has(String(g.chat_id || '').trim())
-          || state.disabledGroupKeys.has(String(g.name || '').trim());
-        if (!disabled) continue;
-        if (groupAliases.some((ga) => itemAliases.has(ga))) return false;
+      if (matchedWatch) return true;
+
+      // Tin không thuộc watch group đã biết: ẩn nếu chính chat_id đang disabled
+      for (const alias of itemAliases) {
+        if (state.disabledGroupKeys.has(alias)) return false;
       }
       return true;
     }
@@ -1729,9 +1798,7 @@
 
       els.groupFilterBar.style.display = 'flex';
 
-      if (!state.disabledGroupKeys) {
-        state.disabledGroupKeys = loadDisabledGroupKeys();
-      }
+      migrateDisabledGroupKeys(allGroups);
 
       const sig = allGroups.map(g => `${g.key}:${g.label}`).sort().join('||');
       if (sig === state.groupKeysSignature) {
