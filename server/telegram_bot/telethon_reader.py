@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from telethon import TelegramClient, events
-from telethon.errors import AuthKeyDuplicatedError
+from telethon.errors import AuthKeyDuplicatedError, ChannelPrivateError, RPCError
 from telethon.tl.custom.message import Message
 
 from config import (
@@ -104,7 +104,25 @@ class TelethonReader:
             entities = []
             watch_targets: List[Tuple[TelegramClientTarget, Any, int]] = []
             for target in targets:
-                entity = await client.get_entity(_entity_ref_value(target.entity_ref))
+                try:
+                    entity = await client.get_entity(_entity_ref_value(target.entity_ref))
+                except ChannelPrivateError:
+                    logger.error(
+                        "Skipping Telegram target label=%s room=%s — private or no access (acc not in group?)",
+                        target.label,
+                        target.room_key,
+                    )
+                    continue
+                except RPCError as exc:
+                    logger.error(
+                        "Skipping Telegram target label=%s room=%s — %s: %s",
+                        target.label,
+                        target.room_key,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    continue
+
                 peer_id = _marked_peer_id(entity)
                 if peer_id in self.entity_to_target:
                     logger.info(
