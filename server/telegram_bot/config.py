@@ -304,10 +304,27 @@ def normalize_client_chat_ref(chat_ref: str) -> str:
     return value
 
 
+def chat_id_aliases(chat_id: str) -> List[str]:
+    """Telegram peer id aliases: -100343… ↔ -343…"""
+    aliases: List[str] = []
+    raw = normalize_client_chat_ref(str(chat_id or ""))
+    if not raw:
+        return aliases
+    aliases.append(raw)
+    if raw.startswith("-100") and len(raw) > 4 and raw[4:].isdigit():
+        aliases.append("-" + raw[4:])
+    elif raw.startswith("-") and not raw.startswith("-100") and raw[1:].isdigit():
+        aliases.append("-100" + raw[1:])
+    # de-dupe preserve order
+    return list(dict.fromkeys(aliases))
+
+
 def client_target_from_watch_group(group: Dict[str, Any]) -> TelegramClientTarget:
     label = str(group.get("name") or group.get("chat_id") or "").strip()
     chat_ref = normalize_client_chat_ref(str(group.get("chat_id") or "").strip())
     entity_ref = _telegram_client_entity_ref(chat_ref)
+    # entity_ref dùng để get_entity; room_key giữ chat_ref cấu hình.
+    # telethon_reader sẽ upsert chat_rooms theo peer id thật (-100…).
     room_key = chat_ref or entity_ref
     return TelegramClientTarget(
         label=label or room_key,

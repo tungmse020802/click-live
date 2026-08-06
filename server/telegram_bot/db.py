@@ -3,7 +3,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -549,6 +549,56 @@ class ChatDatabase:
                 return None
             return int(cursor.lastrowid)
 
+    def insert_message_and_enqueue(
+        self,
+        *,
+        room_id: int,
+        user_id: Optional[int],
+        platform_message_id: str,
+        direction: str,
+        text: str,
+        created_at: Optional[float],
+        priority: int,
+        payload: Dict[str, Any],
+        max_attempts: int,
+    ) -> Tuple[Optional[int], Optional[int]]:
+        """Insert chat message + queue row in one transaction (avoids FK race)."""
+        now = float(created_at) if created_at is not None else _now()
+        enqueue_at = _now()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO chat_messages(
+                    room_id, user_id, platform_message_id, direction, text, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (room_id, user_id, platform_message_id, direction, text, now),
+            )
+            if cursor.rowcount == 0:
+                return None, None
+            message_id = int(cursor.lastrowid)
+            queue_cursor = conn.execute(
+                """
+                INSERT INTO message_queue(
+                    message_id, room_id, status, priority, payload_json,
+                    attempts, max_attempts, available_at, created_at, updated_at
+                )
+                VALUES (?, ?, 'pending', ?, ?, 0, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    room_id,
+                    priority,
+                    json.dumps(payload, ensure_ascii=False),
+                    max_attempts,
+                    enqueue_at,
+                    enqueue_at,
+                    enqueue_at,
+                ),
+            )
+            return message_id, int(queue_cursor.lastrowid)
+
     def max_telegram_message_id_for_room(self, room_id: int) -> int:
         with self._connect() as conn:
             row = conn.execute(
@@ -868,18 +918,24 @@ class ChatDatabase:
         reader_id: str,
         chat_id: str,
     ) -> Dict[str, Any]:
+        from config import chat_id_aliases
+
+        candidates = chat_id_aliases(chat_id) or [str(chat_id or "").strip()]
         with self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT reader_id, chat_id, mode, filters_json, reject_json, updated_at
-                FROM reader_group_filters
-                WHERE reader_id = ? AND chat_id = ?
-                """,
-                (reader_id, chat_id),
-            ).fetchone()
-        if row is None:
-            return _default_reader_group_filter()
-        return _row_to_reader_group_filter(row)
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                row = conn.execute(
+                    """
+                    SELECT reader_id, chat_id, mode, filters_json, reject_json, updated_at
+                    FROM reader_group_filters
+                    WHERE reader_id = ? AND chat_id = ?
+                    """,
+                    (reader_id, candidate),
+                ).fetchone()
+                if row is not None:
+                    return _row_to_reader_group_filter(row)
+        return _default_reader_group_filter()
 
     def upsert_reader_group_filter(
         self,

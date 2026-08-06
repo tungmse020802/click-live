@@ -138,23 +138,25 @@ class TelethonReader:
                 entities.append(entity)
                 watch_targets.append((target, entity, peer_id))
                 title = _entity_title(entity) or target.label
-                self.room_ids[target.room_key] = self.db.upsert_chat_room(
+                canonical_chat_id = str(peer_id)
+                room_id = self.db.upsert_chat_room(
                     platform=PLATFORM,
-                    chat_id=target.room_key,
+                    chat_id=canonical_chat_id,
                     chat_type="client",
                     title=title,
                 )
-                room_id = self.room_ids[target.room_key]
+                self.room_ids[target.room_key] = room_id
+                self.room_ids[canonical_chat_id] = room_id
                 if self.config.skip_existing_on_start:
                     self._last_message_ids[target.room_key] = (
                         self.db.max_telegram_message_id_for_room(room_id)
                     )
                 else:
                     self._last_message_ids[target.room_key] = 0
-                logger.debug(
+                logger.warning(
                     "Watching Telegram target label=%s room=%s entity=%s title=%r last_message_id=%s",
                     target.label,
-                    target.room_key,
+                    canonical_chat_id,
                     peer_id,
                     title,
                     self._last_message_ids[target.room_key],
@@ -337,20 +339,17 @@ class TelethonReader:
 
             room_id = self.room_ids[target.room_key]
             direction = "outgoing" if message.out else "incoming"
-            platform_message_id = f"{target.room_key}:{message.id}"
+            canonical_chat_id = target.room_key
+            for raw_id in _message_chat_ids(message, event_chat_id):
+                text_id = str(raw_id)
+                if text_id.startswith("-100"):
+                    canonical_chat_id = text_id
+                    break
+                canonical_chat_id = text_id
+            platform_message_id = f"{canonical_chat_id}:{message.id}"
             message_created_at = None
             if timestamp_ms is not None:
                 message_created_at = timestamp_ms / 1000.0
-            chat_message_id = self.db.insert_chat_message_if_new(
-                room_id=room_id,
-                user_id=user_id,
-                platform_message_id=platform_message_id,
-                direction=direction,
-                text=text,
-                created_at=message_created_at,
-            )
-            if chat_message_id is None:
-                return
 
             if direction == "incoming" and self.config.enqueue:
                 if self.config.supersede_pending:
@@ -374,9 +373,9 @@ class TelethonReader:
                         "bot_broadcast" if self.config.broadcast_enabled else "none"
                     ),
                     "target_label": target.label,
-                    "target_url": _target_web_url(target.room_key),
+                    "target_url": _target_web_url(canonical_chat_id),
                     "message_key": platform_message_id,
-                    "target_room": target.room_key,
+                    "target_room": canonical_chat_id,
                     "entity_ref": target.entity_ref,
                     "telegram_message_id": message.id,
                     "telegram_timestamp_ms": timestamp_ms,
@@ -393,20 +392,37 @@ class TelethonReader:
                     **({"telegram_html": telegram_html} if telegram_html else {}),
                 }
                 queue_payload = enrich_payload_with_deeplink(text, queue_payload)
-                queue_id = self.db.enqueue_message(
-                    message_id=chat_message_id,
+                chat_message_id, queue_id = self.db.insert_message_and_enqueue(
                     room_id=room_id,
+                    user_id=user_id,
+                    platform_message_id=platform_message_id,
+                    direction=direction,
+                    text=text,
+                    created_at=message_created_at,
                     priority=queue_priority,
                     payload=queue_payload,
                     max_attempts=self.config.queue_max_attempts,
                 )
+                if chat_message_id is None:
+                    return
                 logger.debug(
                     "Enqueued Telegram client message room=%s message=%s queue=%s",
-                    target.room_key,
+                    canonical_chat_id,
                     message.id,
                     queue_id,
                 )
                 self._prune_queue()
+            else:
+                chat_message_id = self.db.insert_chat_message_if_new(
+                    room_id=room_id,
+                    user_id=user_id,
+                    platform_message_id=platform_message_id,
+                    direction=direction,
+                    text=text,
+                    created_at=message_created_at,
+                )
+                if chat_message_id is None:
+                    return
         finally:
             self._last_message_ids[target.room_key] = max(
                 self._last_message_ids.get(target.room_key, 0),
